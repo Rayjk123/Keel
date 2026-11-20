@@ -49,4 +49,6 @@ BASE_URL=http://localhost:11434/v1 MODEL=qwen3-coder:30b \
 - [How it works](how-it-works.md): the loop, the command format and the limits.
 - [Adapters](adapters.md): the message format, and how to support a new API.
 - [Benchmarks](benchmarks.md): run Terminal-Bench, Aider Polyglot and SWE-bench.
+- [Results](results.md): the scoreboard, with a chart of pass rates for every run.
+- [Harness changes](harness-changes.md): the ledger of improvements to try, one at a time.
 - [AWS Bedrock](bedrock.md): use Claude and other models on Bedrock.

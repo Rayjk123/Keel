@@ -1,0 +1,478 @@
+$ ls -la
+$ ls -la xarray/
+$ ls -la xarray/core/
+$ cd xarray && python -c "
+import numpy as np
+import xarray as xr
+
+# Reproduce the issue
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print('Stacked:', stacked)
+unstacked = stacked.to_unstacked_dataset('y')
+print('Unstacked:', unstacked)
+"
+$ grep -n "to_stacked_array\|to_unstacked_dataset" xarray/core/dataarray.py
+$ grep -A 50 "def to_unstacked_dataset" xarray/core/dataarray.py
+$ grep -A 100 "def to_unstacked_dataset" xarray/core/dataarray.py | head -60
+$ grep -A 150 "def to_unstacked_dataset" xarray/core/dataarray.py | tail -80
+$ sed -n '1901,2000p' xarray/core/dataarray.py
+$ grep -n "to_stacked_array" xarray/core/dataset.py
+$ sed -n '3370,3480p' xarray/core/dataset.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test current behavior 
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print('Stacked array:')
+print(stacked)
+print()
+
+# Show what happens when we extract one variable
+extracted_a = stacked.sel({'variable': 'a'}).squeeze(drop=True)
+print('Extracted variable a:')
+print(extracted_a)
+print()
+
+# Try to create dataset with this approach - should fail
+try:
+    data_dict = {'a': extracted_a}
+    result = xr.Dataset(data_dict)
+    print('Dataset creation succeeded:', result)
+except Exception as e:
+    print('Dataset creation failed:', e)
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test current behavior 
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print('Original dataset:')
+print(data)
+print()
+
+print('Stacked array:')
+print(stacked)
+print()
+
+# What we want to get back - the original data
+print('Expected result (original data):')
+print(data)
+print()
+
+# Let's manually extract what should be in the unstacked dataset
+print('Manual extraction approach:')
+print('Variable a should have coordinates x=[0,1,2] and no y coordinate')
+print('Variable b should have coordinates x=[0,1,2] and no y coordinate')
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test with a more complex case that works according to docstring
+arr = xr.DataArray(
+     np.arange(6).reshape(2, 3),
+     coords=[('x', ['a', 'b']), ('y', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr.isel(y=0)})
+print('Original dataset:')
+print(data)
+print()
+
+stacked = data.to_stacked_array('z', sample_dims=['x'])
+print('Stacked array:')
+print(stacked)
+print()
+
+# Check what we get back from unstacking - this should work according to docstring
+try:
+    roundtripped = stacked.to_unstacked_dataset(dim='z')
+    print('Roundtrip succeeded:')
+    print(roundtripped)
+    print()
+    print('Are they identical?', data.identical(roundtripped))
+except Exception as e:
+    print('Roundtrip failed:', e)
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test with single-dim variables (the failing case)
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+print('Original dataset:')
+print(data)
+print()
+
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print('Stacked array:')
+print(stacked)
+print()
+
+# Let's debug what happens when we select each variable
+print('Debug selecting variables:')
+var_a = stacked.sel({'variable': 'a'})
+print('Variable a after selection:')
+print(var_a)
+print()
+
+var_b = stacked.sel({'variable': 'b'})
+print('Variable b after selection:')
+print(var_b)
+print()
+
+# Try to extract without the y coordinate
+var_a_clean = var_a.squeeze(drop=True)
+print('Variable a cleaned:')
+print(var_a_clean)
+print()
+
+var_b_clean = var_b.squeeze(drop=True)
+print('Variable b cleaned:')
+print(var_b_clean)
+print()
+"
+$ cd /testbed && python -c "
+# Let's manually test a potential fix approach
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Extract variables properly
+idx = stacked.indexes['y']
+level_number = idx._get_level_number('variable')  # This should be level 0
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+print('Variables:', variables)
+print('Variable dim:', variable_dim)
+
+data_dict = {}
+for k in variables:
+    selected = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    print(f'\\nSelected variable {k}:')
+    print(selected)
+    print('Coords before cleaning:', list(selected.coords.keys()))
+    
+    # Create a clean version without the stacking coordinate
+    clean_selected = selected.copy()
+    if variable_dim in clean_selected.coords:
+        del clean_selected.coords[variable_dim]
+    data_dict[k] = clean_selected
+
+print('\\nData dict keys:', list(data_dict.keys()))
+print('Data dict values:')
+for k, v in data_dict.items():
+    print(f'{k}: {v}')
+
+# Try creating dataset - this should work now
+try:
+    result = xr.Dataset(data_dict)
+    print('\\nDataset creation succeeded!')
+    print(result)
+except Exception as e:
+    print('\\nDataset creation failed:', e)
+"
+$ cd /testbed && python -c "
+# Test a better approach - actually remove coordinates from the selected arrays
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Extract variables properly and clean coordinates
+idx = stacked.indexes['y']
+level_number = idx._get_level_number('variable')
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+print('Variable dim:', variable_dim)
+
+data_dict = {}
+for k in variables:
+    selected = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    
+    # Create a clean copy without the stacking coordinate
+    clean_selected = selected.copy()
+    # Remove the coordinate that was used for stacking (this is the key fix)
+    if variable_dim in clean_selected.coords:
+        del clean_selected.coords[variable_dim]
+    
+    data_dict[k] = clean_selected
+
+print('About to create dataset...')
+try:
+    result = xr.Dataset(data_dict)
+    print('SUCCESS! Dataset creation worked.')
+    print(result)
+except Exception as e:
+    print('Still failed:', e)
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Let's look at what each selected array actually contains
+idx = stacked.indexes['y']
+level_number = idx._get_level_number('variable')
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+print('Variable dim:', variable_dim)
+print('Variables:', variables)
+
+for k in variables:
+    selected = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    print(f'\\nSelected variable {k}:')
+    print('  Data:', selected.values)
+    print('  Coords keys:', list(selected.coords.keys()))
+    for coord_name, coord_val in selected.coords.items():
+        print(f'  Coord {coord_name}: {coord_val} (dims: {coord_val.dims})')
+    
+    # Try to create clean copy
+    clean_selected = selected.copy()
+    print('  Before cleaning coords:', list(clean_selected.coords.keys()))
+    if variable_dim in clean_selected.coords:
+        print(f'  Removing coord {variable_dim}')
+        del clean_selected.coords[variable_dim]
+    else:
+        print(f'  Coord {variable_dim} not found')
+    print('  After cleaning coords:', list(clean_selected.coords.keys()))
+"
+$ cd /testbed && grep -A 30 "def to_unstacked_dataset" xarray/core/dataarray.py
+$ cd /testbed && sed -n '1901,2000p' xarray/core/dataarray.py | tail -50
+$ cd /testbed && sed -i '1940,1955s/\(for k in variables:\)/\1\n            # Clean up coordinates to avoid conflicts\n            extracted = self.sel({variable_dim: k}).squeeze(drop=True)\n            # Remove the stacking coordinate from each variable to prevent merge conflicts\n            if variable_dim in extracted.coords:\n                del extracted.coords[variable_dim]\n            data_dict[k] = extracted/' xarray/core/dataarray.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test the original failing case
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print('SUCCESS: Roundtrip worked!')
+print('Original:', data)
+print('Unstacked:', unstacked)
+print('Identical?', data.identical(unstacked))
+"
+$ cd /testbed && sed -n '1940,1960p' xarray/core/dataarray.py
+$ cd /testbed && sed -n '1960,1975p' xarray/core/dataarray.py
+$ cd /testbed && grep -n -A 10 -B 5 "data_dict\[k\] = self.sel" xarray/core/dataarray.py
+$ cd /testbed && sed -i '1964s/data_dict\[k\] = self.sel({variable_dim: k}).squeeze(drop=True)/# pull variables out of datarray\n        data_dict = {}\n        for k in variables:\n            extracted = self.sel({variable_dim: k}).squeeze(drop=True)\n            # Remove the stacking coordinate to prevent merge conflicts\n            if variable_dim in extracted.coords:\n                del extracted.coords[variable_dim]\n            data_dict[k] = extracted/' xarray/core/dataarray.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test the original failing case
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print('SUCCESS: Roundtrip worked!')
+print('Original:', data)
+print('Unstacked:', unstacked)
+print('Identical?', data.identical(unstacked))
+"
+$ cd /testbed && sed -i '1964s/.*/            extracted = self.sel({variable_dim: k}).squeeze(drop=True)\n            # Remove the stacking coordinate to prevent merge conflicts\n            if variable_dim in extracted.coords:\n                del extracted.coords[variable_dim]\n            data_dict[k] = extracted/' xarray/core/dataarray.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test the original failing case
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print('SUCCESS: Roundtrip worked!')
+print('Original:', data)
+print('Unstacked:', unstacked)
+print('Identical?', data.identical(unstacked))
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Debug what's happening with coordinates
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+print('Stacked array coordinates:')
+for name, coord in stacked.coords.items():
+    print(f'  {name}: {coord}')
+
+# Check the MultiIndex structure
+idx = stacked.indexes['y']
+print('\\nMultiIndex levels:')
+for i, level in enumerate(idx.levels):
+    print(f'  Level {i} ({idx.names[i]}): {level}')
+
+# Try to manually extract and see what coordinates each variable has
+var_a = stacked.sel({'variable': 'a'}).squeeze(drop=True)
+print('\\nVariable a after selection:')
+print('Coords:', list(var_a.coords.keys()))
+for name, coord in var_a.coords.items():
+    print(f'  {name}: {coord} (dims: {coord.dims})')
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Debug what happens if we remove both y coordinates
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Try the fix by manually creating clean variables
+var_a = stacked.sel({'variable': 'a'}).squeeze(drop=True)
+print('Before cleaning var_a coords:', list(var_a.coords.keys()))
+
+# Remove all coordinates that were used for stacking
+clean_var_a = var_a.copy()
+for coord_name in list(clean_var_a.coords.keys()):
+    if coord_name == 'y':  # This is the coordinate causing conflict
+        print(f'Removing coordinate {coord_name}')
+        del clean_var_a.coords[coord_name]
+
+print('After cleaning var_a coords:', list(clean_var_a.coords.keys()))
+print('var_a data:', clean_var_a.values)
+"
+$ cd /testbed && sed -n '1960,1970p' xarray/core/dataarray.py
+$ cd /testbed && head -n 1970 xarray/core/dataarray.py | tail -n 20
+$ cd /testbed && sed -n '1955,1975p' xarray/core/dataarray.py
+$ cd /testbed && sed -n '1950,1980p' xarray/core/dataarray.py
+$ cd /testbed && awk 'NR==1965 {print "            extracted = self.sel({variable_dim: k}).squeeze(drop=True)"} NR==1966 {print "            # Remove the stacking coordinate to prevent merge conflicts"} NR==1967 {print "            if variable_dim in extracted.coords:"} NR==1968 {print "                del extracted.coords[variable_dim]"} NR==1969 {print "            data_dict[k] = extracted"} NR!=1965 && NR!=1966 && NR!=1967 && NR!=1968 && NR!=1969 {print}' xarray/core/dataarray.py > temp_file && mv temp_file xarray/core/dataarray.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test the original failing case
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print('SUCCESS: Roundtrip worked!')
+print('Original:', data)
+print('Unstacked:', unstacked)
+print('Identical?', data.identical(unstacked))
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Debug what exactly are the coordinates
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Check what we get when we extract each variable
+print('=== Checking extracted variables ===')
+for k in ['a', 'b']:
+    selected = stacked.sel({'variable': k}).squeeze(drop=True)
+    print(f'\\nVariable {k}:')
+    print('  Shape:', selected.shape)
+    print('  Coords:', list(selected.coords.keys()))
+    for coord_name, coord_val in selected.coords.items():
+        print(f'    {coord_name}: shape={coord_val.shape}, dims={coord_val.dims}')
+"
+$ cd /testbed && sed -i '1965s/.*/            # pull variables out of datarray\n        data_dict = {}\n        for k in variables:\n            extracted = self.sel({variable_dim: k}).squeeze(drop=True)\n            # Remove all coordinates to prevent merge conflicts\n            extracted.coords.clear()\n            data_dict[k] = extracted/' xarray/core/dataarray.py
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test the original failing case
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print('SUCCESS: Roundtrip worked!')
+print('Original:', data)
+print('Unstacked:', unstacked)
+print('Identical?', data.identical(unstacked))
+"
+$ cd /testbed && python -c "
+import numpy as np
+import xarray as xr
+
+# Test how to properly clear coordinates
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+selected = stacked.sel({'variable': 'a'}).squeeze(drop=True)
+print('Type of coords:', type(selected.coords))
+print('Coords keys:', list(selected.coords.keys()))
+
+# Try a clean approach - create new array without coordinates
+clean_selected = selected.copy()
+clean_selected.coords = {}
+print('After clearing:', list(clean_selected.coords.keys()))
+"
+$ cd /testbed && sed -n '1960,1975p' xarray/core/dataarray.py
+stopped: step limit reached
