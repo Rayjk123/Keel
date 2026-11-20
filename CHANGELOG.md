@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Changed
+- The docs now live at https://keeljourney.dev.
 - Reframed the project as a learning journey with the tagline "Learning by building, one port at a time". The one-file agent is Destination 1.
 - Docs are organized by destination: a journey home page, then a section per destination.
 

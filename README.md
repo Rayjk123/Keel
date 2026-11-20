@@ -1,10 +1,10 @@
 <p align="center">
-  <a href="https://rayjk123.github.io/Keel/">
+  <a href="https://keeljourney.dev/">
     <img src="docs/assets/banner.svg" style="height: 10em" alt="Keel: learning by building, one port at a time" />
   </a>
 </p>
 
-<p align="center"><strong>[&nbsp;<a href="https://rayjk123.github.io/Keel/">Read the Docs</a>&nbsp;]</strong></p>
+<p align="center"><strong>[&nbsp;<a href="https://keeljourney.dev/">Read the Docs</a>&nbsp;]</strong></p>
 
 <p align="center">
   <a href="https://github.com/Rayjk123/Keel/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Rayjk123/Keel/actions/workflows/ci.yml/badge.svg"></a>
@@ -19,13 +19,13 @@
 
 Keel is my learning log, written in code. Each destination is something I wanted to understand properly, so I built it myself, measured how well it worked, wrote down what I learned, and then sailed on to the next one.
 
-Every destination has its own code, its own write-up on the [docs site](https://rayjk123.github.io/Keel/), and a way to run it yourself.
+Every destination has its own code, its own write-up on the [docs site](https://keeljourney.dev/), and a way to run it yourself.
 
 ## The journey
 
 | # | Destination | What I built | When |
 |---|---|---|---|
-| 1 | [One-file agent](https://rayjk123.github.io/Keel/destinations/one-file-agent/) | A coding agent in a single TypeScript file, benchmarked on Terminal-Bench, SWE-bench and Aider Polyglot | November 2026 |
+| 1 | [One-file agent](https://keeljourney.dev/destinations/one-file-agent/) | A coding agent in a single TypeScript file, benchmarked on Terminal-Bench, SWE-bench and Aider Polyglot | November 2026 |
 
 The next port isn't chosen yet. When it is, it gets its own row here and its own section on the docs site.
 
@@ -73,17 +73,17 @@ harbor view runs/terminal-bench-4.0
 
 Supported benchmarks: Terminal-Bench 4.0 and 2.0, Aider Polyglot, SWE-bench Verified and SWE-bench Lite. For the 300-task SWE-bench Lite subset, run `python bench/swebench_lite.py --run-id my-run --limit 30` after `pip install -r bench/requirements.txt`.
 
-Use `-l 10` to run just the first 10 tasks for a quick check. The [Benchmarks page](https://rayjk123.github.io/Keel/destinations/one-file-agent/benchmarks/) has every option, how the Docker setup fits together, and tips for running at scale.
+Use `-l 10` to run just the first 10 tasks for a quick check. The [Benchmarks page](https://keeljourney.dev/destinations/one-file-agent/benchmarks/) has every option, how the Docker setup fits together, and tips for running at scale.
 
 ### Go deeper
 
 The docs site has the full write-up of this destination:
 
-- [Getting started](https://rayjk123.github.io/Keel/destinations/one-file-agent/getting-started/): settings, hosted APIs and your first run.
-- [How it works](https://rayjk123.github.io/Keel/destinations/one-file-agent/how-it-works/): the loop, the command format and the limits.
-- [Adapters](https://rayjk123.github.io/Keel/destinations/one-file-agent/adapters/): the message format, and how to support a new API.
-- [Benchmarks](https://rayjk123.github.io/Keel/destinations/one-file-agent/benchmarks/): Terminal-Bench, Aider Polyglot, SWE-bench Verified and Lite.
-- [AWS Bedrock](https://rayjk123.github.io/Keel/destinations/one-file-agent/bedrock/): use Claude and other models on Bedrock.
+- [Getting started](https://keeljourney.dev/destinations/one-file-agent/getting-started/): settings, hosted APIs and your first run.
+- [How it works](https://keeljourney.dev/destinations/one-file-agent/how-it-works/): the loop, the command format and the limits.
+- [Adapters](https://keeljourney.dev/destinations/one-file-agent/adapters/): the message format, and how to support a new API.
+- [Benchmarks](https://keeljourney.dev/destinations/one-file-agent/benchmarks/): Terminal-Bench, Aider Polyglot, SWE-bench Verified and Lite.
+- [AWS Bedrock](https://keeljourney.dev/destinations/one-file-agent/bedrock/): use Claude and other models on Bedrock.
 
 ## Develop
 
