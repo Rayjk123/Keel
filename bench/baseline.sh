@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Runs the baseline benchmarks in order: Terminal-Bench 4.0, Aider Polyglot, then a SWE-bench Lite sample.
+# Runs a quick baseline on a subset of each benchmark: Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot, then SWE-bench Lite.
 set -u
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$PWD/bench"
 MODEL="${MODEL:-ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
-LITE_LIMIT="${LITE_LIMIT:-30}"
+LIMIT="${LIMIT:-10}"
 BENCH_PYTHON="${BENCH_PYTHON:-python3}"
 RUN="${RUN:-baseline}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
@@ -30,6 +30,7 @@ guard &
 GUARD=$!
 trap 'kill $GUARD 2>/dev/null' EXIT
 
-harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" -o runs/terminal-bench-4.0 --job-name "$RUN"
-harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" -o runs/aider-polyglot --job-name "$RUN"
-"$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --limit "$LITE_LIMIT" --workers "$WORKERS" --model "${MODEL#*/}"
+harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" -l "$LIMIT" -o runs/terminal-bench-4.0 --job-name "$RUN"
+harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" -l "$LIMIT" -o runs/terminal-bench-2.0 --job-name "$RUN"
+harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" -l "$LIMIT" -o runs/aider-polyglot --job-name "$RUN"
+"$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --limit "$LIMIT" --workers "$WORKERS" --model "${MODEL#*/}"
