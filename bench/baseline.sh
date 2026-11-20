@@ -6,11 +6,12 @@ export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$PWD/bench"
 MODELS="${MODELS:-ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
+HARNESS="${HARNESS:-baseline}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 if [ -z "${BENCH_PYTHON:-}" ]; then
   if [ -x bench/.venv/bin/python ]; then BENCH_PYTHON=bench/.venv/bin/python; else BENCH_PYTHON=python3; fi
 fi
-export WORKERS
+export WORKERS HARNESS
 
 free_gb() { df -g / | awk 'NR==2 {print $4}'; }
 
@@ -34,7 +35,9 @@ trap 'kill $GUARD 2>/dev/null' EXIT
 pick() { sed 's/^/-i /' "bench/subsets/$1.txt" | tr '\n' ' '; }
 
 for MODEL in $MODELS; do
-  RUN="${RUN:-$(echo "${MODEL#*/}" | tr -c 'A-Za-z0-9.\n' '-' | sed 's/-*$//')}"
+  slug="$(echo "${MODEL#*/}" | tr -c 'A-Za-z0-9.\n' '-' | sed 's/-*$//')"
+  RUN="${RUN:-$slug}"
+  [ "$RUN" = "$slug" ] && [ "$HARNESS" != "baseline" ] && RUN="$slug-$HARNESS"
   mkdir -p "runs/$RUN"
   "$BENCH_PYTHON" bench/manifest.py "$RUN" "$MODEL"
   echo "=== $MODEL ($RUN)"

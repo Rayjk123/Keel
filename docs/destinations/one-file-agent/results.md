@@ -20,7 +20,7 @@ Each cell is tasks passed out of tasks attempted. Every run uses the same 10 han
 ## Add a run to the scoreboard
 
 ```bash
-RUN=qwen3-coder-30b-edit-tool MODELS=ollama/qwen3-coder:30b bench/baseline.sh
+HARNESS=edit-tool MODELS=ollama/qwen3-coder:30b bench/baseline.sh
 python bench/summarize.py
 ```
 
@@ -28,11 +28,13 @@ python bench/summarize.py
 
 ## Models and harness changes
 
-The scoreboard answers two different questions, and the run name says which one a bar is about:
+Every run records two separate labels in its manifest: the **harness** (`baseline`, `edit-tool`, and so on) and the **model**. That keeps the two questions apart, and a leaderboard can sort or filter by either:
 
-| Question | Hold fixed | Change | Run name |
+| Question | Hold fixed | Change | Example |
 |---|---|---|---|
-| Which model is best in this harness? | Harness | Model | `gpt-oss-20b` |
-| Which harness change helps? | Model | Harness | `qwen3-coder-30b-edit-tool` |
+| Which model is best in this harness? | Harness | Model | `HARNESS=baseline`, a different model |
+| Which harness change helps? | Model | Harness | the same model, `HARNESS=edit-tool` |
+
+The folder name combines them, `runs/<model>/` for the baseline and `runs/<model>-<harness>/` after that.
 
 The list of changes to try, and what each one is expected to do, is on the [Harness changes](harness-changes.md) page.

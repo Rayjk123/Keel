@@ -24,6 +24,8 @@ def main() -> None:
         "run": run,
         "started": datetime.now().astimezone().isoformat(timespec="seconds"),
         "model": model,
+        "model_name": model.split("/", 1)[-1],
+        "harness": os.environ.get("HARNESS", "baseline"),
         "keel_commit": out("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "agent_ts_sha256": hashlib.sha256((ROOT / "agent.ts").read_bytes()).hexdigest(),
         "workers": int(os.environ.get("WORKERS", "2")),
