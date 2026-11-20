@@ -2,6 +2,22 @@
 
 Keel includes an adapter for [Harbor](https://harborframework.com) (install it with `uv tool install harbor`), which runs each task in its own Docker container, runs Keel inside it, and scores the result with the task's official tests.
 
+## Quick baseline on any machine
+
+Three commands set up a fresh computer and score a model on a hand-picked set of 10 tasks from each benchmark:
+
+```
+git clone https://github.com/Rayjk123/Keel && cd Keel
+bench/setup.sh
+MODELS="ollama/qwen3-coder:30b ollama/gpt-oss:20b" bench/baseline.sh
+```
+
+`bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
+
+Each model gets its own folder, `runs/<model>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side.
+
+The task lists live in `bench/subsets/`. Add a name to a list to grow a benchmark.
+
 ## Run a benchmark
 
 Pick a dataset from the table, then run it with Keel as the agent:

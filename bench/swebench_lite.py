@@ -113,6 +113,7 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--limit", type=int)
     p.add_argument("-i", "--instance-ids", nargs="+")
+    p.add_argument("--out")
     p.add_argument("--timeout", type=int, default=1800)
     p.add_argument("--skip-eval", action="store_true")
     args = p.parse_args()
@@ -125,7 +126,7 @@ def main() -> None:
     if args.limit:
         rows = rows[: args.limit]
 
-    out_dir = ROOT / "runs" / "swebench-lite" / args.run_id
+    out_dir = (ROOT / args.out) if args.out else ROOT / "runs" / "swebench-lite" / args.run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     preds_path = out_dir / "predictions.jsonl"
     done = {}

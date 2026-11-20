@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
-# Runs a quick baseline on a hand-picked 10-task subset of each benchmark (lists in bench/subsets): Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot, then SWE-bench Lite.
+# Runs the benchmark subsets for each model in MODELS: Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot, then SWE-bench Lite.
 set -u
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$PWD/bench"
-MODEL="${MODEL:-ollama/qwen3-coder:30b}"
+MODELS="${MODELS:-ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
-BENCH_PYTHON="${BENCH_PYTHON:-python3}"
-RUN="${RUN:-baseline}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
+if [ -z "${BENCH_PYTHON:-}" ]; then
+  if [ -x bench/.venv/bin/python ]; then BENCH_PYTHON=bench/.venv/bin/python; else BENCH_PYTHON=python3; fi
+fi
+export WORKERS
 
 free_gb() { df -g / | awk 'NR==2 {print $4}'; }
 
 tidy_images() {
-  docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | rg '^(alexgshaw/|harborframework/terminal-bench|swebench/)' | awk '{print $2}' | sort -u | xargs docker rmi >/dev/null 2>&1
+  docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E '^(alexgshaw/|harborframework/terminal-bench|swebench/)' | awk '{print $2}' | sort -u | xargs docker rmi >/dev/null 2>&1
 }
 
 guard() {
@@ -31,7 +33,15 @@ trap 'kill $GUARD 2>/dev/null' EXIT
 
 pick() { sed 's/^/-i /' "bench/subsets/$1.txt" | tr '\n' ' '; }
 
-harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.0) -o runs/terminal-bench-4.0 --job-name "$RUN"
-harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-2.0) -o runs/terminal-bench-2.0 --job-name "$RUN"
-harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick aider-polyglot) -o runs/aider-polyglot --job-name "$RUN"
-"$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --workers "$WORKERS" --model "${MODEL#*/}" -i $(cat bench/subsets/swebench-lite.txt)
+for MODEL in $MODELS; do
+  RUN="${RUN:-$(echo "${MODEL#*/}" | tr -c 'A-Za-z0-9.\n' '-' | sed 's/-*$//')}"
+  mkdir -p "runs/$RUN"
+  "$BENCH_PYTHON" bench/manifest.py "$RUN" "$MODEL"
+  echo "=== $MODEL ($RUN)"
+
+  harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.0) -o "runs/$RUN/terminal-bench-4.0" --job-name "$RUN"
+  harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-2.0) -o "runs/$RUN/terminal-bench-2.0" --job-name "$RUN"
+  harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick aider-polyglot) -o "runs/$RUN/aider-polyglot" --job-name "$RUN"
+  "$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --out "runs/$RUN/swebench-lite" --workers "$WORKERS" --model "${MODEL#*/}" -i $(cat bench/subsets/swebench-lite.txt)
+  unset RUN
+done

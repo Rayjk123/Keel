@@ -73,6 +73,8 @@ harbor view runs/terminal-bench-4.0
 
 Supported benchmarks: Terminal-Bench 4.0 and 2.0, Aider Polyglot, SWE-bench Verified and SWE-bench Lite. For the 300-task SWE-bench Lite subset, run `python bench/swebench_lite.py --run-id my-run --limit 30` after `pip install -r bench/requirements.txt`.
 
+Want a quick score for one or more models on a fresh machine? `bench/setup.sh` gets it ready, and `MODELS="ollama/qwen3-coder:30b ollama/gpt-oss:20b" bench/baseline.sh` runs 10 hand-picked tasks from each benchmark per model, saving everything under `runs/<model>/`.
+
 Use `-l 10` to run just the first 10 tasks for a quick check. The [Benchmarks page](https://keeljourney.dev/destinations/one-file-agent/benchmarks/) has every option, how the Docker setup fits together, and tips for running at scale.
 
 ### Go deeper
@@ -102,6 +104,8 @@ agent.ts                the destination 1 agent
 test/                   tests for the loop, adapter and command runner
 bench/keel_agent.py     plugs the agent into Harbor for benchmarking
 bench/swebench_lite.py  runs and grades SWE-bench Lite
+bench/setup.sh          readies a new machine for benchmarking
+bench/baseline.sh       scores models on a hand-picked subset of each benchmark
 bedrock/                optional proxy for AWS Bedrock
 docs/                   the documentation site
 ```
