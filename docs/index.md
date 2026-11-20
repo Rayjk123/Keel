@@ -1,43 +1,31 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Keel: a coding agent in one file" style="height: 10em" />
+  <img src="assets/banner.svg" alt="Keel: learning by building, one port at a time" style="height: 10em" />
 </p>
 
 # Keel
 
-**A coding agent in one file you can read in five minutes.**
+**Learning by building, one port at a time.**
 
-Keel takes a task in plain English, then works on it the way a developer would: it looks around, runs commands, reads the output, and keeps going until the job is done. There is no framework and there are no dependencies. The whole agent is a single TypeScript file, `agent.ts`.
+Keel is my learning log, written in code. Each destination is something I wanted to understand properly, so I built it myself, measured how well it worked, wrote down what I learned, and then sailed on to the next one.
 
-Keel is built to be understood, changed and measured. Every part of the loop is in plain view, so you can swap in a new idea, run a benchmark, and see whether it helped.
+The pages here follow that journey in order, a bit like a changelog for what I've learned. Every destination has its own code, its own write-up, and a way to run it yourself.
 
-## Why Keel
+## The journey
 
-<div class="grid cards" markdown>
+### Destination 1: One-file agent
+*November 2026*
 
--   **Tiny**
+**Built:** a coding agent in a single TypeScript file of about 200 lines. It has no SDK and no dependencies. It runs on local models through Ollama, hosted APIs, or AWS Bedrock, and it plugs into Terminal-Bench, SWE-bench and Aider Polyglot so you can put a score on every change.
 
-    One file, about 200 lines. Nothing hidden behind layers.
+**Learned:**
 
--   **Zero dependencies**
+- Asking the model for one fenced `bash` block in plain text worked on every reply. Native tool calling through Ollama dropped about a third to a half of replies, because the model sometimes left out the opening tag.
+- The client library wasn't the cause. A Python version that used LiteLLM sent the same request and hit the same failures.
+- A harness this small can run real benchmarks. The Harbor adapter is about 60 lines.
+- Other minimal agents lean on a prompt that spells out a workflow: explore, reproduce the bug, edit, verify. That's an easy place to experiment next.
 
-    It uses Node's built-in `fetch` and nothing else.
+[Read the full destination :material-arrow-right:](destinations/one-file-agent/index.md){ .md-button }
 
--   **Works with any model**
+### Next port
 
-    It speaks the standard OpenAI-style chat API, so it runs on local models through Ollama, on hosted APIs, or on AWS Bedrock.
-
--   **Benchmark-ready**
-
-    Run it on Terminal-Bench, Aider Polyglot and SWE-bench with one command and get real scores.
-
-</div>
-
-## Try it
-
-```bash
-ollama pull qwen3-coder:30b
-BASE_URL=http://localhost:11434/v1 MODEL=qwen3-coder:30b \
-  node agent.ts "create a script that prints the first 20 primes"
-```
-
-Head to [Getting started](getting-started.md) for the full walkthrough, or [How it works](how-it-works.md) to see what happens inside the loop.
+Not decided yet. When I pick the next topic, it gets its own tab at the top of this site.
