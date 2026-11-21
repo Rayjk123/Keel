@@ -4,7 +4,7 @@ set -u
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 HARBOR_VERSION=0.26.0
-MODELS="${MODELS:-ollama/qwen3-coder:30b}"
+MODELS="${MODELS:-}"
 missing=0
 
 ok() { echo "  ok       $1"; }
@@ -15,6 +15,9 @@ want="$(tr -d 'v\n' < .nvmrc)"
 have="$(node --version 2>/dev/null | tr -d 'v')"
 if [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$want" "$have" | sort -V | head -1)" = "$want" ]; then ok "node $have"; else echo "  optional Node $want or later, only for npm test (nvm install; nvm use)"; fi
 if docker info >/dev/null 2>&1; then ok "docker"; else need "Docker, running (Docker Desktop or the docker daemon)"; fi
+if docker compose version >/dev/null 2>&1; then ok "docker compose"; else need "Docker Compose v2 (https://docs.docker.com/compose/install/)"; fi
+buildx="$(docker buildx version 2>/dev/null | awk '{print $2}' | tr -d v | cut -d- -f1)"
+if [ -n "$buildx" ] && [ "$(printf '%s\n%s\n' 0.17 "$buildx" | sort -V | head -1)" = 0.17 ]; then ok "docker buildx $buildx"; else need "Docker Buildx 0.17 or later (https://github.com/docker/buildx#installing)"; fi
 if command -v uv >/dev/null; then ok "uv"; else need "uv (https://docs.astral.sh/uv/getting-started/installation/)"; fi
 
 if command -v uv >/dev/null; then
@@ -31,7 +34,9 @@ if docker info >/dev/null 2>&1; then
   if [ "$gb" -ge 12 ]; then ok "docker memory ${gb} GB"; else need "Docker memory of at least 12 GB (now ${gb} GB): raise it in Docker Desktop settings"; fi
 fi
 
-free=$(df -g . | awk 'NR==2 {print $4}')
+root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
+[ -d "$root" ] || root=.
+free=$(df -Pk "$root" | awk 'NR==2 {print int($4 / 1048576)}')
 if [ "$free" -ge 60 ]; then ok "disk ${free} GB free"; else need "at least 60 GB free disk (${free} GB now)"; fi
 
 for model in $MODELS; do
@@ -48,7 +53,7 @@ done
 
 echo
 if [ "$missing" -eq 0 ]; then
-  echo "Ready. Run: MODELS=\"$MODELS\" bench/baseline.sh"
+  echo "Ready. Run: MODELS=\"${MODELS:-<provider>/<model>}\" bench/baseline.sh"
   echo "For two tasks at a time with Ollama, start it with OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768"
 else
   echo "Fix the missing items above, then run this script again."

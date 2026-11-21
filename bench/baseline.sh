@@ -4,7 +4,7 @@ set -u
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$PWD/bench"
-MODELS="${MODELS:-ollama/qwen3-coder:30b}"
+MODELS="${MODELS:?list one or more models, e.g. ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
 HARNESS="${HARNESS:-baseline}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
@@ -13,7 +13,9 @@ if [ -z "${BENCH_PYTHON:-}" ]; then
 fi
 export WORKERS HARNESS
 
-free_gb() { df -g / | awk 'NR==2 {print $4}'; }
+DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
+[ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/
+free_gb() { df -Pk "$DOCKER_ROOT" | awk 'NR==2 {print int($4 / 1048576)}'; }
 
 tidy_images() {
   docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E '^(alexgshaw/|harborframework/terminal-bench|swebench/)' | awk '{print $2}' | sort -u | xargs docker rmi >/dev/null 2>&1

@@ -109,7 +109,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-id", required=True)
     p.add_argument("--model", default="qwen3-coder:30b")
-    p.add_argument("--base-url", default="http://host.docker.internal:11434/v1")
+    p.add_argument("--base-url", default=os.environ.get("KEEL_BASE_URL", "http://host.docker.internal:11434/v1"))
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--limit", type=int)
     p.add_argument("-i", "--instance-ids", nargs="+")

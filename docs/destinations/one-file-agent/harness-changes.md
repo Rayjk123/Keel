@@ -6,7 +6,7 @@ The method is the same each time:
 
 1. Pick one change from the list below.
 2. Make it in `agent.ts`, and add a test.
-3. Run the benchmark subsets with the same model: `HARNESS=<change> bench/baseline.sh`.
+3. Run the benchmark subsets with the same model: `HARNESS=<change> MODELS=ollama/qwen3-coder:30b bench/baseline.sh`.
 4. Run `python bench/summarize.py` and read the new bar on the [scoreboard](results.md).
 5. Write down what moved, and which tasks flipped, in the table here.
 

@@ -2,6 +2,7 @@
 import http from "node:http";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 
+const HOST = process.env.PROXY_HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT ?? 8787);
 const MAX_TOKENS = Number(process.env.MAX_TOKENS ?? 8192);
 const client = new BedrockRuntimeClient({ maxAttempts: 8 });
@@ -67,6 +68,7 @@ http
     }
     let raw = "";
     for await (const chunk of req) raw += chunk;
+    res.setHeader("Connection", "close");
     try {
       const result = await complete(JSON.parse(raw));
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
@@ -75,4 +77,4 @@ http
       res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: `${e.name}: ${e.message}` } }));
     }
   })
-  .listen(PORT, "127.0.0.1", () => console.error(`bedrock proxy on http://127.0.0.1:${PORT}/v1`));
+  .listen(PORT, HOST, () => console.error(`bedrock proxy on http://${HOST}:${PORT}/v1`));

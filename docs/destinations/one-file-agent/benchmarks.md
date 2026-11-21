@@ -4,15 +4,16 @@ Keel includes an adapter for [Harbor](https://harborframework.com) (install it w
 
 ## Quick baseline on any machine
 
-Three commands set up a fresh computer and score a model on a hand-picked set of 10 tasks from each benchmark:
+A few commands set up a fresh computer and score a model on a hand-picked set of 10 tasks from each benchmark:
 
 ```
 git clone https://github.com/Rayjk123/Keel && cd Keel
+export MODELS="ollama/qwen3-coder:30b ollama/gpt-oss:20b"
 bench/setup.sh
-MODELS="ollama/qwen3-coder:30b ollama/gpt-oss:20b" bench/baseline.sh
+bench/baseline.sh
 ```
 
-`bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
+`bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. On Linux with Docker Engine, first point the containers at your model, as [How the Docker setup fits together](#how-the-docker-setup-fits-together) explains. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
 
 Each model gets its own folder, `runs/<model>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side.
 
@@ -84,7 +85,7 @@ When grading finishes, `swebench` writes a report to the run folder, and the pat
 
 ## How the Docker setup fits together
 
-Keel runs inside each task's container, where it works on the project's code. Your model keeps running on your machine, where it can use your GPU. Containers reach it at `host.docker.internal:11434`. Set `KEEL_BASE_URL` to point somewhere else.
+Keel runs inside each task's container, where it works on the project's code. Your model keeps running on your machine, where it can use your GPU. Containers reach it at `host.docker.internal:11434`. Set `KEEL_BASE_URL` to point somewhere else. On Linux with Docker Engine, containers can't reach `host.docker.internal`. Serve the model on the Docker bridge address instead, usually `172.17.0.1` (`ip -4 addr show docker0` shows yours): for Ollama, export `OLLAMA_HOST=172.17.0.1` in the shells where you start Ollama and run `bench/setup.sh`, and set `KEEL_BASE_URL=http://172.17.0.1:11434/v1`.
 
 ```
 Your machine                              Docker container (one per task)

@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - The docs now live at https://keeljourney.dev.
 - Reframed the project as a learning journey with the tagline "Learning by building, one port at a time". The one-file agent is Destination 1.
 - Docs are organized by destination: a journey home page, then a section per destination.
+- `bench/baseline.sh` needs `MODELS`, and `bench/setup.sh` pulls only the Ollama models it lists.
 
 ### Added
 - MIT license.
@@ -19,6 +20,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - `bench/swebench_lite.py`: runs Keel on SWE-bench Lite and grades the patches, with resumable runs and automatic Node download.
 - Benchmark instructions for Terminal-Bench 4.0 and Aider Polyglot through Harbor.
 - Logo and banner, and a README header with badges.
+- `PROXY_HOST` for the Bedrock proxy, so benchmark containers on Linux can reach it.
+
+### Fixed
+- Keel no longer fails with `other side closed` against the Bedrock proxy after a command that runs longer than a few seconds.
+- `bench/setup.sh` and `bench/baseline.sh` work on Linux, and `bench/swebench_lite.py` uses `KEEL_BASE_URL` like the Harbor runs.
 
 ## [0.1.0] - 2026-11-20
 
