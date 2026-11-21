@@ -9,11 +9,13 @@ const DONE = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 
 let script: string[] = [];
 let requests: Wire[] = [];
+let connections: (string | undefined)[] = [];
 
 const server = http.createServer(async (req, res) => {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   requests.push(JSON.parse(raw));
+  connections.push(req.headers.connection);
   const content = script.shift() ?? "script exhausted";
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
@@ -37,6 +39,7 @@ const submit = (summary: string) => reply(`printf '${DONE}\\n${summary}\\n'`);
 function run(replies: string[], maxSteps?: number) {
   script = [...replies];
   requests = [];
+  connections = [];
   return keel.agent(keel.textAdapter("fake"), "the task", maxSteps);
 }
 
@@ -115,6 +118,13 @@ describe("history", () => {
     assert.equal(requests[0].messages[0].role, "system");
     assert.deepEqual(requests[0].messages[1], { role: "user", content: "the task" });
     assert.equal(requests[0].model, "fake");
+  });
+});
+
+describe("connection", () => {
+  test("asks the server to close the connection after every reply", async () => {
+    await run([reply("echo hi"), submit("ok")]);
+    assert.deepEqual(connections, ["close", "close"]);
   });
 });
 

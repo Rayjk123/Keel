@@ -23,7 +23,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `PROXY_HOST` for the Bedrock proxy, so benchmark containers on Linux can reach it.
 
 ### Fixed
-- Keel no longer fails with `other side closed` against the Bedrock proxy after a command that runs longer than a few seconds.
+- Keel no longer fails with `other side closed` when a command outlasts the model server's keep-alive timeout, as with the Bedrock proxy or vLLM.
 - `bench/setup.sh` and `bench/baseline.sh` work on Linux, and `bench/swebench_lite.py` uses `KEEL_BASE_URL` like the Harbor runs.
 
 ## [0.1.0] - 2026-11-20

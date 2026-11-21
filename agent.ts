@@ -128,7 +128,7 @@ const TOOLS: ToolDef[] = [
 async function chat(adapter: Adapter, messages: Message[]): Promise<Message> {
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}`, Connection: "close" },
     body: JSON.stringify(adapter.toWire(messages, TOOLS)),
     signal: AbortSignal.timeout(600_000),
   });

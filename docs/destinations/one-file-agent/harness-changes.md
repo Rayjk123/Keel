@@ -26,6 +26,10 @@ The method is the same each time:
 
 Each row gets a run name when it is measured, and the result column gets the change in pass rate for each benchmark.
 
+Fixes that change `agent.ts` without adding an ability get a line here instead of a row:
+
+- Keel asks the model server to close the connection after each reply. Before, a command that outlasted the server's keep-alive timeout could crash the next request. Ollama keeps idle connections open, so the Ollama baselines never hit it.
+
 ## Why this order
 
 - **The file-edit tool comes first** because the baseline sometimes wrote `.bak` and `.fixed` copies of files instead of changing the source. A real edit tool should turn those near-misses into passes on the coding benchmarks.
