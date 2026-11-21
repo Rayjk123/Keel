@@ -86,6 +86,14 @@ def table(runs: list[dict]) -> str:
 
 def chart(runs: list[dict]) -> str:
     width, height, left, top, plot_h = 760, 380, 56, 56, 240
+    legend, lx, ly = [], left, height - 32
+    for r in runs:
+        item_w = 36 + 7.2 * len(r["run"])
+        if lx > left and lx + item_w - 18 > width - 20:
+            lx, ly = left, ly + 20
+        legend.append((lx, ly, r["run"]))
+        lx += item_w
+    height = ly + 32
     group_w = (width - left - 20) / len(BENCHMARKS)
     bar_w = min(36, (group_w - 24) / max(len(runs), 1))
     css = (
@@ -111,11 +119,9 @@ def chart(runs: list[dict]) -> str:
             x = start + ri * bar_w
             out.append(f'<rect x="{x + 2}" y="{top + plot_h - h}" width="{bar_w - 4}" height="{h}" rx="3" fill="{COLORS[ri % len(COLORS)]}"/>')
             out.append(f'<text x="{x + bar_w / 2}" y="{top + plot_h - h - 6}" font-size="11" text-anchor="middle">{s["passed"]}/{s["total"]}</text>')
-    lx = left
-    for ri, r in enumerate(runs):
-        out.append(f'<rect x="{lx}" y="{height - 32}" width="12" height="12" rx="2" fill="{COLORS[ri % len(COLORS)]}"/>')
-        out.append(f'<text x="{lx + 18}" y="{height - 22}" font-size="12">{r["run"]}</text>')
-        lx += 36 + 7.2 * len(r["run"])
+    for ri, (lx, ly, name) in enumerate(legend):
+        out.append(f'<rect x="{lx}" y="{ly}" width="12" height="12" rx="2" fill="{COLORS[ri % len(COLORS)]}"/>')
+        out.append(f'<text x="{lx + 18}" y="{ly + 10}" font-size="12">{name}</text>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
