@@ -1,0 +1,124 @@
+$ grep -n "def draw" -A 25 lib/mpl_toolkits/mplot3d/axes3d.py | head -60
+$ sed -n 385,450p lib/mpl_toolkits/mplot3d/axes3d.py
+$ python - <<'EOF'
+p = 'lib/mpl_toolkits/mplot3d/axes3d.py'
+s = open(p).read()
+old = """    def draw(self, renderer):
+        self._unstale_viewLim()
+
+        # draw the background patch
+"""
+new = """    def draw(self, renderer):
+        if not self.get_visible():
+            return
+        self._unstale_viewLim()
+
+        # draw the background patch
+"""
+assert s.count(old) == 1
+open(p, 'w').write(s.replace(old, new))
+EOF
+git diff</parameter>
+$ python - <<'EOF'
+p = 'lib/mpl_toolkits/mplot3d/axes3d.py'
+s = open(p).read()
+old = """    def draw(self, renderer):
+        self._unstale_viewLim()
+
+        # draw the background patch
+"""
+new = """    def draw(self, renderer):
+        if not self.get_visible():
+            return
+        self._unstale_viewLim()
+
+        # draw the background patch
+"""
+assert s.count(old) == 1
+open(p, 'w').write(s.replace(old, new))
+EOF
+git diff
+$ cd /tmp && python - <<'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1,1,1); ax2.scatter(1,1,1, c='r')
+fig.canvas.draw()
+a = np.asarray(fig.canvas.buffer_rgba()).copy()
+ax1.set_visible(False)
+fig.canvas.draw()
+b = np.asarray(fig.canvas.buffer_rgba()).copy()
+w = a.shape[1]//2
+print("left changed:", (a[:, :w] != b[:, :w]).any(), "right unchanged:", (a[:, w+10:] == b[:, w+10:]).all())
+EOF
+cd - >/dev/null && git status --short</parameter>
+$ cd /tmp && python - <<'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def render(hide):
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1,1,1); ax2.scatter(1,1,1, c='r')
+    if hide:
+        ax1.set_visible(False)
+    fig.canvas.draw()
+    return np.asarray(fig.canvas.buffer_rgba()).copy(), ax1, ax2, fig
+
+a, ax1, ax2, fig = render(False)
+b, ax1, ax2, fig = render(True)
+bb1 = ax1.get_position(); bb2 = ax2.get_position()
+print("ax1 x-range:", bb1.x0, bb1.x1, " ax2 x-range:", bb2.x0, bb2.x1)
+diff = (a != b).any(axis=2)
+cols = np.where(diff.any(axis=0))[0]
+W = a.shape[1]
+print("differing pixel columns (fraction of width):", cols.min()/W, cols.max()/W)
+# check that the hidden figure has no non-white pixels in ax1 region
+x0, x1 = int(bb1.x0*W), int(bb1.x1*W)
+print("non-white pixels in ax1 region when hidden:", (b[:, x0:x1, :3] != 255).any())
+EOF
+$ cat >> lib/mpl_toolkits/tests/test_mplot3d.py <<'EOF'
+
+
+def test_axes3d_set_visible_false():
+    # Axes3D.draw must respect set_visible(False)
+    fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+    ax.scatter(1, 1, 1)
+    ax.set_visible(False)
+    fig.canvas.draw()
+    img = np.asarray(fig.canvas.buffer_rgba())
+    assert (img[..., :3] == 255).all()
+EOF
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -q -x 2>&1 | tail -5
+$ python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -q -x -k set_visible_false 2>&1 | grep -E "^E|Error" | head; python - <<'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt, numpy as np
+fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+ax.scatter(1,1,1)
+ax.set_visible(False)
+fig.canvas.draw()
+img = np.asarray(fig.canvas.buffer_rgba())
+print(np.unique(img.reshape(-1,4), axis=0)[:5], fig.get_facecolor())
+EOF
+$ python - <<'EOF'
+p = 'lib/mpl_toolkits/tests/test_mplot3d.py'
+s = open(p).read()
+old = "    assert (img[..., :3] == 255).all()\n"
+new = ("    # only the uniform figure background remains\n"
+       "    assert len(np.unique(img.reshape(-1, img.shape[-1]), axis=0)) == 1\n")
+assert s.count(old) == 1
+open(p, 'w').write(s.replace(old, new))
+EOF
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -q 2>&1 | tail -3
+git stash push lib/mpl_toolkits/mplot3d/axes3d.py -q && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -q -k set_visible_false 2>&1 | tail -2; git stash pop -q && git status --short
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+All checks pass. The full 3D test file runs 117 passed. The new regression test fails without the fix and passes with it, and only the two intended files are modified.
+
+Summary:
+- **Cause:** `Axes3D.draw` never checked visibility, so `set_visible(False)` had no effect on 3D Axes.
+- **Fix:** `lib/mpl_toolkits/mplot3d/axes3d.py` now returns early from `Axes3D.draw` when `not self.get_visible()`, matching `_AxesBase.draw`.
+- **Test:** I added `test_axes3d_set_visible_false` in `lib/mpl_toolkits/tests/test_mplot3d.py`. It hides a 3D Axes and asserts that the canvas holds only the uniform figure background.

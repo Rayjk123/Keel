@@ -1,0 +1,64 @@
+$ cat /etc/os-release | head -3; which nginx; ls /etc/nginx 2>/dev/null; id -u
+$ export DEBIAN_FRONTEND=noninteractive; (apt-get update -qq && apt-get install -y -qq nginx curl) >/tmp/apt.log 2>&1; echo $?; tail -3 /tmp/apt.log; nginx -v; cat /etc/nginx/nginx.conf
+$ set -e
+C=/etc/nginx/nginx.conf
+grep -q 'log_format benchmark' $C || sed -i '/^http {/a\	log_format benchmark '"'"'[$time_local] $request_method $status "$http_user_agent"'"'"';' $C
+grep -q 'limit_req_zone' $C || sed -i '/^http {/a\	limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s;' $C
+mkdir -p /var/www/html
+echo "Welcome to the benchmark webserver" > /var/www/html/index.html
+echo "Page not found - Please check your URL" > /var/www/html/404.html
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/conf.d/benchmark-site.conf <<'EOF'
+server {
+    listen 8080;
+    server_name localhost;
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+    error_log /var/log/nginx/benchmark-error.log;
+
+    limit_req zone=benchmark_limit burst=10;
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+nginx -t
+if pgrep -x nginx >/dev/null; then nginx -s reload; else service nginx start || nginx; fi
+sleep 1
+echo "--- index:"; curl -s -A "TestAgent/1.0" http://localhost:8080/
+echo "--- 404:"; curl -s -w "HTTP %{http_code}\n" http://localhost:8080/nope
+echo "--- Access log: /var/log/nginx/benchmark-access.log"; cat /var/log/nginx/benchmark-access.log
+grep -n 'log_format\|limit_req_zone' $C
+$ for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code} " http://localhost:8080/ & done; wait; echo; tail -3 /var/log/nginx/benchmark-error.log
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Nginx is set up and serving on localhost:8080. A test burst of 30 simultaneous requests returned 12 successes and 18 "503" rejections, so the 10 per second (burst 10) limit is working. Rejected requests are recorded in the error log.
+
+- **Install:** Nginx 1.22.1 installed on Debian 12.
+- **`/etc/nginx/nginx.conf`:** I added two lines inside the `http` block, each only if it wasn't already there:
+  - A log format named `benchmark` that writes `[$time_local] $request_method $status "$http_user_agent"`, with the user agent in double quotes.
+  - The rate limiting zone: `limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s;`
+- **`/etc/nginx/conf.d/benchmark-site.conf`:** the server block, which:
+  - listens on port 8080 and serves files from `/var/www/html`;
+  - writes the access log to `/var/log/nginx/benchmark-access.log` using the `benchmark` format;
+  - writes the error log to `/var/log/nginx/benchmark-error.log`;
+  - applies `limit_req zone=benchmark_limit burst=10;`;
+  - serves `/404.html` as the custom 404 page.
+- **Default site:** `/etc/nginx/sites-enabled/default` has been removed.
+- **Content:** `index.html` contains "Welcome to the benchmark webserver" and `404.html` contains "Page not found - Please check your URL".
+- **Config check:** `nginx -t` reported the syntax as OK, then Nginx was started.
+- **Checks on localhost:8080:**
+  - The home page returned the welcome text.
+  - A missing page returned status 404 with the custom message.
+  - Log entries appeared in the expected format, for example `[21/Nov/2026:04:22:42 +0000] GET 200 "TestAgent/1.0"`.
+
+The setup script printed a `pgrep: command not found` message because that tool isn't installed here. It fell back to `service nginx start`, which started Nginx normally.
+
+**Access logs:** `/var/log/nginx/benchmark-access.log` (errors go to `/var/log/nginx/benchmark-error.log`).

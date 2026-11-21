@@ -1,0 +1,28 @@
+$ grep -n "ignore_paths\|ignore-paths\|_is_ignored_file\|_discover_files" -r pylint/lint/*.py pylint/config/argument.py | head -40
+$ sed -n 40,80p pylint/lint/expand_modules.py; sed -n 580,640p pylint/lint/pylinter.py; sed -n 55,80p pylint/lint/base_options.py; grep -n "regexp_paths_csv\|_regexp_paths" -A15 pylint/config/argument.py | head -40
+$ cd /tmp && rm -rf rp && mkdir -p rp/src/gen && cd rp && printf 'x=1\n' > src/a.py && printf 'import os\n' > src/gen/about.py && printf '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n' > pyproject.toml && python -m pylint --recursive=y src/ ; python -m pylint --recursive=y ./src/; python -m pylint --recursive=y src</reasoning_effort>
+$ cd /tmp && rm -rf rp && mkdir -p rp/src/gen && cd rp && printf 'x=1\n' > src/a.py && printf 'import os\n' > src/gen/about.py && printf '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n' > pyproject.toml && python -m pylint --recursive=y src/ ; python -m pylint --recursive=y src
+$ cd /testbed 2>/dev/null || cd $OLDPWD; python - <<'EOF'
+import re
+p='pylint/lint/expand_modules.py'
+s=open(p).read()
+s=s.replace("""    basename = os.path.basename(element)
+    return (
+        basename in ignore_list""","""    element = os.path.normpath(element)
+    basename = os.path.basename(element)
+    return (
+        basename in ignore_list""",1)
+open(p,'w').write(s)
+EOF
+git diff; cd /tmp/rp && python -m pylint --recursive=y src/ ; python -m pylint --recursive=y ./src/
+$ cd /testbed 2>/dev/null; python -m pytest -q tests/lint/unittest_expand_modules.py tests/test_self.py -k "recursive or ignore or expand" 2>&1 | tail -5
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fixed the likely cause, but I couldn't reproduce the reported bug here, so the Windows case is untested.
+
+**What I saw:** with a matching `pyproject.toml`, `pylint --recursive=y src/` and `pylint --recursive=y src` already skipped `src/gen` on Linux before my change. That points to a Windows-only problem.
+
+**Likely cause:** on Windows, walking `src/` gives mixed-separator paths like `src/gen\about.py`. The compiled `ignore-paths` regex accepts all-backslash or all-forward-slash paths, but not a mix. So nothing under `src/gen` matched and it all got linted.
+
+**Fix:** in `_is_ignored_file` (`pylint/lint/expand_modules.py`), the path is now normalized with `os.path.normpath` before matching. That gives a consistent separator on Windows and also cleans paths like `./src/gen` to `src/gen`. The same function is used both when walking directories for `--recursive=y` and when expanding modules.
+
+After the change, `src/` and `./src/` both still skip `src/gen`. The 13 related tests in `tests/lint/unittest_expand_modules.py` and `tests/test_self.py` pass. I did not add a regression test for the mixed-separator case.

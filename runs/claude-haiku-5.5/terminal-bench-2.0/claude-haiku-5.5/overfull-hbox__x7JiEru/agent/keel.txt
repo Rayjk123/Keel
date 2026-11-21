@@ -1,0 +1,127 @@
+$ ls -la && echo "--- main.tex ---" && cat main.tex && echo "--- input.tex ---" && cat input.tex && echo "--- synonyms.txt ---" && cat synonyms.txt
+$ cat main.tex; echo "--- compile ---"; pdflatex -interaction=nonstopmode main.tex >/tmp/build1.log 2>&1; echo "exit: $?"; grep -n -i "overfull\|underfull\|error" main.tex /tmp/build1.log | head -50; echo "--- log context ---"; grep -n -A3 "Overfull" main.tex.log 2>/dev/null | head -80; grep -n -A3 "Overfull" /tmp/build1.log | head -80
+$ cat -n input.tex; echo "--- synonym lines for flagged words ---"; grep -n -i "^\(many\|curious\|natures\|men\|confidences\|unsought\|riotous\|excursions\|privileged\|glimpses\|responsiveness\|nothing\|creative\|temperament\|cooked\|breakfast\|muttered\|wisdom\|lonely\|guide\|pathfinder\|longer\|friendly\|kind\|company\|special\|unique\|various\|sought\|intimate\|wet\|marshes\|lawns\|cozy\)" synonyms.txt
+$ cd "$(pwd)" && cp -n input.tex /tmp/input.orig.tex && python3 - <<'EOF'
+import re, subprocess, difflib
+
+fams = [[w.strip() for w in l.split(',') if w.strip()] for l in open('synonyms.txt') if l.strip()]
+alts = {}
+for f in fams:
+    for w in f:
+        alts.setdefault(w.lower(), set()).update(x for x in f if x.lower() != w.lower())
+
+def compile_score(t):
+    open('input.tex', 'w').write(t)
+    subprocess.run(['pdflatex', '-interaction=nonstopmode', 'main.tex'],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = open('main.log', errors='ignore').read()
+    vals = [float(x) for x in re.findall(r'Overfull \\hbox \(([\d.]+)pt too wide\)', log)]
+    return (len(vals), round(sum(vals), 4))
+
+def repl(t, w, a):
+    def f(m):
+        s = m.group(0)
+        return a[0].upper() + a[1:] if s[0].isupper() else a
+    return re.sub(r'\b' + re.escape(w) + r'\b', f, t, flags=re.I)
+
+text = open('input.tex').read()
+best = compile_score(text)
+print("baseline:", best)
+for _ in range(3):
+    if best[0] == 0:
+        break
+    improved = False
+    present = sorted({w for w in alts if re.search(r'\b' + re.escape(w) + r'\b', text, re.I)})
+    for w in present:
+        for a in sorted(alts[w]):
+            cand = repl(text, w, a)
+            if cand == text:
+                continue
+            s = compile_score(cand)
+            if s < best:
+                print(f"accept {w}->{a}: {best} -> {s}")
+                best, text, improved = s, cand, True
+                break
+    if not improved:
+        break
+
+best = compile_score(text)
+print("final:", best)
+print("".join(difflib.unified_diff(open('/tmp/input.orig.tex').readlines(),
+                                   open('input.tex').readlines(), 'orig', 'new')))
+EOF
+$ cd "$(pwd)" && ls -la /tmp/input.orig.tex && cmp input.tex /tmp/input.orig.tex && echo "input.tex unchanged"; which perl awk sed; perl -v | head -2
+$ cd "$(pwd)" && cat > /tmp/fix.pl <<'EOF'
+use strict; use warnings;
+my %alt;
+open my $sf, '<', 'synonyms.txt' or die "synonyms: $!";
+while (my $line = <$sf>) {
+    chomp $line; next unless $line =~ /\S/;
+    my @w = map { my $x = $_; $x =~ s/^\s+|\s+$//g; lc $x } split /,/, $line;
+    for my $w (@w) { for my $x (@w) { next if $x eq $w; $alt{$w}{$x} = 1; } }
+}
+close $sf;
+
+sub read_file { my $f = shift; open my $h, '<', $f or die "$f: $!"; local $/; my $c = <$h>; close $h; return $c; }
+sub write_file { my ($f, $c) = @_; open my $h, '>', $f or die "$f: $!"; print $h $c; close $h; }
+
+sub score {
+    system("pdflatex -interaction=nonstopmode main.tex >/dev/null 2>&1");
+    my $log = read_file('main.log');
+    my @v = $log =~ /Overfull \\hbox \(([\d.]+)pt too wide\)/g;
+    my $sum = 0; $sum += $_ for @v;
+    return (scalar(@v), $sum);
+}
+sub better { my ($a, $b) = @_; return $a->[0] < $b->[0] || ($a->[0] == $b->[0] && $a->[1] < $b->[1] - 1e-9); }
+
+sub repl {
+    my ($t, $w, $a) = @_;
+    $t =~ s{\b\Q$w\E\b}{ ($& =~ /^[A-Z]/) ? ucfirst($a) : $a }gie;
+    return $t;
+}
+
+my $text = read_file('input.tex');
+write_file('input.tex', $text);
+my $best = [score()];
+print "baseline: $best->[0] overfull, total $best->[1]pt\n";
+
+for my $pass (1 .. 5) {
+    last if $best->[0] == 0;
+    my $improved = 0;
+    for my $w (sort keys %alt) {
+        next unless $text =~ /\b\Q$w\E\b/i;
+        for my $a (sort keys %{ $alt{$w} }) {
+            my $cand = repl($text, $w, $a);
+            next if $cand eq $text;
+            write_file('input.tex', $cand);
+            my $s = [score()];
+            if (better($s, $best)) {
+                print "accept $w -> $a: $best->[0]/$best->[1] -> $s->[0]/$s->[1]\n";
+                ($best, $text) = ($s, $cand);
+                $improved = 1;
+                last;
+            }
+        }
+    }
+    last unless $improved;
+}
+write_file('input.tex', $text);
+$best = [score()];
+print "final: $best->[0] overfull, total $best->[1]pt\n";
+EOF
+perl /tmp/fix.pl; echo "--- diff vs original ---"; diff /tmp/input.orig.tex input.tex; echo "--- final log ---"; grep -c "Overfull" main.log; grep "Overfull" main.log; ls -la main.pdf
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The document now compiles with pdflatex (exit 0) and the log reports zero overfull hboxes. The only file I changed is `input.tex`, and the backup at `/tmp/input.orig.tex` is intact. Eight word replacements, each drawn from a family in `synonyms.txt`, brought the count from 7 overfull hboxes (about 92.5pt total excess) to 0:
+
+- attention → focus
+- book → publication
+- college → institution
+- country → countryside
+- creative → imaginative
+- curious → odd
+- imaginative → inventive
+- pathfinder → pioneer
+
+Some of these replacements read poorly, though they satisfy the rules. "in institution I was unjustly accused" and "the ``inventive temperament''" are ungrammatical or odd. "Gatsby... this publication" and "moral focus" also change the meaning. If you want more natural prose, a grammatical alternative from the same families would probably fit: "university" or "school" for "college", and "creative" left as is. Doing that would mean searching again for combinations that keep the hbox count at zero.
+
+Finishing the task now.

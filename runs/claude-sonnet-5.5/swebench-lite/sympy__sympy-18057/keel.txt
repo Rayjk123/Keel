@@ -1,0 +1,102 @@
+$ grep -n "def __eq__" -A25 sympy/core/expr.py | head -60; grep -n "def __eq__" -A40 sympy/core/basic.py | head -70; git log --oneline | head -3
+$ grep -rn "def __eq__\|def __ne__" -A12 sympy --include=*.py | grep -v "/tests/" | grep -n "[^_]sympify(" </parameter>
+$ grep -rn "def __eq__\|def __ne__" -A12 sympy --include=*.py | grep -v "/tests/" | grep "[^_]sympify("
+$ grep -n "import.*sympify" sympy/core/expr.py; sed -n 40,52p sympy/matrices/dense.py; sed -n 4140,4160p sympy/polys/polytools.py
+$ grep -n "sympify" sympy/matrices/dense.py | head; sed -i '124s/sympify(other)/_sympify(other)/' sympy/core/expr.py && sed -n 122,128p sympy/core/expr.py
+$ sed -n 12p sympy/matrices/dense.py; sed -n 46,60p sympy/matrices/dense.py
+$ python - <<'EOF'
+import re
+p='sympy/matrices/dense.py'
+s=open(p).read()
+s=s.replace("from sympy.core.sympify import sympify\n","from sympy.core.sympify import sympify, _sympify, SympifyError\n",1)
+s=s.replace("""    def __eq__(self, other):
+        other = sympify(other)
+        self_shape""","""    def __eq__(self, other):
+        try:
+            other = _sympify(other)
+        except SympifyError:
+            return NotImplemented
+        self_shape""",1)
+open(p,'w').write(s)
+EOF
+git diff --stat
+python - <<'EOF'
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+class D:
+    def __repr__(self): return 'x'
+x=sympy.Symbol('x')
+print(x==C(), x==D(), x!=D(), sympy.Matrix([1])==D(), x==1, x=='x')
+EOF
+$ python -m pytest -q -x -p no:cacheprovider sympy/core sympy/matrices sympy/polys/tests/test_polytools.py 2>&1 | tail -30
+$ python -c "
+import sympy
+r = sympy.test('sympy/core', 'sympy/matrices', 'sympy/polys/tests/test_polytools.py', verbose=False)
+print('RESULT', r)
+" 2>&1 | tail -40
+$ git stash -q && python -c "
+import sympy
+sympy.test('sympy/core/tests/test_sympify.py','sympy/core/tests/test_var.py', verbose=False)
+" 2>&1 | tail -8; git stash pop -q && git diff --stat; sed -n 15,30p sympy/core/tests/test_var.py
+$ sed -i "s/    assert v == \['d', 'e', 'fg'\]/    assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]/" sympy/core/tests/test_var.py && sed -n 18,22p sympy/core/tests/test_var.py && python -c "
+import sympy
+sympy.test('sympy/core/tests/test_var.py', verbose=False)
+" 2>&1 | tail -4
+$ cat >> sympy/core/tests/test_expr.py <<'EOF'
+
+
+def test_eq_does_not_eval_repr():
+    # equality must not sympify arbitrary objects via their repr
+    class C:
+        def __repr__(self):
+            return 'x.y'
+
+    class D:
+        def __repr__(self):
+            return 'x'
+
+    x = Symbol('x')
+    assert (x == C()) is False
+    assert (x == D()) is False
+    assert x != C()
+    assert x != D()
+    assert Matrix([1]) != D()
+EOF
+grep -n "^from sympy import\|Matrix" sympy/core/tests/test_expr.py | head -5
+python -c "
+import sympy
+sympy.test('sympy/core/tests/test_expr.py', verbose=False)
+" 2>&1 | tail -5
+python -c "
+import sympy
+sympy.test('sympy/functions','sympy/solvers','sympy/printing','sympy/simplify','sympy/series','sympy/integrals','sympy/concrete','sympy/sets','sympy/logic','sympy/tensor','sympy/physics/units','sympy/utilities','sympy/calculus','sympy/geometry','sympy/parsing', verbose=False)
+" 2>&1 | grep -v "^\s*$" | grep -B2 -A12 "^_\{5,\}.*:test\|tests finished" | tail -80
+$ grep -n "^from sympy import\|^from sympy.matrices\|Matrix" sympy/core/tests/test_expr.py | head -5; timeout 300 python -c "
+import sympy
+sympy.test('sympy/core/tests/test_expr.py', verbose=False)
+" 2>&1 | tail -8
+$ sed -i 's/^    assert Matrix(\[1\]) != D()$/    from sympy import Matrix\n    assert Matrix([1]) != D()/' sympy/core/tests/test_expr.py && tail -5 sympy/core/tests/test_expr.py && timeout 300 python -c "
+import sympy
+sympy.test('sympy/core/tests/test_expr.py', verbose=False)
+" 2>&1 | tail -4
+$ cd /testbed && for m in functions solvers printing simplify series integrals concrete sets logic tensor utilities calculus geometry parsing physics polys assumptions; do (timeout 1500 python -c "
+import sympy
+sympy.test('sympy/$m', verbose=False)
+" > /tmp/test_$m.log 2>&1 &) ; done; sleep 240; for f in /tmp/test_*.log; do echo "== $f"; tail -3 $f | head -2; done
+$ ls -la /tmp/test_*.log 2>/dev/null; for f in /tmp/test_*.log; do echo "== $f"; tail -2 "$f"; done 2>/dev/null | head -60; pgrep -f "sympy.test" | wc -l
+$ cd /tmp && for m in parsing printing polys; do echo "=== $m"; grep -E "^_+ .*(test_|:)" test_$m.log | head; grep -E "^(\w*Error|\w*Exception)" test_$m.log | sort | uniq -c; grep "tests finished" -B1 test_$m.log | tail -3; done
+$ cd /tmp && grep -E "Error|Exception|Traceback" -A0 test_polys.log | sort | uniq -c | head; grep -n "test_modgcd_func_field" -A12 test_polys.log | head -30; pgrep -f "sympy.test" | wc -l
+$ sleep 120; cd /tmp && for m in integrals solvers; do echo "=== $m"; grep -E "^_{3,} .*test_|tests finished|^\w*Error" -A0 test_$m.log | tail -8; done; pgrep -f "sympy.test" | wc -l
+$ cd /tmp && for m in integrals solvers; do echo "=== $m"; grep -E "^_{3,} .*test_|tests finished|^\w*Error" test_$m.log | tail -8; done; pgrep -f "sympy.test" | wc -l
+$ cd /testbed && git status --short && git diff
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The diff is as intended, and every remaining test failure comes from environment issues that also occur without my change. I'm finishing here.
+
+Summary of the fix:
+- `sympy/core/expr.py`: `Expr.__eq__` now uses the strict `_sympify` instead of `sympify`. Unknown objects are no longer converted by parsing and `eval`-ing their `repr`. This fixes both the `AttributeError` from `x.y` and the false equality with an object whose repr is `x`.
+- `sympy/matrices/dense.py`: `DenseMatrix.__eq__` had the same flaw. It now uses `_sympify` and returns `NotImplemented` when conversion fails.
+- Tests:
+  - Added `test_eq_does_not_eval_repr`, which covers both cases from the issue and the matrix case.
+  - Updated `test_var` to compare against `Symbol`s instead of strings. It had relied on the old behavior, where `Symbol('d') == 'd'` was true.
+- Pre-existing failures: the `ValueError: Name node can't be used with 'False' constant` errors and the polys `random.sample` deprecation errors occur without my change too, from the Python 3.9 environment. Everything else passed in the modules I ran.

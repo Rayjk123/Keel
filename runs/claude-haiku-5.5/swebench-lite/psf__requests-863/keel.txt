@@ -1,0 +1,44 @@
+$ grep -rn "hooks" --include=*.py . | grep -v test | head -50
+$ sed -n 140,160p requests/models.py && echo ---- && sed -n 28,50p requests/hooks.py && echo ---- && sed -n 455,480p requests/models.py
+$ python3 - <<'EOF'
+import re
+path = "requests/models.py"
+src = open(path).read()
+old = """        for (k, v) in list(hooks.items()):
+            self.register_hook(event=k, hook=v)
+"""
+new = """        for (k, v) in list(hooks.items()):
+            if hasattr(v, '__call__'):
+                self.register_hook(event=k, hook=v)
+            else:
+                # Accept an iterable (e.g. a list) of hook callables.
+                for hook in v:
+                    self.register_hook(event=k, hook=hook)
+"""
+assert src.count(old) == 1, "target block not found exactly once"
+open(path, "w").write(src.replace(old, new))
+print("patched", path)
+EOF
+cd . && python3 -c "
+import requests
+from requests.models import Request
+calls = []
+def h1(r): calls.append('h1'); return r
+def h2(r): calls.append('h2'); return r
+req = Request(method='GET', url='http://example.com', hooks={'response': [h1, h2]})
+print('response hooks:', req.hooks['response'])
+req2 = Request(method='GET', url='http://example.com', hooks={'response': h1})
+print('single hook:', req2.hooks['response'])
+"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is in place and the quick check passes. A list of hooks now registers each function individually, and a single callable still works. The `SyntaxWarning` comes from an existing `is 0` comparison at `models.py:798`, not from this change.
+
+**Summary**
+
+- **Cause:** In `Request.__init__` (`requests/models.py`), each value in the `hooks` dict was passed straight to `register_hook`. A list therefore became one list-valued hook, which fails at dispatch because lists are not callable.
+- **Change:** The loop now checks whether the value is callable. If it is, it registers it as before. Otherwise it treats the value as an iterable and registers each entry separately.
+- **Verification:** `hooks={'response': [h1, h2]}` now yields `[h1, h2]` in `req.hooks['response']`, and `hooks={'response': h1}` still yields `[h1]`.
+- **Not done:** I did not run the full test suite, and I did not modify the stale copy under `build/lib/`.
+
+
+Task complete. The summary above describes the change.

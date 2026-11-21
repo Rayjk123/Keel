@@ -1,0 +1,64 @@
+$ cd /app && file a.out && ls -la && readelf -lS a.out | head -80 && which node && node --version
+$ cd /app && ls -la && readelf -hlS a.out | head -100; which node; node --version
+$ cd /app && cat hi.c; node -e 'console.log((1784774249).toString(16),(1718378344).toString(16))'; readelf -l a.out | sed -n '/LOAD/,+1p'
+$ cd /app && cat > extract.js <<'EOF'
+const fs = require('fs');
+const buf = fs.readFileSync(process.argv[2] || '/app/a.out');
+const is64 = buf[4] === 2, le = buf[5] === 1;
+const r16 = o => le ? buf.readUInt16LE(o) : buf.readUInt16BE(o);
+const r32 = o => le ? buf.readUInt32LE(o) : buf.readUInt32BE(o);
+const rA = o => is64 ? Number(le ? buf.readBigUInt64LE(o) : buf.readBigUInt64BE(o)) : r32(o);
+const shoff = is64 ? rA(0x28) : r32(0x20);
+const shentsize = r16(is64 ? 0x3a : 0x2e), shnum = r16(is64 ? 0x3c : 0x30);
+const phoff = is64 ? rA(0x20) : r32(0x1c);
+const phentsize = r16(is64 ? 0x36 : 0x2a), phnum = r16(is64 ? 0x38 : 0x2c);
+const mem = new Map();
+function add(addr, off, size) {
+  for (let i = 0; i < size && off + i < buf.length; i++) mem.set(addr + i, buf[off + i]);
+}
+let used = false;
+if (shoff && shnum) {
+  for (let i = 0; i < shnum; i++) {
+    const b = shoff + i * shentsize;
+    const type = r32(b + 4);
+    const flags = is64 ? rA(b + 8) : r32(b + 8);
+    const addr = is64 ? rA(b + 16) : r32(b + 12);
+    const off = is64 ? rA(b + 24) : r32(b + 16);
+    const size = is64 ? rA(b + 32) : r32(b + 20);
+    if (type === 0 || type === 8 || !(flags & 2)) continue;
+    add(addr, off, size); used = true;
+  }
+}
+if (!used) {
+  for (let i = 0; i < phnum; i++) {
+    const b = phoff + i * phentsize;
+    if (r32(b) !== 1) continue;
+    const off = is64 ? rA(b + 8) : r32(b + 4);
+    const vaddr = is64 ? rA(b + 16) : r32(b + 8);
+    const filesz = is64 ? rA(b + 32) : r32(b + 16);
+    add(vaddr, off, filesz);
+  }
+}
+const words = new Set();
+for (const a of mem.keys()) words.add(a - (a % 4));
+const out = {};
+for (const w of [...words].sort((x, y) => x - y)) {
+  if (![0,1,2,3].every(k => mem.has(w + k))) continue;
+  const bs = [0,1,2,3].map(k => mem.get(w + k));
+  out[w] = le ? (bs[0] | bs[1] << 8 | bs[2] << 16 | bs[3] << 24) >>> 0
+              : (bs[3] | bs[2] << 8 | bs[1] << 16 | bs[0] << 24) >>> 0;
+}
+process.stdout.write(JSON.stringify(out));
+EOF
+node extract.js /app/a.out > out.json && head -c 300 out.json; echo; node -e 'console.log(Object.keys(require("./out.json")).length)'
+$ cd /app && sed -i 's/^if (!used) {/{/' extract.js && node extract.js /app/a.out > out.json && node -e 'const o=require("./out.json");const k=Object.keys(o);console.log(k.length,k.slice(0,3),o[0].toString(16),typeof o[0])'
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I wrote `/app/extract.js`, and `node extract.js /app/a.out > out.json` produces 698 address/value pairs. I can't compare against the reference solution, so I don't know whether this meets the 75% coverage requirement.
+
+**What it does:**
+- It reads the ELF headers (32- or 64-bit, either byte order) and finds every section that is loaded into memory and has data in the file.
+- It also adds the full contents of each loadable segment, which brings in the ELF header, the program headers and the padding between sections.
+- It reads each complete, 4-byte-aligned little-endian word as an unsigned 32-bit integer. The keys are decimal addresses and the values are numbers, not strings.
+- `.bss` is skipped because it has no data in the file.
+
+**Coverage risk:** The binary is position-independent with its first address at 0, so the output starts at address 0 (value `0x464c457f`, the `\x7fELF` magic). The example's addresses start at 4194304 (0x400000), which looks like a different, non-position-independent binary. If the reference used a different base address or only counted section contents, this output may cover less than 75% of its addresses. Every value is a direct copy of the file's bytes at their mapped address. Using only the sections gives 491 addresses instead of 698.

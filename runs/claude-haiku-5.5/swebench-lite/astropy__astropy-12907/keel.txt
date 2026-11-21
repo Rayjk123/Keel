@@ -1,0 +1,45 @@
+$ cd . && ls && grep -n "def _cstack" -A 25 astropy/modeling/separable.py
+$ cd . && python3 - <<'EOF'
+import re
+p = 'astropy/modeling/separable.py'
+s = open(p).read()
+old = """        cright = np.zeros((noutp, right.shape[1]))
+        cright[: right.shape[0], : right.shape[1]] = right"""
+new = """        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = right"""
+if old in s:
+    s = s.replace(old, new, 1)
+    open(p, 'w').write(s)
+    print("patched")
+else:
+    print("pattern not found")
+EOF
+sed -n 219,255p astropy/modeling/separable.py
+$ cd . && python3 - <<'EOF'
+p = 'astropy/modeling/separable.py'
+s = open(p).read()
+old = "        cright[-right.shape[0]:, -right.shape[1]:] = 1\n"
+new = "        cright[-right.shape[0]:, -right.shape[1]:] = right\n"
+if s.count(old) == 1:
+    s = s.replace(old, new, 1)
+    open(p, 'w').write(s)
+    print("patched")
+else:
+    print("pattern not found, count=", s.count(old))
+EOF
+sed -n 241,246p astropy/modeling/separable.py && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+cm = m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(m.Pix2Sky_TAN() & cm))
+"
+$ cd . && python3 -m pytest astropy/modeling/tests/test_separable.py -q 2>&1 | tail -n 15
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is in place and the existing separability tests pass (11 passed).
+
+**Summary:**
+- **Root cause:** In `_cstack` in `astropy/modeling/separable.py`, when the right operand of `&` is an already-computed coordinate matrix (the nested case), the code filled its block with `1` instead of copying the matrix. That flattened the nested model's separability structure into an all-ones block, so its inputs and outputs looked dependent.
+- **Change:** Replaced `cright[-right.shape[0]:, -right.shape[1]:] = 1` with `... = right`.
+- **Verification:** `separability_matrix(Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5)))` now returns the expected block-diagonal result, and `astropy/modeling/tests/test_separable.py` passes.
+
+An earlier patch attempt matched nothing and changed no files, so the single edit above is the only change.

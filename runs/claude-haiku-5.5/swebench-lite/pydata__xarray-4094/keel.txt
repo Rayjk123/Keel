@@ -1,0 +1,45 @@
+$ cd . && grep -rn "to_unstacked_dataset\|def to_stacked_array" --include=*.py . | head -20
+$ cd . && sed -n 1895,1975p xarray/core/dataarray.py && echo ---- && sed -n 3370,3450p xarray/core/dataset.py
+$ cd . && python -c "
+import numpy as np, xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+print(stacked.indexes['y'])
+for k in stacked.indexes['y'].levels[0]:
+    print(k, stacked.sel(variable=k).squeeze(drop=True))
+" 2>&1 | tail -40; echo ---; sed -n 3450,3475p xarray/core/dataset.py
+$ cd . && python - <<'EOF'
+import re
+p = "xarray/core/dataarray.py"
+s = open(p).read()
+old = "            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)\n"
+new = ("            data_dict[k] = (\n"
+       "                self.sel({variable_dim: k})\n"
+       "                .squeeze(drop=True)\n"
+       "                .drop(dim, errors=\"ignore\")\n"
+       "            )\n")
+assert s.count(old) == 1, "pattern not found exactly once"
+open(p, "w").write(s.replace(old, new))
+print("patched")
+EOF
+python -c "
+import numpy as np, xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+rt = stacked.to_unstacked_dataset('y')
+print(rt)
+print('identical:', data.identical(rt))
+" 2>&1 | tail -20
+python -m pytest -q xarray/tests/test_dataset.py -k "stacked" 2>&1 | tail -5
+python -m pytest -q xarray/tests/test_dataarray.py -k "unstacked" 2>&1 | tail -5
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The MCVE now round-trips: the unstacked dataset is `identical` to the original, and the stacked and unstacked tests pass (5 in `test_dataset.py`, 1 in `test_dataarray.py`).
+
+**Root cause:** In `DataArray.to_unstacked_dataset`, each variable is pulled out with `self.sel({variable_dim: k})`. The stacked coordinate `y` is a MultiIndex, so after selection it survives as a scalar non-index coordinate holding that variable's tuple (`('a',)` for `a`, `('b',)` for `b`). When `Dataset(data_dict)` merges the slices, those conflicting `y` values raise the `MergeError`.
+
+**Fix:** In `xarray/core/dataarray.py`, each slice now has the stacked coordinate `dim` dropped with `errors="ignore"`, so the conflicting coordinate is no longer carried into the merge. The `errors="ignore"` keeps the case where the coordinate is already absent working.
+
+One thing to be aware of: the installed xarray emits a `PendingDeprecationWarning` for `drop`, suggesting `drop_vars`. I kept `drop` to match the API this codebase uses. I only ran the stacked/unstacked subsets, not the full test suite.

@@ -1,0 +1,82 @@
+$ cat seaborn/_stats/regression.py
+$ cd . && python - <<'EOF'
+import re
+path = "seaborn/_stats/regression.py"
+src = open(path).read()
+old = '''        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:'''
+new = '''        x = data["x"]
+        y = data["y"]
+
+        # Drop observations with missing x or y so that polyfit is not
+        # passed NaN values, which causes an LinAlgError
+        valid = x.notna() & y.notna()
+        x = x[valid]
+        y = y[valid]
+
+        if x.nunique() <= self.order:'''
+assert src.count(old) == 1
+open(path, "w").write(src.replace(old, new))
+print("patched")
+EOF
+python -c "
+import seaborn.objects as so
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print('plot ok')
+" 2>&1 | tail -5
+$ cd . && grep -rn "use_inf_as_null" --include=*.py . ; python -c "
+import seaborn.objects as so
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print('plot ok')
+" 2>&1 | head -40; python -c "import pandas, numpy; print(pandas.__version__, numpy.__version__)"
+$ cd . && python - <<'EOF' 2>&1 | tail -20
+import pandas as pd
+from pandas._config import config as _c
+# Test-only shim: re-register the option removed in pandas 2.0 so the
+# unrelated Line mark code path can run. Not persisted to the repo.
+if "mode.use_inf_as_null" not in pd.get_option.__globals__["_registered_options"]:
+    _c.register_option("mode.use_inf_as_null", False)
+
+import numpy as np
+import seaborn.objects as so
+from seaborn._stats.regression import PolyFit
+import pandas as pd
+
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print("plot ok")
+
+df = pd.DataFrame(dict(x=[1, 2, 3, np.nan, 4], y=[1, 2, 3, 4, 5]))
+out = PolyFit()._fit_predict(df)
+print("PolyFit output shape:", out.shape, "nan count:", int(out.isna().sum().sum()))
+print("finite fit at x=1..4 ->", np.round(np.polyval(np.polyfit([1,2,3,4],[1,2,3,5],2),[1,4]),3))
+EOF
+git -C . diff --stat 2>/dev/null; git -C . diff -- seaborn/_stats/regression.py 2>/dev/null | head -40
+$ cd . && python - <<'EOF' 2>&1 | tail -20
+import numpy as np
+import pandas as pd
+from pandas._config import config as _c
+
+# Test-only shim: re-register the option removed in pandas 2.0 so the
+# unrelated Line mark code path can run. Not persisted to the repo.
+if "mode.use_inf_as_null" not in _c._registered_options:
+    _c.register_option("mode.use_inf_as_null", False)
+
+import seaborn.objects as so
+from seaborn._stats.regression import PolyFit
+
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print("plot ok")
+
+df = pd.DataFrame(dict(x=[1, 2, 3, np.nan, 4], y=[1, 2, 3, 4, 5]))
+out = PolyFit()._fit_predict(df)
+print("PolyFit output shape:", out.shape, "nan count:", int(out.isna().sum().sum()))
+EOF
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The `PolyFit` fix works. The reproduction from the issue now builds the plot and produces a 100-point fit with no NaN values.
+
+**Summary:**
+- **Root cause:** `PolyFit._fit_predict` passed the raw `x` and `y` series to `np.polyfit`. A `None` in the input becomes NaN, and that makes the least-squares SVD fail with `LinAlgError`.
+- **Change:** In `seaborn/_stats/regression.py`, I drop rows where `x` or `y` is missing before the `nunique()` check and the fit. This is the only repo change (7 added lines).
+- **Verification:** The issue's example plots successfully. `_fit_predict` on data with a NaN returns 100 rows with no NaN values.
+- **Unrelated blocker, not fixed:** The `Line` mark, and several other places in the repo, use `pd.option_context("mode.use_inf_as_null")`. That option was removed in pandas 2.0, and this environment has pandas 2.0.0. To run the check, I registered the option in a throwaway script only. The repo is not changed for this. A separate fix would be needed for the full plot path to run without the shim.

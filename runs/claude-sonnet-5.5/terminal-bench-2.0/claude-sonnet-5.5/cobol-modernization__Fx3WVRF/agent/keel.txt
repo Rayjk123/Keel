@@ -1,0 +1,389 @@
+$ cd /app && ls -la . src data && cat src/program.cbl && head -c 600 src/INPUT.DAT
+$ cd /app && for f in data/*.DAT src/INPUT.DAT; do echo "== $f"; xxd $f; done; which cobc cobcrun; cobc --version | head -1
+$ cd /app && for f in data/*.DAT src/INPUT.DAT; do echo "== $f"; od -c $f; done; mkdir -p /tmp/orig && cp -r data /tmp/orig/ && cp src/INPUT.DAT /tmp/orig/</reasoning_effort>
+$ cd /app && for f in data/*.DAT src/INPUT.DAT; do echo "== $f"; od -c $f; done; mkdir -p /tmp/orig && cp -r data /tmp/orig/ && cp src/INPUT.DAT /tmp/orig/ && ls /tmp/orig
+$ cd /app && mkdir -p /tmp/cob && cobc -x -o /tmp/cob/prog src/program.cbl 2>&1 | head; cd /app && /tmp/cob/prog; echo "rc=$?"; for f in data/*.DAT; do cmp $f /tmp/orig/$f && echo "$f unchanged"; done</parameter>
+$ cd /app && mkdir -p /tmp/cob && cobc -x -o /tmp/cob/prog src/program.cbl 2>&1 | head; /tmp/cob/prog; echo "rc=$?"; for f in data/*.DAT; do cmp $f /tmp/orig/$f && echo "$f unchanged"; done
+$ cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+ACC = os.path.join(BASE, "data", "ACCOUNTS.DAT")
+BOOKS = os.path.join(BASE, "data", "BOOKS.DAT")
+TRANS = os.path.join(BASE, "data", "TRANSACTIONS.DAT")
+INP = os.path.join(BASE, "src", "INPUT.DAT")
+
+ACC_LEN = 34
+BOOK_LEN = 28
+IN_LEN = 22
+
+
+def num(b):
+    v = 0
+    for c in b:
+        v = v * 10 + (c & 0x0F)
+    return v
+
+
+def fmt(v, n=10):
+    return str(v % (10 ** n)).zfill(n).encode()
+
+
+def read_records(path, size):
+    with open(path, "rb") as f:
+        data = f.read()
+    recs = [bytearray(data[i:i + size]) for i in range(0, len(data) - size + 1, size)]
+    return recs
+
+
+def write_records(path, recs):
+    with open(path, "wb") as f:
+        for r in recs:
+            f.write(bytes(r))
+
+
+def main():
+    with open(INP, "rb") as f:
+        data = f.read(IN_LEN)
+    if len(data) == 0:
+        print("Error: Input file is empty")
+        return
+    data = data.ljust(IN_LEN, b" ")
+    buyer = data[0:4]
+    seller = data[4:8]
+    book = data[8:12]
+    amount_bytes = data[12:22]  # PIC 9(10), moved as digits
+    amount = num(amount_bytes)
+
+    buyer_found = seller_found = book_found = valid_owner = False
+
+    accounts = read_records(ACC, ACC_LEN)
+    for r in accounts:
+        if bytes(r[0:4]) == buyer:
+            buyer_found = True
+        if bytes(r[0:4]) == seller:
+            seller_found = True
+
+    books = read_records(BOOKS, BOOK_LEN)
+    for r in books:
+        if bytes(r[0:4]) == book:
+            book_found = True
+            if bytes(r[24:28]) == seller:
+                valid_owner = True
+    print(" ")
+
+    if buyer_found and seller_found and book_found and valid_owner:
+        for r in accounts:
+            if bytes(r[0:4]) == buyer:
+                r[24:34] = fmt(abs(num(r[24:34]) - amount))
+            if bytes(r[0:4]) == seller:
+                r[24:34] = fmt(num(r[24:34]) + amount)
+        write_records(ACC, accounts)
+
+        for r in books:
+            if bytes(r[0:4]) == book:
+                r[24:28] = buyer
+        write_records(BOOKS, books)
+
+        with open(TRANS, "ab") as f:
+            f.write(book + amount_bytes + seller + buyer)
+        print("Transaction completed successfully")
+    else:
+        print("Transaction failed due to validation errors")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+cat > /tmp/harness.sh <<'EOF'
+#!/bin/bash
+# usage: harness.sh <input-bytes printf format> <accounts printf> 
+mk() { d=$1; rm -rf $d; mkdir -p $d/data $d/src; cp /tmp/orig/data/*.DAT $d/data/; }
+run_case() {
+  inp="$1"
+  mk /tmp/tc; mk /tmp/tp
+  printf "$inp" > /tmp/tc/src/INPUT.DAT; printf "$inp" > /tmp/tp/src/INPUT.DAT
+  if [ -n "$2" ]; then printf "$2" > /tmp/tc/data/ACCOUNTS.DAT; printf "$2" > /tmp/tp/data/ACCOUNTS.DAT; fi
+  cp /app/program.py /tmp/tp/program.py
+  (cd /tmp/tc && /tmp/cob/prog > /tmp/tc/out.txt 2>&1)
+  (cd /tmp/tp && python3 program.py > /tmp/tp/out.txt 2>&1)
+  ok=1
+  for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp -s /tmp/tc/data/$f.DAT /tmp/tp/data/$f.DAT || { ok=0; echo "DIFF $f"; }; done
+  cmp -s /tmp/tc/out.txt /tmp/tp/out.txt || { ok=0; echo "DIFF stdout"; }
+  if [ $ok = 1 ]; then echo "OK   [$inp] $(tail -1 /tmp/tc/out.txt)"; else echo "FAIL [$inp]"; od -c /tmp/tc/data/ACCOUNTS.DAT | head -8; od -c /tmp/tp/data/ACCOUNTS.DAT | head -8; od -c /tmp/tc/data/TRANSACTIONS.DAT | tail -4; od -c /tmp/tp/data/TRANSACTIONS.DAT | tail -4; fi
+}
+run_case 'U001U002B0010000000200'
+run_case 'U001U002B002000000200'
+run_case 'U001U002B0020000000200'
+run_case 'U001U002B002200'
+run_case 'U001U002B00200000'
+run_case 'U002U001B0020000000050'
+run_case 'U001U001B0020000000050'
+run_case 'U002U002B0020000000050'
+run_case 'U001U002B0020000009999'
+run_case 'U002U003B0030000009999'
+run_case 'U003U002B0020000009999'
+run_case 'U003U002B0020009999999'
+run_case 'U003U002B0029999999999'
+run_case 'U001U002B0029999999999'
+run_case 'U001U002B002abcdefghij'
+run_case 'U001U002B002  12      '
+run_case 'U001U002B00200000000\n'
+run_case 'U009U002B0020000000050'
+run_case 'U001U009B0020000000050'
+run_case 'U001U002B0010000000050'
+run_case ''
+EOF
+chmod +x /tmp/harness.sh && /tmp/harness.sh</parameter>
+$ cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+ACC = os.path.join(BASE, "data", "ACCOUNTS.DAT")
+BOOKS = os.path.join(BASE, "data", "BOOKS.DAT")
+TRANS = os.path.join(BASE, "data", "TRANSACTIONS.DAT")
+INP = os.path.join(BASE, "src", "INPUT.DAT")
+
+ACC_LEN = 34
+BOOK_LEN = 28
+IN_LEN = 22
+
+
+def num(b):
+    v = 0
+    for c in b:
+        v = v * 10 + (c & 0x0F)
+    return v
+
+
+def fmt(v, n=10):
+    return str(v % (10 ** n)).zfill(n).encode()
+
+
+def read_records(path, size):
+    with open(path, "rb") as f:
+        data = f.read()
+    recs = [bytearray(data[i:i + size]) for i in range(0, len(data) - size + 1, size)]
+    return recs
+
+
+def write_records(path, recs):
+    with open(path, "wb") as f:
+        for r in recs:
+            f.write(bytes(r))
+
+
+def main():
+    with open(INP, "rb") as f:
+        data = f.read(IN_LEN)
+    if len(data) == 0:
+        print("Error: Input file is empty")
+        return
+    data = data.ljust(IN_LEN, b" ")
+    buyer = data[0:4]
+    seller = data[4:8]
+    book = data[8:12]
+    amount_bytes = data[12:22]  # PIC 9(10), moved as digits
+    amount = num(amount_bytes)
+
+    buyer_found = seller_found = book_found = valid_owner = False
+
+    accounts = read_records(ACC, ACC_LEN)
+    for r in accounts:
+        if bytes(r[0:4]) == buyer:
+            buyer_found = True
+        if bytes(r[0:4]) == seller:
+            seller_found = True
+
+    books = read_records(BOOKS, BOOK_LEN)
+    for r in books:
+        if bytes(r[0:4]) == book:
+            book_found = True
+            if bytes(r[24:28]) == seller:
+                valid_owner = True
+    print(" ")
+
+    if buyer_found and seller_found and book_found and valid_owner:
+        for r in accounts:
+            if bytes(r[0:4]) == buyer:
+                r[24:34] = fmt(abs(num(r[24:34]) - amount))
+            if bytes(r[0:4]) == seller:
+                r[24:34] = fmt(num(r[24:34]) + amount)
+        write_records(ACC, accounts)
+
+        for r in books:
+            if bytes(r[0:4]) == book:
+                r[24:28] = buyer
+        write_records(BOOKS, books)
+
+        with open(TRANS, "ab") as f:
+            f.write(book + amount_bytes + seller + buyer)
+        print("Transaction completed successfully")
+    else:
+        print("Transaction failed due to validation errors")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+cat > /tmp/harness.sh <<'EOF'
+#!/bin/bash
+mk() { d=$1; rm -rf $d; mkdir -p $d/data $d/src; cp /tmp/orig/data/*.DAT $d/data/; }
+run_case() {
+  inp="$1"
+  mk /tmp/tc; mk /tmp/tp
+  printf "$inp" > /tmp/tc/src/INPUT.DAT; printf "$inp" > /tmp/tp/src/INPUT.DAT
+  if [ -n "$2" ]; then printf "$2" > /tmp/tc/data/ACCOUNTS.DAT; printf "$2" > /tmp/tp/data/ACCOUNTS.DAT; fi
+  cp /app/program.py /tmp/tp/program.py
+  (cd /tmp/tc && /tmp/cob/prog > /tmp/tc/out.txt 2>&1)
+  (cd /tmp/tp && python3 program.py > /tmp/tp/out.txt 2>&1)
+  ok=1
+  for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp -s /tmp/tc/data/$f.DAT /tmp/tp/data/$f.DAT || { ok=0; echo "DIFF $f"; }; done
+  cmp -s /tmp/tc/out.txt /tmp/tp/out.txt || { ok=0; echo "DIFF stdout"; }
+  if [ $ok = 1 ]; then echo "OK   [$inp] $(tail -1 /tmp/tc/out.txt)"; else echo "FAIL [$inp]"; od -c /tmp/tc/data/ACCOUNTS.DAT | head -8; od -c /tmp/tp/data/ACCOUNTS.DAT | head -8; od -c /tmp/tc/data/TRANSACTIONS.DAT | tail -4; od -c /tmp/tp/data/TRANSACTIONS.DAT | tail -4; fi
+}
+run_case 'U001U002B0010000000200'
+run_case 'U001U002B002000000200'
+run_case 'U001U002B0020000000200'
+run_case 'U001U002B002200'
+run_case 'U001U002B00200000'
+run_case 'U002U001B0020000000050'
+run_case 'U001U001B0020000000050'
+run_case 'U002U002B0020000000050'
+run_case 'U001U002B0020000009999'
+run_case 'U002U003B0030000009999'
+run_case 'U003U002B0020000009999'
+run_case 'U003U002B0020009999999'
+run_case 'U003U002B0029999999999'
+run_case 'U001U002B0029999999999'
+run_case 'U001U002B002abcdefghij'
+run_case 'U001U002B002  12      '
+run_case 'U001U002B00200000000\n'
+run_case 'U009U002B0020000000050'
+run_case 'U001U009B0020000000050'
+run_case 'U001U002B0010000000050'
+run_case ''
+EOF
+chmod +x /tmp/harness.sh && /tmp/harness.sh
+$ cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+ACC = os.path.join(BASE, "data", "ACCOUNTS.DAT")
+BOOKS = os.path.join(BASE, "data", "BOOKS.DAT")
+TRANS = os.path.join(BASE, "data", "TRANSACTIONS.DAT")
+INP = os.path.join(BASE, "src", "INPUT.DAT")
+
+ACC_LEN = 34
+BOOK_LEN = 28
+IN_LEN = 22
+M64 = (1 << 64) - 1
+
+
+def num(b):
+    v = 0
+    for c in b:
+        v = v * 10 + (c & 0x0F)
+    return v
+
+
+def fmt(v, n=10):
+    return str(v % (10 ** n)).zfill(n).encode()
+
+
+def read_records(path, size):
+    with open(path, "rb") as f:
+        data = f.read()
+    return [bytearray(data[i:i + size]) for i in range(0, len(data) - size + 1, size)]
+
+
+def write_records(path, recs):
+    with open(path, "wb") as f:
+        for r in recs:
+            f.write(bytes(r))
+
+
+def main():
+    with open(INP, "rb") as f:
+        data = f.read(IN_LEN)
+    if len(data) == 0:
+        print("Error: Input file is empty")
+        return
+    data = data.ljust(IN_LEN, b" ")
+    buyer = data[0:4]
+    seller = data[4:8]
+    book = data[8:12]
+    # MOVE 9(10) -> 9(10)V99 : spaces become '0'
+    amount_bytes = bytes(0x30 if c == 0x20 else c for c in data[12:22])
+    acc = 0
+    for c in amount_bytes + b"00":
+        acc = (acc * 10 + (c - 48)) & M64
+    amount = acc // 100
+
+    buyer_found = seller_found = book_found = valid_owner = False
+
+    accounts = read_records(ACC, ACC_LEN)
+    for r in accounts:
+        if bytes(r[0:4]) == buyer:
+            buyer_found = True
+        if bytes(r[0:4]) == seller:
+            seller_found = True
+
+    books = read_records(BOOKS, BOOK_LEN)
+    for r in books:
+        if bytes(r[0:4]) == book:
+            book_found = True
+            if bytes(r[24:28]) == seller:
+                valid_owner = True
+    print(" ")
+
+    if buyer_found and seller_found and book_found and valid_owner:
+        for r in accounts:
+            if bytes(r[0:4]) == buyer:
+                r[24:34] = fmt(abs(num(r[24:34]) - amount))
+                if buyer == seller:
+                    # second REWRITE without READ aborts the COBOL run
+                    write_records(ACC, accounts)
+                    return
+            if bytes(r[0:4]) == seller:
+                r[24:34] = fmt(num(r[24:34]) + amount)
+        write_records(ACC, accounts)
+
+        for r in books:
+            if bytes(r[0:4]) == book:
+                r[24:28] = buyer
+        write_records(BOOKS, books)
+
+        with open(TRANS, "ab") as f:
+            f.write(book + amount_bytes + seller + buyer)
+        print("Transaction completed successfully")
+    else:
+        print("Transaction failed due to validation errors")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+/tmp/harness.sh 2>&1 | grep -E '^(OK|FAIL|DIFF)'
+$ cd /tmp && for inp in 'U002U002B0020000000050' ''; do rm -rf tc tp; mkdir -p tc/data tc/src tp/data tp/src; cp /tmp/orig/data/*.DAT tc/data/; cp /tmp/orig/data/*.DAT tp/data/; printf "$inp" > tc/src/INPUT.DAT; printf "$inp" > tp/src/INPUT.DAT; cp /app/program.py tp/; (cd tc && /tmp/cob/prog; echo "rc=$?") 2>&1 | od -c | head; echo ---; (cd tp && python3 program.py; echo "rc=$?") 2>&1 | od -c | head; echo ======; done
+$ cd /app && python3 program.py; for f in data/*.DAT; do cmp $f /tmp/orig/$f && echo "$f unchanged"; done
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`/app/program.py` is written, and in every test I ran its `.DAT` output matched the compiled GnuCOBOL program's byte for byte.
+
+On the real data, the supplied `INPUT.DAT` names book B007, which doesn't exist. Both programs print "Transaction failed due to validation errors" and leave all three `.DAT` files unchanged.
+
+I compared the two programs on 21 edge cases. These included short and padded input records, non-numeric and space amounts, an amount larger than the buyer's balance, a missing buyer, seller or book, and an empty input file. The `.DAT` files matched in all of them. Stdout differed in two cases, both because the COBOL program wrote libcob runtime messages on stderr:
+- **Buyer equals seller:** COBOL aborts because its second `REWRITE` has no preceding `READ`. By then the buyer's balance has already been reduced, and the books and transactions files are untouched. The Python script reproduces that file state.
+- **Empty input:** COBOL prints an extra "implicit CLOSE" warning after the same error message, and no `.DAT` file changes.
+
+Behaviours the script reproduces:
+- **Fixed-width records, no newlines:** accounts are 34 bytes, books 28, transactions 22, and the input record 22.
+- **Short input records:** these are padded with spaces, and spaces in the amount become `0`.
+- **Non-numeric amounts:** the amount is accumulated as an unsigned 64-bit value over the 10 input digits plus the two implied decimal places, then divided by 100. This matches the COBOL results for inputs like `abcdefghij`.
+- **Unsigned balances:** a balance that would go negative is stored as its absolute value, and anything over 10 digits is truncated.
+- **Transaction file:** a successful transaction appends a record to `TRANSACTIONS.DAT` with the raw amount bytes.
+
+The script resolves its paths relative to its own location. I left my test harness and the compiled COBOL binary in `/tmp`.

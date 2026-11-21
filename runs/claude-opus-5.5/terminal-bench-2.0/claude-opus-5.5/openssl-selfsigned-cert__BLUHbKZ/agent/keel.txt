@@ -1,0 +1,111 @@
+$ which openssl python3; openssl version; python3 -c "import cryptography; print(cryptography.__version__)"; python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"; ls /app
+$ mkdir -p /app/ssl && cd /app/ssl && \
+openssl genrsa -out server.key 2048 && chmod 600 server.key && \
+openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/O=DevOps Team/CN=dev-internal.company.local" && \
+cat server.key server.crt > server.pem && chmod 600 server.pem && \
+{ echo "Subject: $(openssl x509 -in server.crt -noout -subject | sed 's/^subject=//')"; \
+  echo "Valid From: $(date -u -d "$(openssl x509 -in server.crt -noout -startdate | cut -d= -f2)" +%Y-%m-%d)"; \
+  echo "Valid Until: $(date -u -d "$(openssl x509 -in server.crt -noout -enddate | cut -d= -f2)" +%Y-%m-%d)"; \
+  openssl x509 -in server.crt -noout -startdate; \
+  openssl x509 -in server.crt -noout -enddate; \
+  echo "SHA-256 Fingerprint: $(openssl x509 -in server.crt -noout -fingerprint -sha256 | cut -d= -f2)"; } > verification.txt && \
+cat verification.txt && ls -l
+$ cat > /app/check_cert.py <<'EOF'
+#!/usr/bin/env python3
+"""Verify the self-signed certificate at /app/ssl/server.crt."""
+import os
+import ssl
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+CERT_PATH = "/app/ssl/server.crt"
+KEY_PATH = "/app/ssl/server.key"
+
+
+def load_cert(path):
+    """Return (subject_dict, not_before, not_after) for the certificate."""
+    try:
+        info = ssl._ssl._test_decode_cert(path)
+        subject = {k: v for rdn in info["subject"] for (k, v) in rdn}
+        nb = datetime.fromtimestamp(ssl.cert_time_to_seconds(info["notBefore"]), timezone.utc)
+        na = datetime.fromtimestamp(ssl.cert_time_to_seconds(info["notAfter"]), timezone.utc)
+        return subject, nb, na
+    except AttributeError:
+        out = subprocess.run(
+            ["openssl", "x509", "-in", path, "-noout", "-subject", "-startdate", "-enddate",
+             "-nameopt", "sep_multiline,sname"],
+            check=True, capture_output=True, text=True).stdout
+        subject, nb, na = {}, None, None
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("notBefore="):
+                nb = datetime.fromtimestamp(ssl.cert_time_to_seconds(line.split("=", 1)[1]), timezone.utc)
+            elif line.startswith("notAfter="):
+                na = datetime.fromtimestamp(ssl.cert_time_to_seconds(line.split("=", 1)[1]), timezone.utc)
+            elif "=" in line and not line.startswith("subject"):
+                k, v = line.split("=", 1)
+                subject[{"CN": "commonName", "O": "organizationName"}.get(k, k)] = v
+        return subject, nb, na
+
+
+def main():
+    if not os.path.isfile(CERT_PATH):
+        print(f"Error: certificate not found at {CERT_PATH}")
+        return 1
+    try:
+        subject, not_before, not_after = load_cert(CERT_PATH)
+    except Exception as exc:
+        print(f"Error: unable to load certificate: {exc}")
+        return 1
+
+    cn = subject.get("commonName")
+    org = subject.get("organizationName")
+    print(f"Certificate: {CERT_PATH}")
+    print(f"Common Name: {cn}")
+    print(f"Organization: {org}")
+    print(f"Valid From: {not_before.strftime('%Y-%m-%d')}")
+    print(f"Expiration Date: {not_after.strftime('%Y-%m-%d')}")
+
+    ok = True
+    if cn != "dev-internal.company.local":
+        print("Error: unexpected Common Name"); ok = False
+    if org != "DevOps Team":
+        print("Error: unexpected Organization"); ok = False
+    now = datetime.now(timezone.utc)
+    if not (not_before <= now <= not_after):
+        print("Error: certificate is not currently valid"); ok = False
+    if os.path.isfile(KEY_PATH):
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(CERT_PATH, KEY_PATH)
+        except Exception as exc:
+            print(f"Error: key does not match certificate: {exc}"); ok = False
+
+    if ok:
+        print("Certificate verification successful")
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+chmod +x /app/check_cert.py && python3 /app/check_cert.py; echo "exit=$?"; openssl verify -CAfile /app/ssl/server.crt /app/ssl/server.crt; openssl rsa -in /app/ssl/server.key -check -noout
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+All the files are created and checked, and the Python script printed "Certificate verification successful".
+
+- **Directory:** created `/app/ssl/`.
+- **`/app/ssl/server.key`:** 2048-bit RSA key with permissions 600. `openssl rsa -check` reported "RSA key ok".
+- **`/app/ssl/server.crt`:** self-signed certificate valid for 365 days, from 2026-11-21 to 2027-11-21.
+  - Subject: `O = DevOps Team, CN = dev-internal.company.local`
+  - `openssl verify` against itself returned OK.
+- **`/app/ssl/server.pem`:** the key followed by the certificate. I set it to 600 because it contains the private key.
+- **`/app/ssl/verification.txt`:** contains the subject, the validity dates in both YYYY-MM-DD and OpenSSL format, and the SHA-256 fingerprint.
+- **`/app/check_cert.py`:** the `cryptography` package isn't installed here, so the script uses only Python's standard library, with the `openssl` command as a fallback. It:
+  - checks that the certificate exists and can be loaded;
+  - prints the Common Name, organization, start date and expiration date in YYYY-MM-DD format;
+  - checks that the CN and organization match and that the certificate is currently valid;
+  - checks that the key matches the certificate.
+
+  If everything passes it prints "Certificate verification successful" and exits with 0.

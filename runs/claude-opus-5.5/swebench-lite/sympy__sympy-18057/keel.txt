@@ -1,0 +1,44 @@
+$ grep -n "_sympify\|sympify(other)" sympy/core/expr.py | head -20; sed -n 110,150p sympy/core/expr.py
+$ sed -i '124s/other = sympify(other)/other = _sympify(other)/' sympy/core/expr.py && sed -n 122,128p sympy/core/expr.py && python -c "
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+print(sympy.Symbol('x') == C())
+class D:
+    def __repr__(self): return 'x'
+print(sympy.Symbol('x') != D())
+print(sympy.Symbol('x') == 1, sympy.Integer(1)==1, sympy.Float(1.5)==1.5)
+"
+$ grep -rn "== *'[a-z]'" sympy/core/tests/ | head; python -m pytest -q -x sympy/core/tests/test_expr.py sympy/core/tests/test_basic.py sympy/core/tests/test_sympify.py sympy/core/tests/test_numbers.py 2>&1 | tail -5
+$ python bin/test sympy/core/tests/test_expr.py sympy/core/tests/test_basic.py sympy/core/tests/test_sympify.py sympy/core/tests/test_numbers.py sympy/core/tests/test_equal.py sympy/core/tests/test_logic.py 2>&1 | tail -15
+$ git stash && python bin/test sympy/core/tests/test_sympify.py sympy/core/tests/test_expr.py 2>&1 | tail -3; git stash pop && git diff
+$ cat >> sympy/core/tests/test_expr.py <<'EOF'
+
+
+def test_issue_18203_eq_does_not_eval_repr():
+    # Expr.__eq__ must not sympify (i.e. eval) the repr of unknown objects
+    class BadRepr:
+        def __repr__(self):
+            return 'x.y'
+    assert (Symbol('x') == BadRepr()) is False
+
+    class SameRepr:
+        def __repr__(self):
+            return 'x'
+    assert Symbol('x') != SameRepr()
+    assert (Symbol('x') == SameRepr()) is False
+EOF
+python bin/test sympy/core/tests/test_expr.py -k test_issue_18203 2>&1 | tail -3
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fixed the bug: comparing a SymPy expression to an unknown object no longer runs `eval` on that object's repr. Both cases from the issue now behave correctly.
+
+**Change:** In `sympy/core/expr.py`, `Expr.__eq__` now converts the other operand with the strict `_sympify` instead of `sympify`. The strict version only converts real numbers and SymPy-aware types, and never parses strings. Anything else raises `SympifyError`, which `__eq__` already catches and turns into `False`.
+
+**Results:**
+- `Symbol('x') == C()`, where `C`'s repr is `'x.y'`, now returns `False` instead of raising `AttributeError`.
+- `Symbol('x') != D()`, where `D`'s repr is `'x'`, now holds; before, the two compared as equal.
+- Ordinary comparisons are unchanged: `Integer(1) == 1` and `Float(1.5) == 1.5` are still `True`.
+
+**Tests:** I added `test_issue_18203_eq_does_not_eval_repr` to `sympy/core/tests/test_expr.py` covering both cases, and it passes. I ran six core test files (expr, basic, sympify, numbers, equal, logic): 278 passed and 2 raised errors in `test_sympify.py`. Those 2 errors (`ValueError: Name node can't be used with 'False' constant`) also occur with my change removed. They come from the string parser when `evaluate=False` is used, likely a Python-version mismatch, so they are unrelated to this fix. I didn't run the rest of the test suite.
+
+**Behaviour change:** an expression no longer compares equal to a string, so `Symbol('x') == 'x'` is now `False`.

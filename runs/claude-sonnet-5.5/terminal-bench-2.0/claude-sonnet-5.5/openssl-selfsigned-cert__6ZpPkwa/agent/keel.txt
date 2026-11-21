@@ -1,0 +1,90 @@
+$ which openssl python3; openssl version; python3 -c "import cryptography; print(cryptography.__version__)"; ls -la /app
+$ set -e
+mkdir -p /app/ssl && cd /app/ssl
+openssl genrsa -out server.key 2048
+chmod 600 server.key
+openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/O=DevOps Team/CN=dev-internal.company.local" -addext "subjectAltName=DNS:dev-internal.company.local"
+cat server.key server.crt > server.pem
+chmod 600 server.pem
+chmod 644 server.crt
+openssl x509 -in server.crt -noout -subject -dates -fingerprint -sha256 > verification.txt
+cat verification.txt
+ls -l /app/ssl
+$ cat > /app/check_cert.py << 'EOF'
+#!/usr/bin/env python3
+"""Verify the self-signed certificate at /app/ssl/server.crt."""
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+CERT_PATH = "/app/ssl/server.crt"
+
+
+def openssl_x509(*args):
+    result = subprocess.run(
+        ["openssl", "x509", "-in", CERT_PATH, "-noout", *args],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "openssl failed")
+    return result.stdout.strip()
+
+
+def main():
+    if not os.path.isfile(CERT_PATH):
+        print(f"Error: certificate not found at {CERT_PATH}")
+        return 1
+
+    try:
+        subject = openssl_x509("-subject", "-nameopt", "RFC2253").split("=", 1)[1]
+        end_raw = openssl_x509("-enddate").split("=", 1)[1]
+    except Exception as exc:
+        print(f"Error: could not load certificate: {exc}")
+        return 1
+
+    m = re.search(r"(?:^|,)CN=([^,]+)", subject)
+    if not m:
+        print("Error: no Common Name found in certificate")
+        return 1
+    cn = m.group(1)
+
+    expiry = datetime.strptime(" ".join(end_raw.split()), "%b %d %H:%M:%S %Y %Z")
+    expiry = expiry.replace(tzinfo=timezone.utc)
+
+    print(f"Subject: {subject}")
+    print(f"Common Name: {cn}")
+    print(f"Expiration Date: {expiry.strftime('%Y-%m-%d')}")
+
+    if cn != "dev-internal.company.local":
+        print("Error: unexpected Common Name")
+        return 1
+    if "O=DevOps Team" not in subject:
+        print("Error: unexpected Organization")
+        return 1
+    if expiry <= datetime.now(timezone.utc):
+        print("Error: certificate has expired")
+        return 1
+
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+chmod +x /app/check_cert.py
+python3 /app/check_cert.py; echo "exit=$?"
+openssl x509 -in /app/ssl/server.pem -noout -subject
+openssl rsa -in /app/ssl/server.pem -check -noout
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The certificate, key, combined PEM, verification file and check script are all created, and the check script runs successfully.
+
+- **Directory and key:** `/app/ssl/` holds a 2048-bit RSA key, `server.key`, with permissions 600. `openssl rsa -check` reports the key as OK.
+- **Certificate:** `server.crt` is self-signed and valid for 365 days. Its subject is `O=DevOps Team, CN=dev-internal.company.local`. I also added a subjectAltName for the same hostname, which you didn't ask for.
+- **Combined PEM:** `server.pem` contains the key followed by the certificate, with permissions 600 because it holds the private key. OpenSSL reads both parts back correctly.
+- **Verification file:** `verification.txt` has the subject, the `notBefore` and `notAfter` dates in OpenSSL format with GMT, and the SHA-256 fingerprint.
+- **Check script:** `/app/check_cert.py` calls the `openssl` CLI, because the Python `cryptography` module isn't installed. It prints the Common Name and the expiry date (2027-11-21), and then "Certificate verification successful".
+
+The validity dates in the certificate (Nov 2026 to Nov 2027) come from this machine's system clock.

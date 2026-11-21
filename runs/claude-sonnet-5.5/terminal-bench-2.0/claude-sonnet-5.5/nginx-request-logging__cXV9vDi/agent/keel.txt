@@ -1,0 +1,48 @@
+$ cat /etc/os-release | head -3; which nginx; id -u; ls /etc/nginx 2>&1; grep -n "include\|log_format\|http {" /etc/nginx/nginx.conf 2>&1; which systemctl service</parameter>
+$ cat /etc/os-release | head -3; which nginx; id -u; ls /etc/nginx 2>&1; grep -n "include\|log_format\|http {" /etc/nginx/nginx.conf 2>&1; which systemctl service
+$ set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq && apt-get install -y -qq nginx curl >/dev/null
+mkdir -p /var/www/html /var/log/nginx
+echo "Welcome to the benchmark webserver" > /var/www/html/index.html
+echo "Page not found - Please check your URL" > /var/www/html/404.html
+rm -f /etc/nginx/sites-enabled/default
+grep -q "log_format benchmark" /etc/nginx/nginx.conf || sed -i '/^http {/a\    log_format benchmark '"'"'$time_local $request_method $status "$http_user_agent"'"'"';' /etc/nginx/nginx.conf
+grep -q "limit_req_zone" /etc/nginx/nginx.conf || sed -i '/^http {/a\    limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s;' /etc/nginx/nginx.conf
+cat > /etc/nginx/conf.d/benchmark-site.conf <<'EOF'
+server {
+    listen 8080;
+    server_name localhost;
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+    error_log /var/log/nginx/benchmark-error.log;
+
+    limit_req zone=benchmark_limit burst=10;
+
+    error_page 404 /404.html;
+
+    location = /404.html {
+        internal;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+nginx -t
+(service nginx restart || nginx) >/dev/null 2>&1
+sleep 1
+echo "--- GET /"; curl -s -i http://localhost:8080/ | sed -n '1p;$p'
+echo "--- GET /missing"; curl -s -i http://localhost:8080/missing | sed -n '1p;$p'
+echo "--- nginx.conf additions"; grep -n "log_format benchmark\|limit_req_zone" /etc/nginx/nginx.conf
+echo "Access log location: /var/log/nginx/benchmark-access.log"; cat /var/log/nginx/benchmark-access.log
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Nginx is installed and serving on localhost:8080. The setup worked on the first run:
+
+- **Install and layout:** Nginx and curl are installed. `/var/www/html` has `index.html` ("Welcome to the benchmark webserver") and `404.html` ("Page not found - Please check your URL"). `/etc/nginx/sites-enabled/default` is removed.
+- **`/etc/nginx/nginx.conf`:** the `http` block now has the `benchmark` log format (`$time_local $request_method $status "$http_user_agent"`) and the rate-limit zone (`limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s`).
+- **`/etc/nginx/conf.d/benchmark-site.conf`:** the server listens on 8080 and serves `/var/www/html`. It writes the access log to `/var/log/nginx/benchmark-access.log` and the error log to `/var/log/nginx/benchmark-error.log`. It applies `limit_req zone=benchmark_limit burst=10` and uses `/404.html` as the 404 page.
+- **Verification:** `nginx -t` reported the syntax as OK before the restart. `GET /` returned 200 with the welcome text, and `GET /missing` returned 404 with the custom page. The access log shows both requests in the expected format, with the user agent in double quotes.

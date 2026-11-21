@@ -1,0 +1,188 @@
+$ cat /app/src/program.cbl; ls -la /app/src /app/data; cat /app/src/INPUT.DAT | head -20
+$ which cobc python3; xxd /app/src/INPUT.DAT; xxd /app/data/ACCOUNTS.DAT; xxd /app/data/BOOKS.DAT; xxd /app/data/TRANSACTIONS.DAT
+$ cd /app && od -c src/INPUT.DAT; od -c data/ACCOUNTS.DAT; od -c data/BOOKS.DAT; od -c data/TRANSACTIONS.DAT; cobc --version | head -1
+$ mkdir -p /tmp/t && cd /tmp/t && cp -r /app/src /app/data . && cobc -x -free -o prog src/program.cbl 2>&1 | head; cobc -x -o prog src/program.cbl && ./prog; od -c data/ACCOUNTS.DAT; od -c data/BOOKS.DAT; od -c data/TRANSACTIONS.DAT
+$ cd /tmp/t && run(){ rm -rf data; cp -r /app/data .; printf "$1" > src/INPUT.DAT; ./prog >/dev/null; echo "== $1"; cat data/ACCOUNTS.DAT; echo; cat data/BOOKS.DAT; echo; cat data/TRANSACTIONS.DAT; echo; }; run 'U001U002B00120'; run 'U001U002B001'; run 'U001U002B0019999999999'; run 'U002U001B00100000050000'; run 'U003U002B002ABC'; run 'U001U002B0010000000200\nU003U002B0020000000001'
+$ cd /tmp/t && run(){ rm -rf data; cp -r /app/data .; printf "$1" > src/INPUT.DAT; ./prog; echo "rc=$?"; echo "== $1"; cat data/ACCOUNTS.DAT; echo; cat data/BOOKS.DAT; echo; cat data/TRANSACTIONS.DAT; echo; }; run 'U002U001B00100000050000'; run 'U002U001B0010000005000'; run 'U001U002B001-!a 5 xyz~'
+$ cat /app/data/BOOKS.DAT; echo; ls -la /app/data /tmp/t/data
+$ cd /tmp/t && for a in 0000000001 000000000A 00000000A0 000000000a 000000000- 000000000z A000000000 '00000000 1' '-000000000' 'a000000000' '000000000~'; do rm -rf data; cp -r /app/data .; printf "U001U002B001$a" > src/INPUT.DAT; ./prog >/dev/null; echo "[$a] $(head -c 102 data/ACCOUNTS.DAT | cut -c25-34,59-68) $(tail -c 22 data/TRANSACTIONS.DAT)"; done
+$ cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.path.join(BASE, "data")
+ACC = os.path.join(DATA, "ACCOUNTS.DAT")
+BOOKS = os.path.join(DATA, "BOOKS.DAT")
+TRANS = os.path.join(DATA, "TRANSACTIONS.DAT")
+INPUT = os.path.join(BASE, "src", "INPUT.DAT")
+MASK = (1 << 64) - 1
+
+
+def display_value(b):
+    """GnuCOBOL-style DISPLAY -> integer (unsigned 64-bit accumulation)."""
+    v = 0
+    for c in b:
+        v = (v * 10 + (c - 0x30)) & MASK
+    return v
+
+
+def move_num(src, n):
+    """MOVE unsigned display to display: spaces become '0', others raw."""
+    return bytes(0x30 if c == 0x20 else c for c in src[:n])
+
+
+def records(data, size):
+    out = []
+    for i in range(0, len(data), size):
+        out.append(bytearray(data[i:i + size].ljust(size, b" ")))
+    return out
+
+
+def store_balance(hundredths):
+    v = abs(hundredths) // 100
+    return ("%010d" % (v % 10**10)).encode()
+
+
+def main():
+    try:
+        with open(INPUT, "rb") as f:
+            raw = f.read(22)
+    except FileNotFoundError:
+        raw = b""
+    if not raw:
+        print("Error: Input file is empty")
+        return
+    rec = raw.ljust(22, b" ")
+    buyer, seller, book = rec[0:4], rec[4:8], rec[8:12]
+    ws_amount = move_num(rec[12:22], 10) + b"00"  # 9(10)V99
+    amt = display_value(ws_amount)  # in hundredths
+
+    with open(ACC, "rb") as f:
+        accdata = f.read()
+    with open(BOOKS, "rb") as f:
+        bookdata = f.read()
+    accs = records(accdata, 34)
+    bks = records(bookdata, 28)
+
+    bf = any(r[0:4] == buyer for r in accs)
+    sf = any(r[0:4] == seller for r in accs)
+    bkf = False
+    vo = False
+    for r in bks:
+        if r[0:4] == book:
+            bkf = True
+            if r[24:28] == seller:
+                vo = True
+    print(" ")
+
+    if not (bf and sf and bkf and vo):
+        print("Transaction failed due to validation errors")
+        return
+
+    for r in accs:
+        if r[0:4] == buyer:
+            bal = display_value(bytes(r[24:34])) * 100
+            r[24:34] = store_balance(bal - amt)
+        if r[0:4] == seller:
+            bal = display_value(bytes(r[24:34])) * 100
+            r[24:34] = store_balance(bal + amt)
+    with open(ACC, "wb") as f:
+        f.write(b"".join(bytes(r) for r in accs)[:max(len(accdata), 0)] if len(accdata) % 34 == 0 else b"".join(bytes(r) for r in accs))
+
+    for r in bks:
+        if r[0:4] == book:
+            r[24:28] = buyer
+    with open(BOOKS, "wb") as f:
+        f.write(b"".join(bytes(r) for r in bks))
+
+    with open(TRANS, "ab") as f:
+        f.write(book + ws_amount[:10] + seller + buyer)
+    print("Transaction completed successfully")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+cd /tmp && rm -rf c p && mkdir c p && cp /tmp/t/prog c/ && cp /app/program.py p/ && cat > /tmp/cmp.py <<'EOF'
+import random, subprocess, shutil, os, sys
+random.seed(int(sys.argv[1]))
+ids=[b"U001",b"U002",b"U003",b"U004"]; bks=[b"B001",b"B002",b"B003",b"B004"]
+chars=b"0123456789     -!aAz~.+"
+fails=0
+for t in range(400):
+    amt=bytes(random.choice(chars) if random.random()<0.3 else random.choice(b"0123456789") for _ in range(random.randint(0,10)))
+    inp=random.choice(ids)+random.choice(ids)+random.choice(bks)+amt
+    if random.random()<0.1: inp=inp[:random.randint(0,len(inp))]
+    for d in ("/tmp/c","/tmp/p"):
+        shutil.rmtree(d+"/data",ignore_errors=True); shutil.copytree("/app/data",d+"/data")
+        os.makedirs(d+"/src",exist_ok=True); open(d+"/src/INPUT.DAT","wb").write(inp)
+    a=subprocess.run(["./prog"],cwd="/tmp/c",capture_output=True).stdout
+    b=subprocess.run(["python3","program.py"],cwd="/tmp/p",capture_output=True).stdout
+    for f in ("ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"):
+        if open("/tmp/c/data/"+f,"rb").read()!=open("/tmp/p/data/"+f,"rb").read():
+            fails+=1; print("DIFF",inp,f)
+    if a!=b: print("OUT DIFF",inp,a,b)
+print("fails",fails)
+EOF
+python3 /tmp/cmp.py 1
+$ cd /tmp/t && rm -rf data; cp -r /app/data .; printf 'U002U002B0020000000100' > src/INPUT.DAT; ./prog; echo "rc=$?"; cat data/ACCOUNTS.DAT; echo; cat data/BOOKS.DAT; echo; cat data/TRANSACTIONS.DAT; echo
+$ cd /app && python3 - <<'EOF'
+s=open('program.py').read()
+old_start=s.index("    for r in accs:\n        if r[0:4] == buyer:")
+old_end=s.index("    with open(TRANS, \"ab\")")
+new='''    out = bytearray(accdata)
+    for i, r in enumerate(accs):
+        off = i * 34
+        if r[0:4] == buyer:
+            bal = display_value(bytes(r[24:34])) * 100
+            r[24:34] = store_balance(bal - amt)
+            out[off:off + 34] = r
+            out = out[:len(accdata)] if off + 34 > len(accdata) else out
+            if r[0:4] == seller:
+                # GnuCOBOL: second REWRITE without READ -> status 43, abort
+                with open(ACC, "wb") as f:
+                    f.write(bytes(out))
+                sys.stderr.write("libcob: error: READ must be executed first "
+                                 "(status = 43) for file ACCOUNTS-FILE\\n")
+                sys.exit(1)
+        if r[0:4] == seller:
+            bal = display_value(bytes(r[24:34])) * 100
+            r[24:34] = store_balance(bal + amt)
+            out[off:off + 34] = r
+            out = out[:len(accdata)] if off + 34 > len(accdata) else out
+    with open(ACC, "wb") as f:
+        f.write(bytes(out))
+
+    bout = bytearray(bookdata)
+    for i, r in enumerate(bks):
+        off = i * 28
+        if r[0:4] == book:
+            r[24:28] = buyer
+            bout[off:off + 28] = r
+            bout = bout[:len(bookdata)] if off + 28 > len(bookdata) else bout
+    with open(BOOKS, "wb") as f:
+        f.write(bytes(bout))
+
+'''
+s=s[:old_start]+new+s[old_end:]
+s=s.replace("import os\n","import os\nimport sys\n",1)
+open('program.py','w').write(s)
+EOF
+cp /app/program.py /tmp/p/ && sed -i 's/if a!=b: print/if a!=b and b"status" not in a: print/' /tmp/cmp.py && for s in 1 2 3; do python3 /tmp/cmp.py $s | tail -3; done
+$ cd /app && python3 program.py; echo "rc=$?"; ls -la data; python3 -m py_compile program.py && echo OK
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I've written `/app/program.py` to re-implement `program.cbl`. Across 1,200 random inputs it produced the same three `.DAT` files as the compiled COBOL program, byte for byte. Run on the real input in `/app`, it reports a validation failure and leaves all three files unchanged, as the COBOL program does: book B007 doesn't exist.
+
+**How it was tested:** I compiled the COBOL program with GnuCOBOL 3.1.2 in a scratch copy and ran both programs on the same random inputs. These included short records, empty input, unknown accounts and books, buyer equal to seller, and amounts with spaces and other non-digit characters. All tests started from the current data files in `/app/data`, so data files with other contents or partial records were not tested.
+
+**Behaviour copied from the COBOL program:**
+- **Validation:** the buyer and seller must both be accounts, and the book must exist and belong to the seller. Otherwise nothing changes.
+- **Transfer:** the amount is taken from the buyer's balance and added to the seller's. The book's owner becomes the buyer, and a 22-byte record is appended to `TRANSACTIONS.DAT`.
+- **Record format:** records are fixed length with no newlines, and only the changed records are rewritten.
+- **Short input:** a record shorter than 22 bytes is padded with spaces. An empty input file prints the error message and changes nothing.
+- **Amount field:** spaces become `0` and other characters are copied unchanged into the transaction record. In arithmetic, each character counts as its code minus `'0'`, with the same overflow GnuCOBOL shows.
+- **Balances:** a negative result is stored without its sign, and anything over 10 digits keeps only the last 10.
+- **Buyer equals seller:** GnuCOBOL saves the buyer's subtraction, then aborts on a file error and exits with code 1. Books and transactions are left untouched. The script does the same.
+
+Test copies and scripts are in `/tmp/t`, `/tmp/c`, `/tmp/p` and `/tmp/cmp.py`; they can be deleted.

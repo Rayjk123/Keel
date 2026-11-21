@@ -1,0 +1,88 @@
+$ mkdir -p /app/ssl && cd /app/ssl && \
+openssl genrsa -out server.key 2048 && \
+chmod 600 server.key && \
+openssl req -x509 -new -key server.key -sha256 -days 365 \
+  -subj "/O=DevOps Team/CN=dev-internal.company.local" -out server.crt && \
+cat server.key server.crt > server.pem && \
+chmod 600 server.pem && \
+{
+  echo "Subject: $(openssl x509 -in server.crt -noout -subject)"
+  echo "Not Before: $(openssl x509 -in server.crt -noout -startdate)"
+  echo "Not After: $(openssl x509 -in server.crt -noout -enddate)"
+  echo "SHA-256 Fingerprint: $(openssl x509 -in server.crt -noout -fingerprint -sha256)"
+} > verification.txt && \
+cat > /app/check_cert.py << 'EOF'
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+from datetime import datetime
+
+CERT_PATH = "/app/ssl/server.crt"
+EXPECTED_CN = "dev-internal.company.local"
+
+
+def run_openssl(args):
+    result = subprocess.run(["openssl"] + args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "openssl command failed")
+    return result.stdout.strip()
+
+
+def main():
+    if not os.path.isfile(CERT_PATH):
+        print(f"ERROR: Certificate not found at {CERT_PATH}")
+        return 1
+
+    try:
+        subject = run_openssl(["x509", "-in", CERT_PATH, "-noout", "-subject", "-nameopt", "RFC2253"])
+        enddate = run_openssl(["x509", "-in", CERT_PATH, "-noout", "-enddate"])
+    except (RuntimeError, OSError) as exc:
+        print(f"ERROR: Failed to load certificate: {exc}")
+        return 1
+
+    # subject looks like: subject=O=DevOps Team,CN=dev-internal.company.local
+    subject_value = subject.split("=", 1)[1] if "=" in subject else subject
+    cn = None
+    for part in subject_value.split(","):
+        key, _, value = part.strip().partition("=")
+        if key.strip() == "CN":
+            cn = value.strip()
+            break
+
+    # notAfter=Mon DD HH:MM:SS YYYY GMT
+    expiry_raw = enddate.split("=", 1)[1]
+    expiry = datetime.strptime(expiry_raw, "%b %d %H:%M:%S %Y %Z")
+    expiry_str = expiry.strftime("%Y-%m-%d")
+
+    print(f"Certificate file: {CERT_PATH}")
+    print(f"Subject: {subject_value}")
+    print(f"Common Name: {cn}")
+    print(f"Expiration date: {expiry_str}")
+
+    if cn != EXPECTED_CN:
+        print(f"ERROR: Common Name mismatch (expected {EXPECTED_CN}, got {cn})")
+        return 1
+
+    if expiry <= datetime.utcnow():
+        print("ERROR: Certificate has expired")
+        return 1
+
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+chmod +x /app/check_cert.py && \
+ls -l /app/ssl && \
+echo "--- verification.txt ---" && cat verification.txt && \
+echo "--- check_cert.py ---" && python3 /app/check_cert.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+All deliverables were created and verified in the previous run:
+
+- `/app/ssl/` contains `server.key` (mode 600, 2048-bit RSA), `server.crt` (self-signed, 365 days, O=DevOps Team, CN=dev-internal.company.local), `server.pem` (key plus certificate, mode 600), and `verification.txt` (subject, validity dates, SHA-256 fingerprint).
+- `/app/check_cert.py` loads the certificate, prints the Common Name and expiration date (2027-11-21), and prints "Certificate verification successful".
+
+The only issue is a `DeprecationWarning` from `datetime.utcnow()` in the check script. It does not affect the result, so I'm leaving it as is.

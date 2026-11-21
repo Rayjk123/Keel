@@ -1,0 +1,40 @@
+$ cd . && grep -rn "ignore_paths\|_discover_files\|ignore-paths" --include=*.py pylint | head -50
+$ cd . && sed -n 580,640p pylint/lint/pylinter.py && echo ---- && sed -n 770,790p pylint/lint/pylinter.py && echo ---- && sed -n 1008,1020p pylint/lint/pylinter.py
+$ cd . && grep -n "_is_ignored_file" -A 30 pylint/lint/utils.py pylint/lint/pylinter.py | head -80
+$ cd . && grep -n "def _is_ignored_file" -A 25 pylint/lint/expand_modules.py
+$ cd . && python3 - <<'EOF'
+import re
+p = "pylint/lint/pylinter.py"
+src = open(p).read()
+old = """                        yield from (
+                            os.path.join(root, file)
+                            for file in files
+                            if file.endswith(".py")
+                        )
+"""
+new = """                        yield from (
+                            os.path.join(root, file)
+                            for file in files
+                            if file.endswith(".py")
+                            and not _is_ignored_file(
+                                os.path.join(root, file),
+                                self.config.ignore,
+                                self.config.ignore_patterns,
+                                self.config.ignore_paths,
+                            )
+                        )
+"""
+assert src.count(old) == 1, "expected block not found exactly once"
+open(p, "w").write(src.replace(old, new))
+print("patched")
+EOF
+sed -n 585,625p pylint/lint/pylinter.py
+$ cd . && rm -rf /tmp/repro && mkdir -p /tmp/repro/src/gen && cd /tmp/repro && printf 'import os\n' > src/gen/about.py && printf 'import os\n' > src/keep.py && printf '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n' > pyproject.toml && PYTHONPATH=/dev/null python3 -c "import sys; sys.path.insert(0, '$(pwd | sed 's#/tmp/repro##')'); " 2>/dev/null; cd /tmp/repro && PYTHONPATH="$OLDPWD" python3 -m pylint --recursive=y src/ 2>&1 | grep -E "^src|rated" ; echo "exit=$?"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix works. In the reproduction, `src/gen/about.py` was skipped and `src/keep.py` was still checked, so the `ignore-paths` pattern is now applied to the files discovered during recursion.
+
+**Root cause:** In `Pylinter._discover_files` (`pylint/lint/pylinter.py`), `ignore-paths` was checked only against each directory `root` during the `os.walk`. The `.py` files yielded from a directory were never filtered, so the anchored pattern `^src/gen/.*$` never excluded them.
+
+**Change:** The file-yielding branch now also calls `_is_ignored_file(...)` with the same `ignore`, `ignore_patterns`, and `ignore_paths` arguments, so ignored files are dropped before being yielded.
+
+**Verification:** I built a temporary tree with `src/gen/about.py`, `src/keep.py`, and a `pyproject.toml` setting `ignore-paths = ["^src/gen/.*$"]`. Running `pylint --recursive=y src/` reported only `src/keep.py`. I did not run the existing test suite or add a regression test, so that is still open.

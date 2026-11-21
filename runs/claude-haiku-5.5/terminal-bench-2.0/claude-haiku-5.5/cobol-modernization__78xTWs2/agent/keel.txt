@@ -1,0 +1,136 @@
+$ cd /app && cat src/program.cbl && echo "-----INPUT-----" && cat src/INPUT.DAT | head -50 && echo "-----DATA-----" && ls -la data/ && ls -la src/
+$ cd /app && mkdir -p /tmp/orig && cp -a /app/. /tmp/orig/ && echo "--- hex INPUT ---" && xxd src/INPUT.DAT && echo "--- ACCOUNTS ---" && xxd data/ACCOUNTS.DAT && echo "--- BOOKS ---" && xxd data/BOOKS.DAT && echo "--- TRANS ---" && xxd data/TRANSACTIONS.DAT && echo "--- cobc ---" && (which cobc && cobc --version | head -2 || echo "no cobc") && echo "--- python ---" && which python3
+$ cd /app && echo "--- INPUT ---" && od -A d -t x1c src/INPUT.DAT && echo "--- ACCOUNTS ---" && od -A d -t x1c data/ACCOUNTS.DAT && echo "--- BOOKS ---" && od -A d -t x1c data/BOOKS.DAT && echo "--- TRANS ---" && od -A d -t x1c data/TRANSACTIONS.DAT && echo "--- tools ---" && (which cobc || echo "no cobc") && (which python3 || echo "no python3") && ls /tmp/orig 2>/dev/null
+$ cd /tmp/orig && cobc -x -free -o /tmp/bf src/program.cbl 2>&1 || cobc -x -o /tmp/bf src/program.cbl; cd /tmp/orig && /tmp/bf; echo "exit=$?"; echo "--- ACCOUNTS ---"; od -A d -c data/ACCOUNTS.DAT; echo "--- BOOKS ---"; od -A d -c data/BOOKS.DAT; echo "--- TRANS ---"; od -A d -c data/TRANSACTIONS.DAT
+$ cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+"""Python re-implementation of BOOKFORUM (src/program.cbl). Run from /app."""
+import os
+import sys
+
+ACC_LEN, BOOK_LEN, TRN_LEN, IN_LEN = 34, 28, 22, 22
+
+
+def digits_val(b):
+    s = b.decode('latin-1').strip()
+    return int(s) if s.isdigit() else 0
+
+
+def read_file(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def write_file(path, data):
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+def main():
+    inp = read_file('src/INPUT.DAT')
+    if len(inp) == 0:
+        print("Error: Input file is empty")
+        return
+    rec = inp[:IN_LEN].ljust(IN_LEN, b' ')
+    buyer = rec[0:4]
+    seller = rec[4:8]
+    book = rec[8:12]
+    amount = digits_val(rec[12:22])
+
+    # VALIDATE-USERS-AND-BOOK
+    accounts = read_file('data/ACCOUNTS.DAT')
+    buyer_found = seller_found = False
+    for i in range(len(accounts) // ACC_LEN):
+        aid = accounts[i * ACC_LEN:i * ACC_LEN + 4]
+        if aid == buyer:
+            buyer_found = True
+        if aid == seller:
+            seller_found = True
+
+    books = read_file('data/BOOKS.DAT')
+    book_found = valid_owner = False
+    for i in range(len(books) // BOOK_LEN):
+        r = books[i * BOOK_LEN:(i + 1) * BOOK_LEN]
+        if r[0:4] == book:
+            book_found = True
+            if r[24:28] == seller:
+                valid_owner = True
+
+    print(" ")
+
+    if buyer_found and seller_found and book_found and valid_owner:
+        # PROCESS-TRANSACTION: accounts
+        out = bytearray()
+        for i in range(len(accounts) // ACC_LEN):
+            r = bytearray(accounts[i * ACC_LEN:(i + 1) * ACC_LEN])
+            bal = digits_val(bytes(r[24:34]))
+            if bytes(r[0:4]) == buyer:
+                bal = abs(bal - amount) % (10 ** 10)
+            if bytes(r[0:4]) == seller:
+                bal = (bal + amount) % (10 ** 10)
+            r[24:34] = ("%010d" % bal).encode()
+            out += r
+        out += accounts[len(accounts) // ACC_LEN * ACC_LEN:]
+        write_file('data/ACCOUNTS.DAT', bytes(out))
+
+        # books: new owner = buyer
+        out = bytearray()
+        for i in range(len(books) // BOOK_LEN):
+            r = bytearray(books[i * BOOK_LEN:(i + 1) * BOOK_LEN])
+            if bytes(r[0:4]) == book:
+                r[24:28] = buyer
+            out += r
+        out += books[len(books) // BOOK_LEN * BOOK_LEN:]
+        write_file('data/BOOKS.DAT', bytes(out))
+
+        # append transaction: book, amount(10), seller, buyer
+        trn = book + ("%010d" % (amount % (10 ** 10))).encode() + seller + buyer
+        with open('data/TRANSACTIONS.DAT', 'ab') as f:
+            f.write(trn)
+
+        print("Transaction completed successfully")
+    else:
+        print("Transaction failed due to validation errors")
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+EOF
+set -e
+rm -rf /tmp/t1 /tmp/t2 && mkdir -p /tmp/t1 /tmp/t2
+cp -a /tmp/orig/. /tmp/t1/ && cp -a /tmp/orig/. /tmp/t2/
+printf 'U001U002B002000000010' > /tmp/t1/src/INPUT.DAT
+printf 'U001U002B002000000010' > /tmp/t2/src/INPUT.DAT
+cd /tmp/t1 && cobc -x -o /tmp/bf1 src/program.cbl && /tmp/bf1
+cd /tmp/t2 && python3 /app/program.py
+echo "--- compare ---"
+for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cmp /tmp/t1/data/$f /tmp/t2/data/$f && echo "$f identical"; done
+echo "--- real /app run ---"
+cd /app && python3 program.py && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cmp /tmp/orig/data/$f /app/data/$f && echo "$f unchanged"; done
+$ echo "--- ACCOUNTS cobol vs py ---"; od -A d -c /tmp/t1/data/ACCOUNTS.DAT; od -A d -c /tmp/t2/data/ACCOUNTS.DAT; echo "--- TRANS cobol vs py ---"; od -A d -c /tmp/t1/data/TRANSACTIONS.DAT | tail -4; od -A d -c /tmp/t2/data/TRANSACTIONS.DAT | tail -4
+$ set -e
+rm -rf /tmp/t1 /tmp/t2 && mkdir -p /tmp/t1 /tmp/t2
+cp -a /tmp/orig/. /tmp/t1/ && cp -a /tmp/orig/. /tmp/t2/
+printf 'U001U002B0020000000010' > /tmp/t1/src/INPUT.DAT
+printf 'U001U002B0020000000010' > /tmp/t2/src/INPUT.DAT
+wc -c /tmp/t1/src/INPUT.DAT
+cd /tmp/t1 && cobc -x -o /tmp/bf1 src/program.cbl && /tmp/bf1
+cd /tmp/t2 && python3 /app/program.py
+echo "--- compare ---"
+for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cmp /tmp/t1/data/$f /tmp/t2/data/$f && echo "$f identical"; done
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`/app/program.py` is written and matches GnuCOBOL on a valid 22-byte input. ACCOUNTS.DAT, BOOKS.DAT, and TRANSACTIONS.DAT were byte-identical between the two runs.
+
+Summary:
+- **Input:** `src/INPUT.DAT` holds buyer, seller, book (4 bytes each) and a 10-digit amount.
+- **Validation:** The script checks that buyer and seller exist in ACCOUNTS.DAT, that the book exists in BOOKS.DAT, and that the book's owner is the seller. It prints the same messages as the COBOL program.
+- **Processing:** On success, it subtracts the amount from the buyer's balance, adds it to the seller's, changes the book's owner to the buyer, and appends a transaction record.
+- **Edge case:** An unsigned result from a subtraction is stored as its absolute value, matching COBOL's behavior for unsigned PIC 9 fields.
+- **Verification:** The provided `src/INPUT.DAT` is 15 bytes and names book B007, which doesn't exist. Both programs reported validation failure and left the data unchanged. I checked this on a scratch copy and on the real `/app` files. I tested the success path on a scratch copy with a valid 22-byte input.
+
+One open point: I did not check how GnuCOBOL handles a short (15-byte) input record beyond its effect on validation. The Python version pads short input with spaces, and the amount field parses as 0 when it isn't all digits.
+
+COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+
+<br>
