@@ -75,17 +75,19 @@ Supported benchmarks: Terminal-Bench 4.0 and 2.0, Aider Polyglot, SWE-bench Veri
 
 Want a quick score for one or more models on a fresh machine? After `export MODELS="ollama/qwen3-coder:30b ollama/gpt-oss:20b"`, `bench/setup.sh` gets it ready and pulls those models, and `bench/baseline.sh` runs 10 hand-picked tasks from each benchmark per model, saving everything under `runs/<model>/`.
 
-Use `-l 10` to run just the first 10 tasks for a quick check. The [Benchmarks page](https://keeljourney.dev/destinations/one-file-agent/benchmarks/) has every option, how the Docker setup fits together, and tips for running at scale.
+Use `-l 10` to run just the first 10 tasks for a quick check. The [Running the benchmarks page](https://keeljourney.dev/destinations/one-file-agent/benchmarks/running/) has every option, how the Docker setup fits together, and tips for running at scale.
 
 ### Go deeper
 
 The docs site has the full write-up of this destination:
 
-- [Getting started](https://keeljourney.dev/destinations/one-file-agent/getting-started/): settings, hosted APIs and your first run.
+- [Getting started](https://keeljourney.dev/destinations/one-file-agent/getting-started/): settings and your first run.
+- [Models](https://keeljourney.dev/destinations/one-file-agent/getting-started/models/): Ollama, a hosted API or AWS Bedrock.
+- [AWS Bedrock](https://keeljourney.dev/destinations/one-file-agent/getting-started/bedrock/): use Claude and other models on Bedrock.
 - [How it works](https://keeljourney.dev/destinations/one-file-agent/how-it-works/): the loop, the command format and the limits.
-- [Adapters](https://keeljourney.dev/destinations/one-file-agent/adapters/): the message format, and how to support a new API.
-- [Benchmarks](https://keeljourney.dev/destinations/one-file-agent/benchmarks/): Terminal-Bench, Aider Polyglot, SWE-bench Verified and Lite.
-- [AWS Bedrock](https://keeljourney.dev/destinations/one-file-agent/bedrock/): use Claude and other models on Bedrock.
+- [Adapters](https://keeljourney.dev/destinations/one-file-agent/how-it-works/adapters/): the message format, and how to support a new API.
+- [Benchmarks](https://keeljourney.dev/destinations/one-file-agent/benchmarks/): the scoreboard for every run.
+- [Running the benchmarks](https://keeljourney.dev/destinations/one-file-agent/benchmarks/running/): Terminal-Bench, Aider Polyglot, SWE-bench Verified and Lite.
 
 ## Develop
 

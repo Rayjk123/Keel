@@ -1,8 +1,10 @@
-# Results
+# Benchmarks
 
-Every change to the harness gets a score. This page is the scoreboard: one bar per run, grouped by benchmark, so you can watch the success rate move as Keel gains new abilities.
+Keel is scored on Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite, with the same 10 hand-picked tasks from each every time. Keel includes an adapter for [Harbor](https://harborframework.com) (install it with `uv tool install harbor`), which runs each task in its own Docker container, runs Keel inside it, and scores the result with the task's official tests.
 
-![Pass rate by benchmark for each run](../../assets/charts/scoreboard.svg)
+Every change to the harness gets a score. The chart has one bar per run, grouped by benchmark, so you can watch the success rate move as Keel gains new abilities. To run the benchmarks yourself or add a run, see [Running the benchmarks](running.md).
+
+![Pass rate by benchmark for each run](../../../assets/charts/scoreboard.svg)
 
 ## Scoreboard
 
@@ -17,15 +19,6 @@ Each cell is tasks passed out of tasks attempted. Every run uses the same 10 han
 - **Same tasks every time.** The task lists are fixed, so runs are comparable. Growing a list starts a new series.
 - **Everything is recorded.** Each run lives in `runs/<run>/` with a `manifest.json` holding the commit, the hash of `agent.ts`, the machine and the exact tasks, next to every trial's logs.
 
-## Add a run to the scoreboard
-
-```bash
-HARNESS=edit-tool MODELS=ollama/qwen3-coder:30b bench/baseline.sh
-python bench/summarize.py
-```
-
-`bench/summarize.py` reads every folder under `runs/` and rewrites `runs/results.json` (every task's outcome), `runs/scoreboard.md` and the chart above. Commit them with the run, and the docs site picks them up on the next build.
-
 ## Models and harness changes
 
 Every run records two separate labels in its manifest: the **harness** (`baseline`, `edit-tool`, and so on) and the **model**. That keeps the two questions apart, and a leaderboard can sort or filter by either:
@@ -36,5 +29,3 @@ Every run records two separate labels in its manifest: the **harness** (`baselin
 | Which harness change helps? | Model | Harness | the same model, `HARNESS=edit-tool` |
 
 The folder name combines them, `runs/<model>/` for the baseline and `runs/<model>-<harness>/` after that.
-
-The list of changes to try, and what each one is expected to do, is on the [Harness changes](harness-changes.md) page.

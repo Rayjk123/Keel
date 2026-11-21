@@ -45,7 +45,7 @@ export KEEL_BASE_URL=http://172.17.0.1:8787/v1
 
 The proxy has no authentication and signs every request with your AWS credentials. On the bridge address, every container on your machine can use it, and so can other machines on your network unless a firewall blocks them. Never set `PROXY_HOST` to `0.0.0.0`, and stop the proxy when the run ends.
 
-Then run the benchmarks as described in [Benchmarks](benchmarks.md), with a `bedrock/` prefix on the model ID, for example `MODELS=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0 bench/baseline.sh`.
+Then run the benchmarks as described in [Running the benchmarks](../benchmarks/running.md), with a `bedrock/` prefix on the model ID, for example `MODELS=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0 bench/baseline.sh`.
 
 ## Removing it
 

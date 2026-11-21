@@ -45,10 +45,10 @@ BASE_URL=http://localhost:11434/v1 MODEL=qwen3-coder:30b \
 
 ## Explore this destination
 
-- [Getting started](getting-started.md): install a model and run Keel.
-- [How it works](how-it-works.md): the loop, the command format and the limits.
-- [Adapters](adapters.md): the message format, and how to support a new API.
-- [Benchmarks](benchmarks.md): run Terminal-Bench, Aider Polyglot and SWE-bench.
-- [Results](results.md): the scoreboard, with a chart of pass rates for every run.
-- [Harness changes](harness-changes.md): the ledger of improvements to try, one at a time.
-- [AWS Bedrock](bedrock.md): use Claude and other models on Bedrock.
+- [Getting started](getting-started/index.md): run Keel for the first time, and its settings.
+- [Models](getting-started/models.md): Ollama, a hosted API or AWS Bedrock.
+- [AWS Bedrock](getting-started/bedrock.md): use Claude and other models on Bedrock.
+- [How it works](how-it-works/index.md): the loop, the command format and the limits.
+- [Adapters](how-it-works/adapters.md): the message format, and how to support a new API.
+- [Benchmarks](benchmarks/index.md): the scoreboard, with a chart of pass rates for every run.
+- [Running the benchmarks](benchmarks/running.md): run Terminal-Bench, Aider Polyglot and SWE-bench.
