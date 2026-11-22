@@ -1,0 +1,243 @@
+$ ls -la && git -C . log --oneline -3 2>/dev/null; find . -name "*.py" -path "*requests*" | grep -v test | head -50
+$ echo "== hooks.py ==" && cat requests/hooks.py && echo "== models.py hook references ==" && grep -n "hook" requests/models.py
+$ PY=$(command -v python || command -v python3); echo "python: $PY"; $PY --version 2>&1; echo "===== models.py: top of file (imports) ====="; sed -n '1,30p' requests/models.py; echo "===== models.py: Request.__init__ hook section ====="; sed -n '140,156p' requests/models.py; echo "===== models.py: register/deregister ====="; sed -n '460,480p' requests/models.py; echo "===== hook references outside models.py ====="; grep -rn "hook" requests/*.py | grep -v "^requests/models.py" || true; echo "===== tests referencing hooks ====="; grep -rn "hook" tests/ | head -40 || true; echo "===== reproduction ====="; $PY - <<'EOF'
+import sys
+sys.path.insert(0, '.')
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+def f1(r):
+    return r
+
+def f2(r):
+    return r
+
+req = Request(url='http://example.com/', hooks={'response': [f1, f2]})
+print('registered:', req.hooks['response'])
+try:
+    print('dispatch ok:', dispatch_hook('response', req.hooks, 'DATA'))
+except Exception as e:
+    print('dispatch error:', type(e).__name__, e)
+EOF
+$ python - <<'PATCH'
+import io
+
+path = 'requests/models.py'
+with io.open(path, encoding='utf-8') as f:
+    src = f.read()
+
+old = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        self.hooks[event].append(hook)
+'''
+
+new = '''    def register_hook(self, event, hook):
+        """Properly register a hook.
+
+        ``hook`` may be a single callable, or a list (or any other iterable)
+        of callables, each of which is registered for ``event``.
+        """
+
+        if hasattr(hook, '__call__'):
+            self.hooks[event].append(hook)
+        else:
+            self.hooks[event].extend(hook)
+'''
+
+count = src.count(old)
+assert count == 1, 'expected exactly one match, found %d' % count
+with io.open(path, 'w', encoding='utf-8') as f:
+    f.write(src.replace(old, new))
+print('patched requests/models.py')
+PATCH
+
+echo "===== diff ====="
+git --no-pager diff -- requests/models.py
+
+echo "===== offline check ====="
+python - <<'CHECK'
+import sys
+sys.path.insert(0, '.')
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+def f1(r):
+    return r + ['f1']
+
+def f2(r):
+    return r + ['f2']
+
+req = Request(url='http://example.com/', hooks={'response': [f1, f2]})
+assert req.hooks['response'] == [f1, f2], req.hooks['response']
+print('list     ->', dispatch_hook('response', req.hooks, []))
+
+req = Request(url='http://example.com/', hooks={'response': f1})
+assert req.hooks['response'] == [f1], req.hooks['response']
+print('callable ->', dispatch_hook('response', req.hooks, []))
+
+req = Request(url='http://example.com/', hooks={'pre_send': (f1, f2)})
+req.register_hook('pre_send', [f2])
+assert req.hooks['pre_send'] == [f1, f2, f2], req.hooks['pre_send']
+print('tuple+register_hook(list) ->', dispatch_hook('pre_send', req.hooks, []))
+
+print('no hooks ->', Request(url='http://example.com/').hooks['response'])
+CHECK
+
+echo "===== end-to-end against a local server ====="
+python -m http.server 8765 --bind 127.0.0.1 --directory /tmp >/tmp/http_server.log 2>&1 &
+SERVER_PID=$!
+sleep 1
+timeout 30 python - <<'E2E'
+import sys
+sys.path.insert(0, '.')
+import requests
+
+calls = []
+
+def h1(resp):
+    calls.append('h1')
+
+def h2(resp):
+    calls.append('h2')
+
+r = requests.get('http://127.0.0.1:8765/', hooks={'response': [h1, h2]})
+print('status', r.status_code, 'calls', calls)
+E2E
+kill $SERVER_PID 2>/dev/null
+$ REPO="$(pwd)"
+BASE=/tmp/requests_baseline
+rm -rf "$BASE" && mkdir -p "$BASE" && git archive HEAD | tar -x -C "$BASE" || { echo "failed to export HEAD"; exit 1; }
+
+if python -c "import pytest" >/dev/null 2>&1; then
+  RUN="python -m pytest -q -p no:cacheprovider -rfE tests/test_requests.py"
+else
+  RUN="python -m unittest tests.test_requests"
+fi
+echo "runner: $RUN"
+
+for pair in "baseline:$BASE" "patched:$REPO"; do
+  name="${pair%%:*}"
+  tree="${pair#*:}"
+  echo "===== $name ($tree) ====="
+  (cd "$tree" && python -c "import requests; print('imports from', requests.__file__)")
+  (cd "$tree" && timeout 300 $RUN > "/tmp/${name}_tests.txt" 2>&1; echo "exit=$?")
+  tail -n 1 "/tmp/${name}_tests.txt"
+done
+
+grep -E '^(FAILED|ERROR) ' /tmp/baseline_tests.txt | sed 's/ - .*//' | sort > /tmp/baseline_fail.txt
+grep -E '^(FAILED|ERROR) ' /tmp/patched_tests.txt | sed 's/ - .*//' | sort > /tmp/patched_fail.txt
+echo "failing/erroring tests: baseline=$(wc -l < /tmp/baseline_fail.txt) patched=$(wc -l < /tmp/patched_fail.txt)"
+if diff /tmp/baseline_fail.txt /tmp/patched_fail.txt; then echo "failure sets identical"; else echo "failure sets DIFFER"; fi
+
+echo "===== test file: classes and hook tests ====="
+grep -n "^class \|hook" tests/test_requests.py
+echo "===== test file: imports ====="
+sed -n '1,30p' tests/test_requests.py
+$ cd /testbed
+echo "===== (1) failure messages for the differing tests (patched run) ====="
+grep -E '^(FAILED|ERROR) ' /tmp/patched_tests.txt | grep -E 'POSTBIN_GET_POST_FILES|test_urlencoded_post_data' | cut -c1-300
+echo "===== (2) failure messages for the differing tests (baseline run) ====="
+grep -E '^(FAILED|ERROR) ' /tmp/baseline_tests.txt | grep -E 'POSTBIN_GET_POST_FILES|test_urlencoded_post_data|test_nonurlencoded_post_data|test_urlencoded_post_querystring|test_urlencoded_post_query_multivalued_and_data|test_post_fields_with_multiple_values_and_files' | cut -c1-300
+echo "===== (3) most common error lines in patched run ====="
+grep -E '^E  ' /tmp/patched_tests.txt | sort | uniq -c | sort -rn | head -15
+echo "===== (4) repeated runs to measure flakiness (3 runs per tree) ====="
+rm -f /tmp/rep_*.txt /tmp/rep_*.fail
+for i in 1 2 3; do
+  for name in baseline patched; do
+    if [ "$name" = baseline ]; then tree=/tmp/requests_baseline; else tree=/testbed; fi
+    (cd "$tree" && timeout 300 python -m pytest -q -p no:cacheprovider -rfE tests/test_requests.py > "/tmp/rep_${name}_$i.txt" 2>&1)
+    grep -E '^(FAILED|ERROR) ' "/tmp/rep_${name}_$i.txt" | sed 's/ - .*//' | sort > "/tmp/rep_${name}_$i.fail"
+    echo "run $i $name: $(tail -n 1 /tmp/rep_${name}_$i.txt)"
+  done
+done
+for name in baseline patched; do
+  echo "===== $name: number of runs (out of 3) in which each test failed ====="
+  cat /tmp/rep_${name}_1.fail /tmp/rep_${name}_2.fail /tmp/rep_${name}_3.fail | sort | uniq -c | sed 's#tests/test_requests.py::RequestsTestSuite::##'
+done
+$ cd /testbed
+echo "===== existing hook tests: tests/test_requests.py 690-760 ====="
+sed -n '690,760p' tests/test_requests.py
+echo "===== hook flow in requests/sessions.py: 195-240 ====="
+sed -n '195,240p' requests/sessions.py
+echo "===== 'unverifiable' error occurrences (baseline, patched) ====="
+grep -c "unverifiable" /tmp/baseline_tests.txt /tmp/patched_tests.txt
+echo "===== git status ====="
+git status --short
+echo "===== HISTORY.rst head ====="
+sed -n '1,15p' HISTORY.rst
+echo "===== hook mentions in docs ====="
+grep -rn "hook" docs/ --include=*.rst | head -20
+$ cd /testbed || exit 1
+
+python - <<'PY' || exit 1
+import io
+
+path = 'tests/test_requests.py'
+with io.open(path, encoding='utf-8') as f:
+    src = f.read()
+
+anchor = '    def test_session_persistent_cookies(self):\n'
+assert src.count(anchor) == 1, 'anchor found %d times' % src.count(anchor)
+
+new_test = '''    def test_hooks_accept_lists(self):
+        # A hook value may be a single callable or a list of callables.
+        from requests.hooks import dispatch_hook
+        from requests.models import Request
+
+        def append_a(data):
+            return data + ['a']
+
+        def append_b(data):
+            return data + ['b']
+
+        req = Request(
+            url='http://example.com/',
+            hooks={'response': [append_a, append_b], 'pre_send': append_a},
+        )
+        self.assertEqual(req.hooks['response'], [append_a, append_b])
+        self.assertEqual(req.hooks['pre_send'], [append_a])
+
+        # Hooks run in the order they were given.
+        self.assertEqual(dispatch_hook('response', req.hooks, []), ['a', 'b'])
+
+        # register_hook() accepts a list the same way.
+        req.register_hook('pre_send', [append_b])
+        self.assertEqual(req.hooks['pre_send'], [append_a, append_b])
+
+        # return_response=False builds the Request without sending it,
+        # so the session path can be checked offline as well.
+        s = requests.session()
+        r = s.request('GET', 'http://example.com/',
+            hooks={'response': [append_a, append_b]}, return_response=False)
+        self.assertEqual(r.hooks['response'], [append_a, append_b])
+
+'''
+
+with io.open(path, 'w', encoding='utf-8') as f:
+    f.write(src.replace(anchor, new_test + anchor))
+print('added test_hooks_accept_lists')
+PY
+
+echo "===== patched tree (/testbed): new test ====="
+python -m pytest -q -p no:cacheprovider --tb=short tests/test_requests.py -k test_hooks_accept_lists
+echo "patched exit=$?"
+
+echo "===== baseline tree (HEAD, no fix): same test ====="
+cp tests/test_requests.py /tmp/requests_baseline/tests/test_requests.py
+cd /tmp/requests_baseline && python -c "import requests; print('imports from', requests.__file__)" && python -m pytest -q -p no:cacheprovider --tb=short tests/test_requests.py -k test_hooks_accept_lists
+echo "baseline exit=$?"
+
+cd /testbed
+echo "===== git status / diff stat ====="
+git status --short
+git --no-pager diff --stat
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Lists of hook functions now work in `Request(hooks=...)`, `register_hook()`, and `Session.request(...)`.
+
+- **Root cause:** `Request.register_hook()` in `requests/models.py` appended its argument unconditionally. `Request.__init__()` calls it once per hooks entry, so a list was stored as one nested element, and `dispatch_hook()` then tried to call that list.
+- **Fix:** `register_hook()` appends a callable as before and extends the list with any other iterable, so each hook is stored individually. This is the only source file I changed.
+- **Regression test:** I added `test_hooks_accept_lists` to `tests/test_requests.py`. It runs offline and covers list values in the constructor, hook order, `register_hook()` with a list, and the session path. It passes on the patched tree and fails on an untouched HEAD export.
+- **End-to-end:** a request to a local HTTP server with a list of two response hooks ran both hooks.
+- **Full suite:** not a reliable signal here. Most of `tests/test_requests.py` needs httpbin.org, and the failing set changes between runs in both trees. The hook tests passed in every run on both trees.
+- **Not changed:** the untracked `build/` directory (a stale copy the tests don't import), the `is 0` SyntaxWarning in `models.py`, and the docs and HISTORY.rst. `docs/user/advanced.rst` could mention list values as a follow-up.

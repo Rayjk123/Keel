@@ -1,0 +1,395 @@
+$ ls -la && echo "-----" && cat hexadecimal.go && echo "-----" && ls -la */ 2>/dev/null; find . -type f | head -50
+$ cat go.mod && echo "-----" && go version && go env GOPATH GOROOT GOFLAGS
+$ cat > hexadecimal.go <<'EOF'
+// Package hexadecimal converts hexadecimal strings to integers from first
+// principles, without using any library conversion routines.
+package hexadecimal
+
+import (
+	"errors"
+	"fmt"
+)
+
+// maxInt64 is the largest value an int64 can hold.
+const maxInt64 = 1<<63 - 1
+
+var (
+	// ErrSyntax indicates that the input is not a hexadecimal number.
+	ErrSyntax = errors.New("invalid syntax")
+
+	// ErrRange indicates that the input is a hexadecimal number too large to
+	// fit in an int64.
+	ErrRange = errors.New("value out of range")
+)
+
+// ParseError records a failed conversion and the input that caused it.
+type ParseError struct {
+	Num string // the input
+	Err error  // the reason the conversion failed: ErrSyntax or ErrRange
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("hexadecimal.ParseHex: parsing %q: %v", e.Num, e.Err)
+}
+
+// Unwrap returns the reason for the failure, so that callers can classify it
+// with errors.Is(err, ErrSyntax) or errors.Is(err, ErrRange).
+func (e *ParseError) Unwrap() error { return e.Err }
+
+// ParseHex returns the value of the hexadecimal string s, e.g. 1093516 for
+// "10af8c".
+//
+// s must consist of one or more of the digits 0-9, a-f and A-F; signs, a "0x"
+// prefix and whitespace are not accepted. Any other input fails with
+// ErrSyntax, even if its leading digits would already overflow, and a valid
+// number larger than the maximum int64 fails with ErrRange. Errors are of type
+// *ParseError, and the returned value is 0 whenever the error is non-nil.
+func ParseHex(s string) (int64, error) {
+	if s == "" {
+		return 0, &ParseError{Num: s, Err: ErrSyntax}
+	}
+	var n int64
+	overflow := false
+	for i := 0; i < len(s); i++ {
+		d, ok := digitValue(s[i])
+		if !ok {
+			return 0, &ParseError{Num: s, Err: ErrSyntax}
+		}
+		// Appending d yields n*16 + d, which must not exceed maxInt64. Once
+		// it would, stop accumulating but keep validating the digits.
+		if overflow || n > (maxInt64-d)/16 {
+			overflow = true
+			continue
+		}
+		n = n*16 + d
+	}
+	if overflow {
+		return 0, &ParseError{Num: s, Err: ErrRange}
+	}
+	return n, nil
+}
+
+// digitValue returns the value of the hexadecimal digit c, and false if c is
+// not a hexadecimal digit.
+func digitValue(c byte) (int64, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return int64(c - '0'), true
+	case 'a' <= c && c <= 'f':
+		return int64(c-'a') + 10, true
+	case 'A' <= c && c <= 'F':
+		return int64(c-'A') + 10, true
+	}
+	return 0, false
+}
+
+// HandleErrors parses each input with ParseHex and reports, in order, how the
+// conversion ended: "none" on success, "syntax" for ErrSyntax and "range" for
+// ErrRange.
+func HandleErrors(inputs []string) []string {
+	cases := make([]string, len(inputs))
+	for i, s := range inputs {
+		_, err := ParseHex(s)
+		switch {
+		case err == nil:
+			cases[i] = "none"
+		case errors.Is(err, ErrSyntax):
+			cases[i] = "syntax"
+		case errors.Is(err, ErrRange):
+			cases[i] = "range"
+		default:
+			panic("hexadecimal: unexpected error: " + err.Error())
+		}
+	}
+	return cases
+}
+EOF
+gofmt -l . ; go vet ./... && go build ./... && echo BUILD_OK
+$ rm -rf /tmp/hexcheck && mkdir -p /tmp/hexcheck && cp hexadecimal.go go.mod /tmp/hexcheck/ && cd /tmp/hexcheck && cat > hexadecimal_test.go <<'EOF'
+package hexadecimal
+
+import (
+	"strings"
+	"testing"
+)
+
+var testCases = []struct {
+	in      string
+	out     int64
+	errCase string // one of "none", "syntax", or "range"
+}{
+	{"1", 1, "none"},
+	{"10", 0x10, "none"},
+	{"2d", 0x2d, "none"},
+	{"012", 0x12, "none"},
+	{"cfcfcf", 0xcfcfcf, "none"},
+	{"CFCFCF", 0xcfcfcf, "none"},
+	{"", 0, "syntax"},
+	{"peanut", 0, "syntax"},
+	{"2cg134", 0, "syntax"},
+	{"8000000000000000", 0, "range"},
+	{"9223372036854775809", 0, "range"},
+}
+
+func TestParseHex(t *testing.T) {
+	for _, test := range testCases {
+		out, err := ParseHex(test.in)
+		if test.errCase != "none" {
+			var _ error = err
+			if err == nil {
+				t.Errorf("ParseHex(%q): expected an error, but error is nil", test.in)
+				continue
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), test.errCase) {
+				t.Errorf("ParseHex(%q) returned error %q.  Expected error containing '%s'.", test.in, err, test.errCase)
+			}
+		} else {
+			if out != test.out {
+				t.Errorf("ParseHex(%q) = %d. Expected %d.", test.in, out, test.out)
+			}
+			if err != nil {
+				t.Errorf("ParseHex(%q) returned error %q.  Error not expected.", test.in, err)
+			}
+		}
+	}
+}
+
+func TestHandleErrors(t *testing.T) {
+	tcs := make([]string, len(testCases))
+	for i, test := range testCases {
+		tcs[i] = test.in
+	}
+	er := HandleErrors(tcs)
+	if len(er) != len(tcs) {
+		t.Fatalf("For %d test cases, HandleErrors returned %d results, want %d", len(tcs), len(er), len(tcs))
+	}
+	for i, e := range er {
+		if e != testCases[i].errCase {
+			t.Errorf("For ParseHex(%q), HandleErrors reports %q, want %q", tcs[i], e, testCases[i].errCase)
+		}
+	}
+}
+
+func BenchmarkParseHex(b *testing.B) {
+	if testing.Short() {
+		b.Skip("skipping benchmark in short mode.")
+	}
+	for i := 0; i < b.N; i++ {
+		for _, test := range testCases {
+			ParseHex(test.in)
+		}
+	}
+}
+EOF
+cat > extra_test.go <<'EOF'
+package hexadecimal
+
+import (
+	"errors"
+	"math"
+	"math/rand"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// isHex reports whether s is a non-empty string of hexadecimal digits.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// checkAgainstReference verifies ParseHex(s) against strconv.ParseInt.
+func checkAgainstReference(t *testing.T, s string) {
+	t.Helper()
+	got, err := ParseHex(s)
+	if err != nil {
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Num != s {
+			t.Fatalf("ParseHex(%q) error %#v is not a *ParseError for the input", s, err)
+		}
+	}
+	if !isHex(s) {
+		if !errors.Is(err, ErrSyntax) || got != 0 {
+			t.Fatalf("ParseHex(%q) = %d, %v; want 0, syntax error", s, got, err)
+		}
+		return
+	}
+	want, refErr := strconv.ParseInt(s, 16, 64)
+	switch {
+	case refErr == nil:
+		if err != nil || got != want {
+			t.Fatalf("ParseHex(%q) = %d, %v; want %d, nil", s, got, err, want)
+		}
+	case errors.Is(refErr, strconv.ErrRange):
+		if !errors.Is(err, ErrRange) || got != 0 {
+			t.Fatalf("ParseHex(%q) = %d, %v; want 0, range error", s, got, err)
+		}
+	default:
+		t.Fatalf("reference rejected hex string %q: %v", s, refErr)
+	}
+}
+
+func TestParseHexEdgeCases(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int64
+		err  error
+	}{
+		{"10af8c", 1093516, nil}, // examples from the instructions
+		{"008000", 32768, nil},
+		{"008080", 32896, nil},
+		{"000080", 128, nil},
+		{"0", 0, nil},
+		{"f", 15, nil},
+		{"F", 15, nil},
+		{"0123456789", 0x0123456789, nil},
+		{"abcdef", 0xabcdef, nil},
+		{"aBcDeF", 0xabcdef, nil},
+		{"00000000000000000000000000000000000001", 1, nil},
+		{"7fffffffffffffff", math.MaxInt64, nil},
+		{"7FFFFFFFFFFFFFFF", math.MaxInt64, nil},
+		{"00007fffffffffffffff", math.MaxInt64, nil},
+		{"8000000000000000", 0, ErrRange},
+		{"ffffffffffffffff", 0, ErrRange},
+		{"10000000000000000", 0, ErrRange},
+		{"ffffffffffffffffffffffffffffffff", 0, ErrRange},
+		{"", 0, ErrSyntax},
+		{"g", 0, ErrSyntax},
+		{"G", 0, ErrSyntax},
+		{"-1", 0, ErrSyntax},
+		{"+1", 0, ErrSyntax},
+		{"-", 0, ErrSyntax},
+		{"0x1f", 0, ErrSyntax},
+		{"#008000", 0, ErrSyntax},
+		{" 1f", 0, ErrSyntax},
+		{"1f ", 0, ErrSyntax},
+		{"1f\n", 0, ErrSyntax},
+		{"1_f", 0, ErrSyntax},
+		{"\x00", 0, ErrSyntax},
+		{"é", 0, ErrSyntax},
+		{"１", 0, ErrSyntax},
+		{"orange", 0, ErrSyntax},
+		{"ffffffffffffffffg", 0, ErrSyntax}, // syntax wins over range
+		{"fffffffffffffffffffffg", 0, ErrSyntax},
+	}
+	for _, tt := range tests {
+		got, err := ParseHex(tt.in)
+		if tt.err == nil {
+			if err != nil || got != tt.want {
+				t.Errorf("ParseHex(%q) = %d, %v; want %d, nil", tt.in, got, err, tt.want)
+			}
+			continue
+		}
+		var pe *ParseError
+		if !errors.Is(err, tt.err) || got != 0 || !errors.As(err, &pe) || pe.Num != tt.in || pe.Err != tt.err {
+			t.Errorf("ParseHex(%q) = %d, %#v; want 0, *ParseError{%q, %v}", tt.in, got, err, tt.in, tt.err)
+		}
+	}
+}
+
+func TestErrorMessages(t *testing.T) {
+	for in, want := range map[string]string{
+		"peanut":           `hexadecimal.ParseHex: parsing "peanut": invalid syntax`,
+		"":                 `hexadecimal.ParseHex: parsing "": invalid syntax`,
+		"8000000000000000": `hexadecimal.ParseHex: parsing "8000000000000000": value out of range`,
+	} {
+		if _, err := ParseHex(in); err == nil || err.Error() != want {
+			t.Errorf("ParseHex(%q) error = %v; want %q", in, err, want)
+		}
+	}
+}
+
+func TestParseHexShortStrings(t *testing.T) {
+	for a := 0; a < 256; a++ {
+		s := string([]byte{byte(a)})
+		_, err := ParseHex(s)
+		if _, refErr := strconv.ParseInt(s, 16, 64); (err == nil) != (refErr == nil) {
+			t.Fatalf("ParseHex(%q) error = %v; strconv error = %v", s, err, refErr)
+		}
+		checkAgainstReference(t, s)
+		for b := 0; b < 256; b++ {
+			checkAgainstReference(t, string([]byte{byte(a), byte(b)}))
+		}
+	}
+}
+
+func TestParseHexRandom(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	const digits = "0123456789abcdefABCDEF"
+	const others = "gGxXzZ+-_ \t\n#/:@`\x00\x7f\xff"
+	for i := 0; i < 300000; i++ {
+		b := make([]byte, r.Intn(25))
+		for j := range b {
+			b[j] = digits[r.Intn(len(digits))]
+		}
+		if len(b) > 0 && r.Intn(4) == 0 {
+			b[r.Intn(len(b))] = others[r.Intn(len(others))]
+		}
+		checkAgainstReference(t, string(b))
+	}
+	for i := 0; i < 300000; i++ {
+		u := r.Uint64() >> uint(r.Intn(64))
+		b := []byte(strings.Repeat("0", r.Intn(4)) + strconv.FormatUint(u, 16))
+		for j := range b {
+			if r.Intn(2) == 0 && 'a' <= b[j] && b[j] <= 'f' {
+				b[j] -= 'a' - 'A'
+			}
+		}
+		s := string(b)
+		got, err := ParseHex(s)
+		if u <= math.MaxInt64 {
+			if err != nil || got != int64(u) {
+				t.Fatalf("ParseHex(%q) = %d, %v; want %d, nil", s, got, err, u)
+			}
+		} else if !errors.Is(err, ErrRange) || got != 0 {
+			t.Fatalf("ParseHex(%q) = %d, %v; want 0, range error", s, got, err)
+		}
+	}
+}
+
+func TestHandleErrorsEdgeCases(t *testing.T) {
+	if got := HandleErrors(nil); len(got) != 0 {
+		t.Errorf("HandleErrors(nil) = %q; want no results", got)
+	}
+	in := []string{"orange", "7fffffffffffffff", "8000000000000000", "", "ffffffffffffffffg", "008080"}
+	want := []string{"syntax", "none", "range", "syntax", "syntax", "none"}
+	if got := HandleErrors(in); !reflect.DeepEqual(got, want) {
+		t.Errorf("HandleErrors(%q) = %q; want %q", in, got, want)
+	}
+}
+
+func FuzzParseHex(f *testing.F) {
+	for _, s := range []string{"", "0", "1f", "7fffffffffffffff", "8000000000000000", "ffffffffffffffffg", "+1", "-1", "0x1", "1_0"} {
+		f.Add(s)
+	}
+	f.Fuzz(checkAgainstReference)
+}
+EOF
+go vet ./... ; echo "vet exit=$?"
+go test -count=1 -v ./... ; echo "test exit=$?"
+go test -count=1 -run='^$' -fuzz='^FuzzParseHex$' -fuzztime=20s . ; echo "fuzz exit=$?"
+go test -count=1 -run='^$' -bench=. -benchmem . ; echo "bench exit=$?"
+$ rm -rf /tmp/hexcheck; c=$(go env GOCACHE) && [ -n "$c" ] && rm -rf "$c/fuzz/hexadecimal"; ls -la && gofmt -l . && go vet ./... && echo CLEAN_OK && cat hexadecimal.go
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I implemented the hex-to-decimal conversion in `hexadecimal.go`. All my tests pass, but they ran against my own reconstruction of the Exercism tests, not your actual test file.
+
+**Signature change:** the stub `ParseHex(in string, out int64, errCase string)` returned nothing, so it couldn't give back a result. Its parameters match the fields of the Exercism test cases, so I used the signature those tests call: `ParseHex(s string) (int64, error)`. The name is unchanged, but if your tests really call the three-argument form, the package won't compile.
+
+- **Conversion:** goes digit by digit (`n = n*16 + d`), accepting `0-9`, `a-f` and `A-F`, without `strconv`. For example, `"10af8c"` gives 1093516 and `"008000"` gives 32768.
+- **Invalid input:** an empty string or any non-hex character returns an error wrapping `ErrSyntax`. That includes signs, a `0x` prefix and whitespace. Valid numbers too large for an int64 return `ErrRange`. A string that is both malformed and too large counts as a syntax error.
+- **Extra function:** I added `HandleErrors([]string) []string`, which the Exercism tests also call. It labels each input `"none"`, `"syntax"` or `"range"`.
+- **Testing:** the tests ran in a scratch copy that I then deleted, so no test file was added to the repo. They covered:
+  - the reconstructed Exercism cases and extra edge cases
+  - every 1- and 2-byte string
+  - 600,000 random strings checked against `strconv.ParseInt` (only in the tests)
+  - a 20-second fuzz run

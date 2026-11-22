@@ -1,0 +1,139 @@
+$ bash <<'BASH'
+set -e
+pwd
+id
+openssl version
+python3 --version
+for directory in /app /app/ssl; do
+    if [ -d "$directory" ]; then
+        ls -la "$directory"
+    fi
+done
+BASH
+$ bash <<'BASH'
+set -euo pipefail
+umask 077
+
+ssl_dir=/app/ssl
+mkdir -p -m 0755 "$ssl_dir"
+
+openssl genrsa -traditional -out "$ssl_dir/server.key" 2048
+chmod 0600 "$ssl_dir/server.key"
+
+openssl req -new -x509 -sha256 -days 365 -key "$ssl_dir/server.key" \
+    -out "$ssl_dir/server.crt" -config /dev/stdin <<'OPENSSL_CONF'
+[req]
+prompt = no
+distinguished_name = subject
+x509_extensions = server_extensions
+
+[subject]
+O = DevOps Team
+CN = dev-internal.company.local
+
+[server_extensions]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:dev-internal.company.local
+subjectKeyIdentifier = hash
+OPENSSL_CONF
+
+cat "$ssl_dir/server.key" "$ssl_dir/server.crt" > "$ssl_dir/server.pem"
+chmod 0600 "$ssl_dir/server.pem"
+
+openssl x509 -in "$ssl_dir/server.crt" -noout -subject -dates -sha256 -fingerprint \
+    > "$ssl_dir/verification.txt"
+chmod 0644 "$ssl_dir/server.crt" "$ssl_dir/verification.txt"
+
+cat > /app/check_cert.py <<'PYTHON'
+#!/usr/bin/env python3
+"""Check the local development TLS certificate without reading its private key."""
+
+import ssl
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+CERT_PATH = Path(__file__).resolve().parent / "ssl" / "server.crt"
+
+
+def main() -> int:
+    if not CERT_PATH.is_file():
+        print(f"Certificate not found: {CERT_PATH}", file=sys.stderr)
+        return 1
+
+    try:
+        result = subprocess.run(
+            [
+                "openssl", "x509", "-in", str(CERT_PATH), "-noout",
+                "-subject", "-nameopt", "multiline", "-dates",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        fields = {}
+        for line in result.stdout.splitlines():
+            name, separator, value = line.partition("=")
+            if separator:
+                fields[name.strip()] = value.strip()
+
+        common_name = fields.get("commonName")
+        if not common_name:
+            raise ValueError("the certificate subject has no Common Name")
+        valid_from = datetime.fromtimestamp(
+            ssl.cert_time_to_seconds(fields["notBefore"]), tz=timezone.utc
+        )
+        expires = datetime.fromtimestamp(
+            ssl.cert_time_to_seconds(fields["notAfter"]), tz=timezone.utc
+        )
+        if not valid_from <= datetime.now(timezone.utc) < expires:
+            raise ValueError("the certificate is outside its validity period")
+    except subprocess.CalledProcessError as error:
+        print(f"Could not load certificate: {error.stderr.strip() or error}", file=sys.stderr)
+        return 1
+    except (KeyError, OSError, ValueError) as error:
+        print(f"Certificate verification failed: {error}", file=sys.stderr)
+        return 1
+
+    print(f"Common Name: {common_name}")
+    print(f"Expiration Date: {expires.date().isoformat()}")
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYTHON
+chmod 0755 /app/check_cert.py
+
+openssl rsa -in "$ssl_dir/server.key" -check -noout
+openssl x509 -in "$ssl_dir/server.crt" -noout -text | grep -F 'Public-Key: (2048 bit)'
+openssl verify -check_ss_sig -purpose sslserver -verify_hostname dev-internal.company.local \
+    -trusted "$ssl_dir/server.crt" "$ssl_dir/server.crt"
+
+python3 - <<'PYTHON'
+import ssl
+from pathlib import Path
+
+directory = Path("/app/ssl")
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(directory / "server.crt", directory / "server.key")
+context.load_cert_chain(directory / "server.pem")
+print("Separate certificate and key and combined PEM both load successfully.")
+PYTHON
+
+test "$(stat -c %a "$ssl_dir/server.key")" = 600
+test "$(stat -c %a "$ssl_dir/server.pem")" = 600
+stat -c '%a %n' "$ssl_dir" "$ssl_dir"/server.* "$ssl_dir/verification.txt" /app/check_cert.py
+cat "$ssl_dir/verification.txt"
+/app/check_cert.py
+BASH
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Created and verified a 365-day self-signed TLS certificate for `dev-internal.company.local` (organization: `DevOps Team`). It uses a 2048-bit RSA key and expires on `2027-11-22` UTC.
+
+The certificate, private key, combined PEM, and verification report are in `/app/ssl/`. Both `server.key` and `server.pem` have permissions set to `600`. The report records the subject, validity dates, and SHA-256 fingerprint.
+
+`/app/check_cert.py` ran successfully and printed `Certificate verification successful`.

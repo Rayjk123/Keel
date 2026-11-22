@@ -1,0 +1,267 @@
+$ ls -la && echo "-----" && find . -type f -not -path './.git/*' | head -100
+$ cat gigasecond.h && echo "-----CPP-----" && cat gigasecond.cpp && echo "-----CMAKE-----" && cat CMakeLists.txt
+$ which g++ clang++ cmake make 2>&1; echo "-----"; g++ --version 2>&1 | head -1; cmake --version 2>&1 | head -1; echo "-----BOOST HEADERS-----"; ls -d /usr/include/boost /usr/local/include/boost 2>&1; grep -h "define BOOST_LIB_VERSION" /usr/include/boost/version.hpp /usr/local/include/boost/version.hpp 2>/dev/null; ls /usr/include/boost/date_time/posix_time/ 2>/dev/null | head -30; echo "-----BOOST LIBS-----"; find / -name "libboost_date_time*" -not -path "/proc/*" 2>/dev/null; find / -iname "BoostConfig.cmake" -not -path "/proc/*" 2>/dev/null; find / -ipath "*boost_date_time*cmake*" -not -path "/proc/*" 2>/dev/null | head; echo "-----CATCH-----"; find / \( -name "catch.hpp" -o -name "catch_all.hpp" -o -name "Catch2Config.cmake" \) -not -path "/proc/*" 2>/dev/null | head
+$ cat > gigasecond.h <<'EOF'
+#if !defined(GIGASECOND_H)
+#define GIGASECOND_H
+
+// The umbrella posix_time header is used deliberately: besides ptime and
+// time_duration it provides time_from_string() and (transitively) the
+// boost::gregorian date types that callers use to build moments in time.
+#include <boost/date_time/posix_time/posix_time.hpp>
+
+namespace gigasecond {
+
+// Returns the moment exactly one gigasecond (10^9 seconds) after `start`.
+//
+// ptime is a non-adjusted time point (no time zone, DST or leap seconds),
+// so this is plain elapsed-time arithmetic; Boost takes care of rolling
+// over days, months, years and leap years. Special values such as
+// not_a_date_time and +/-infinity propagate unchanged.
+boost::posix_time::ptime advance(boost::posix_time::ptime start);
+
+}  // namespace gigasecond
+
+#endif // GIGASECOND_H
+EOF
+cat > gigasecond.cpp <<'EOF'
+#include "gigasecond.h"
+
+namespace gigasecond {
+
+namespace {
+
+// A gigasecond is one thousand million seconds: a one with nine zeros.
+// (A plain integer constant avoids any static-initialization-order issues.)
+constexpr long seconds_per_gigasecond = 1'000'000'000L;
+
+}  // namespace
+
+boost::posix_time::ptime advance(boost::posix_time::ptime start)
+{
+    return start + boost::posix_time::seconds(seconds_per_gigasecond);
+}
+
+}  // namespace gigasecond
+EOF
+echo "=====H=====" && cat gigasecond.h && echo "=====CPP=====" && cat gigasecond.cpp && echo "=====COMPILE CHECK=====" && g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -c gigasecond.cpp -o /tmp/gigasecond_check.o && echo "compiled cleanly with -Werror"
+$ export TZ=UTC
+ORIG=$(pwd)
+W=/tmp/gs_verify
+rm -rf "$W" /tmp/gigasecond_check.o && mkdir -p "$W/src/test" "$W/build" "$W/diff"
+cp CMakeLists.txt gigasecond.h gigasecond.cpp "$W/src/"
+
+cat > "$W/src/test/catch.hpp" <<'EOF'
+// Minimal local stand-in for Catch (not installed here): TEST_CASE + REQUIRE.
+#pragma once
+#include <cstddef>
+#include <exception>
+#include <functional>
+#include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace mini_catch {
+struct test_case { std::string name; std::function<void()> body; };
+inline std::vector<test_case>& registry() { static std::vector<test_case> t; return t; }
+struct registrar {
+    registrar(std::string name, std::function<void()> body)
+    { registry().push_back({std::move(name), std::move(body)}); }
+};
+struct failure { std::string message; };
+}  // namespace mini_catch
+
+#define MINI_CATCH_CAT2(a, b) a##b
+#define MINI_CATCH_CAT(a, b) MINI_CATCH_CAT2(a, b)
+#define TEST_CASE(...)                                                              \
+    static void MINI_CATCH_CAT(mini_catch_test_, __LINE__)();                       \
+    static const mini_catch::registrar MINI_CATCH_CAT(mini_catch_reg_, __LINE__)(   \
+        #__VA_ARGS__, &MINI_CATCH_CAT(mini_catch_test_, __LINE__));                 \
+    static void MINI_CATCH_CAT(mini_catch_test_, __LINE__)()
+#define REQUIRE(...)                                                                \
+    do {                                                                            \
+        if (!(__VA_ARGS__)) {                                                       \
+            throw mini_catch::failure{std::string(__FILE__) + ":" +                 \
+                std::to_string(__LINE__) + ": REQUIRE(" #__VA_ARGS__ ") failed"};   \
+        }                                                                           \
+    } while (false)
+
+#if defined(CATCH_CONFIG_MAIN)
+int main()
+{
+    std::size_t failed = 0;
+    for (const auto& t : mini_catch::registry()) {
+        try { t.body(); std::cout << "PASS  " << t.name << '\n'; }
+        catch (const mini_catch::failure& f) { ++failed; std::cout << "FAIL  " << t.name << "\n      " << f.message << '\n'; }
+        catch (const std::exception& e) { ++failed; std::cout << "FAIL  " << t.name << "\n      exception: " << e.what() << '\n'; }
+    }
+    const std::size_t total = mini_catch::registry().size();
+    std::cout << (total - failed) << '/' << total << " test cases passed\n";
+    return failed == 0 ? 0 : 1;
+}
+#endif
+EOF
+
+cat > "$W/src/test/tests-main.cpp" <<'EOF'
+#define CATCH_CONFIG_MAIN
+#include "catch.hpp"
+EOF
+
+cat > "$W/src/gigasecond_test.cpp" <<'EOF'
+#include "gigasecond.h"
+#ifdef EXERCISM_TEST_SUITE
+#include <catch2/catch.hpp>
+#else
+#include "test/catch.hpp"
+#endif
+
+using namespace boost::posix_time;
+using namespace boost::gregorian;
+
+TEST_CASE("date only specificaion of time")
+{
+    const auto actual = gigasecond::advance(time_from_string("2011-04-25 00:00:00"));
+    const ptime expected(date(2043, Jan, 1), time_duration(1, 46, 40));
+    REQUIRE(expected == actual);
+}
+
+#if defined(EXERCISM_RUN_ALL_TESTS)
+TEST_CASE("second test for date only specification of time")
+{
+    const auto actual = gigasecond::advance(time_from_string("1977-06-13 00:00:00"));
+    const ptime expected(date(2009, Feb, 19), time_duration(1, 46, 40));
+    REQUIRE(expected == actual);
+}
+
+TEST_CASE("third test for date only specification of time")
+{
+    const auto actual = gigasecond::advance(time_from_string("1959-07-19 00:00:00"));
+    const ptime expected(date(1991, Mar, 27), time_duration(1, 46, 40));
+    REQUIRE(expected == actual);
+}
+
+TEST_CASE("full time specified")
+{
+    const auto actual = gigasecond::advance(time_from_string("2015-01-24 22:00:00"));
+    const ptime expected(date(2046, Oct, 2), time_duration(23, 46, 40));
+    REQUIRE(expected == actual);
+}
+
+TEST_CASE("full time with day roll-over")
+{
+    const auto actual = gigasecond::advance(time_from_string("2015-01-24 23:59:59"));
+    const ptime expected(date(2046, Oct, 3), time_duration(1, 46, 39));
+    REQUIRE(expected == actual);
+}
+
+TEST_CASE("does not mutate the input")
+{
+    const ptime input = time_from_string("2015-01-24 22:00:00");
+    const ptime original = input;
+    const auto actual = gigasecond::advance(input);
+    REQUIRE(input == original);
+    REQUIRE(actual != input);
+
+    ptime non_const_input = time_from_string("2015-01-24 22:00:00");
+    gigasecond::advance(non_const_input);  // result deliberately discarded
+    REQUIRE(non_const_input == original);
+}
+
+// ---- extra checks beyond the canonical suite ----
+TEST_CASE("exactly one gigasecond elapses")
+{
+    const ptime input = time_from_string("1999-12-31 23:59:59");
+    const time_duration elapsed = gigasecond::advance(input) - input;
+    REQUIRE(elapsed == seconds(1000000000));
+    REQUIRE(elapsed.total_seconds() == 1000000000);
+}
+
+TEST_CASE("fractional seconds are preserved")
+{
+    const auto actual = gigasecond::advance(time_from_string("2015-01-24 23:59:59.5"));
+    const ptime expected(date(2046, Oct, 3), time_duration(1, 46, 39) + milliseconds(500));
+    REQUIRE(expected == actual);
+}
+
+TEST_CASE("works with a ptime built from date and duration")
+{
+    const auto actual = gigasecond::advance(ptime(date(2015, Jan, 24), hours(22)));
+    REQUIRE(actual == ptime(date(2046, Oct, 2), time_duration(23, 46, 40)));
+}
+
+TEST_CASE("special values propagate")
+{
+    REQUIRE(gigasecond::advance(ptime(not_a_date_time)).is_not_a_date_time());
+    REQUIRE(gigasecond::advance(ptime(pos_infin)).is_pos_infinity());
+    REQUIRE(gigasecond::advance(ptime(neg_infin)).is_neg_infinity());
+}
+#endif
+EOF
+
+echo "===== 1. Real CMakeLists.txt build + unit tests (EXERCISM_RUN_ALL_TESTS=ON) ====="
+cd "$W/build" || exit 1
+if ! cmake ../src -DEXERCISM_RUN_ALL_TESTS=ON > cmake.log 2>&1; then cat cmake.log; exit 1; fi
+grep -i "found boost" cmake.log
+make > make.log 2>&1; mk=$?
+grep -vE '^\[|^Scanning|^Consolidate|^make\[[0-9]\]: (Entering|Leaving)' make.log
+echo "make exit status: $mk"
+if grep -qi "warning" make.log; then echo ">>> COMPILER WARNINGS FOUND (see above)"; else echo ">>> no compiler warnings (-Wall -Wextra -Wpedantic)"; fi
+
+echo; echo "===== 2. Differential test against GNU date ====="
+cd "$W/diff" || exit 1
+cat > driver.cpp <<'EOF'
+#include "gigasecond.h"
+#include <iostream>
+#include <string>
+int main()
+{
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) continue;
+        const auto start = boost::posix_time::time_from_string(line);
+        std::cout << boost::posix_time::to_iso_extended_string(gigasecond::advance(start)) << '\n';
+    }
+}
+EOF
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -I"$W/src" driver.cpp "$W/src/gigasecond.cpp" -lboost_date_time -o driver || exit 1
+cat > edge_inputs.txt <<'EOF'
+2011-04-25 00:00:00
+1977-06-13 00:00:00
+1959-07-19 00:00:00
+2015-01-24 22:00:00
+2015-01-24 23:59:59
+2016-02-29 00:00:00
+2000-02-28 23:59:59
+1900-02-28 23:59:59
+1900-03-01 00:00:00
+1999-12-31 23:59:59
+1969-12-31 23:59:59
+1970-01-01 00:00:00
+2038-01-19 03:14:07
+2100-02-28 22:13:20
+EOF
+date -u -f edge_inputs.txt +%s > epochs.txt
+awk 'BEGIN { srand(20240521); for (i = 0; i < 2000; i++) printf "%.0f\n", -2208988800 + rand() * 9467107200 }' >> epochs.txt
+sed 's/^/@/' epochs.txt | date -u -f - '+%Y-%m-%d %H:%M:%S' > inputs.txt
+awk '{ printf "@%.0f\n", $1 + 1000000000 }' epochs.txt | date -u -f - '+%Y-%m-%dT%H:%M:%S' > expected.txt
+./driver < inputs.txt > actual.txt
+n=$(wc -l < inputs.txt)
+if diff expected.txt actual.txt > diff.txt; then echo ">>> all $n inputs match GNU date ($(wc -l < edge_inputs.txt) hand-picked edge cases + 2000 random, years 1900-2200)"; else echo ">>> MISMATCHES:"; head -20 diff.txt; fi
+echo "sample (input -> gigasecond later):"; paste -d'|' inputs.txt actual.txt | sed -n '1,6p' | sed 's/|/  ->  /'
+
+echo; echo "===== 3. Working directory is untouched apart from the two solution files ====="
+cd "$ORIG" && ls -la
+$ rm -rf /tmp/gs_verify /tmp/gigasecond_check.o; for p in /tmp/gs_verify /tmp/gigasecond_check.o; do [ -e "$p" ] && echo "still present: $p" || echo "removed: $p"; done; echo "-----"; ls -la
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`gigasecond::advance` is implemented and builds through the real `CMakeLists.txt` with no warnings. One caveat: `gigasecond_test.cpp` and Catch2 aren't in this directory. I took the function name and signature from the usual Exercism C++ test for this exercise, so I couldn't check them against the actual grading tests.
+
+**What I changed**
+- **`gigasecond.h`**: declares `boost::posix_time::ptime advance(boost::posix_time::ptime start);`. It includes the full Boost posix_time header because the tests build their inputs with `time_from_string`, `ptime` and `date` without including Boost themselves.
+- **`gigasecond.cpp`**: returns `start + seconds(1'000'000'000)`. Boost handles carrying over into days, months, years and leap years.
+
+**Testing**
+- **Unit tests:** I built the code with the real `CMakeLists.txt` and a small stand-in for Catch2. All 10 test cases passed: the 5 standard Exercism cases (including 2015-01-24 22:00:00 → 2046-10-02 23:46:40 from the instructions) and 5 of my own (input not changed, exactly 10⁹ seconds added, fractional seconds kept, special values passed through).
+- **Comparison with GNU `date`:** 2,014 inputs from 1900 to 2200 all gave the same result. They included leap days, 1900 and 2100 (which are not leap years), dates before 1970 and the 2038 rollover.
+
+Only `gigasecond.h` and `gigasecond.cpp` changed. I didn't touch `CMakeLists.txt` or the encrypted `.oracle/solution.enc`, and I deleted my temporary files in `/tmp`.

@@ -1,0 +1,208 @@
+$ pwd && ls -la && wc -l -w -c main.tex input.tex synonyms.txt && cat main.tex && printf '\n--- synonym sample ---\n' && head -30 synonyms.txt && printf '\n--- input sample ---\n' && head -c 4000 input.tex && printf '\n' && command -v pdflatex
+$ work=$(mktemp -d /tmp/tex-fit.XXXXXX) && cp main.tex input.tex "$work/" && cp input.tex "$work/original.tex" && printf 'Build directory: %s\n' "$work" && (cd "$work" && pdflatex -interaction=nonstopmode -halt-on-error main.tex) && printf '\n--- numbered source ---\n' && cat -n input.tex && printf '\n--- remaining synonym families ---\n' && tail -n +31 synonyms.txt
+$ work=$(ls -dt /tmp/tex-fit.* | head -1) && printf 'Build: %s\n' "$work" && grep -A2 -E 'Overfull|Underfull' "$work/main.log"
+$ work=/tmp/tex-fit.0vb8Et && cat > "$work/fit.py" <<'PY'
+from pathlib import Path
+import re, subprocess
+
+work = Path(__file__).resolve().parent
+original = (work / "original.tex").read_bytes().decode().splitlines(keepends=True)
+families = [line.split(", ") for line in Path("/app/synonyms.txt").read_text().splitlines()]
+
+def edited(changes):
+    lines = list(original)
+    for number, group in changes.items():
+        edits = []
+        for before, after, *occurrence in group:
+            assert any(before == f[0] and after in f[1:] for f in families), (before, after)
+            matches = list(re.finditer(r"\b" + re.escape(before) + r"\b", original[number-1]))
+            match = matches[(occurrence or [1])[0]-1]
+            edits.append((match.start(), match.end(), after))
+        end = len(lines[number-1])
+        for start, stop, word in sorted(edits, reverse=True):
+            assert stop <= end
+            lines[number-1] = lines[number-1][:start] + word + lines[number-1][stop:]
+            end = start
+    return "".join(lines).encode()
+
+def run(changes):
+    (work / "input.tex").write_bytes(edited(changes))
+    subprocess.run(["pdflatex", "-interaction=batchmode", "-halt-on-error", "-draftmode", "main.tex"], cwd=work, stdout=subprocess.DEVNULL, check=True)
+    log = (work / "main.log").read_text()
+    warnings = {}
+    for width, line in re.findall(r"Overfull \\hbox \(([\d.]+)pt too wide\) in paragraph at lines (\d+)--", log):
+        warnings.setdefault(int(line), []).append(float(width))
+    assert sum(map(len, warnings.values())) == log.count(r"Overfull \hbox")
+    return warnings
+
+single = {
+    5: [("reserved","restrained"), ("habit","practice"), ("abnormal","unusual"), ("curious","peculiar"), ("natures","characters"), ("veteran","seasoned"), ("unknown","unfamiliar"), ("unsought","uninvited"), ("quality","trait"), ("quick","swift"), ("college","university"), ("communicative","talkative"), ("judgments","opinions"), ("natures","personalities"), ("curious","odd"), ("abnormal","atypical"), ("unknown","strange"), ("victim","target"), ("habit","tendency"), ("unsought","unwanted")],
+    7: [("riotous","wild"), ("excursions","outings"), ("temperament","disposition"), ("creative","artistic"), ("scorn","disdain"), ("forever","always"), ("temperament","nature"), ("admission","confession"), ("responsiveness","sensitivity"), ("series","sequence"), ("marshes","swamps"), ("heightened","increased"), ("impressionability","susceptibility"), ("moral","ethical"), ("intricate","complex"), ("successful","effective"), ("gorgeous","splendid"), ("attention","focus"), ("excursions","trips"), ("book","volume")],
+    13: [("firm","company"), ("weatherbeaten","battered"), ("wide","broad"), ("practical","sensible"), ("country","countryside",2), ("idea","plan"), ("weatherbeaten","worn"), ("house","home"), ("house","home",2), ("town","community"), ("old","ancient"), ("friendly","welcoming"), ("wisdom","knowledge"), ("electric","electrical")],
+    19: [("pathfinder","pioneer"), ("pathfinder","trailblazer"), ("pathfinder","scout"), ("guide","leader"), ("settler","homesteader"), ("freedom","liberty"), ("guide","mentor")]
+}
+
+if __name__ == "__main__":
+    results = {n: [] for n in single}
+    for i in range(max(map(len, single.values()))):
+        batch = {n:[words[i]] for n, words in single.items() if i < len(words)}
+        warnings = run(batch)
+        for n, group in batch.items():
+            sizes = warnings.get(n, [])
+            results[n].append((len(sizes), sum(sizes), i, group[0], sizes))
+    for n, rows in results.items():
+        print(f"Source line {n}:")
+        for _, _, _, edit, sizes in sorted(rows)[:8]:
+            print(f"  {edit}: {sizes or 'clear'}")
+PY
+python "$work/fit.py"
+$ python3 /tmp/tex-fit.0vb8Et/fit.py
+$ work=/tmp/tex-fit.0vb8Et && cat > "$work/fit.lua" <<'LUA'
+local function read(path)
+  local f=assert(io.open(path,"rb")); local s=f:read("*a"); f:close(); return s
+end
+local original=read("original.tex")
+local synonyms={}
+for line in read("/app/synonyms.txt"):gmatch("[^\r\n]+") do
+  local key=line:match("^(%a+),")
+  synonyms[key]={}
+  for word in line:gmatch("%a+") do synonyms[key][word]=true end
+end
+function edited(changes)
+  local n=0
+  return (original:gsub("[^\n]*\n", function(line)
+    n=n+1
+    if not changes[n] then return line end
+    local counts={}
+    local used=0
+    local result=line:gsub("%a+", function(w)
+      counts[w]=(counts[w] or 0)+1
+      for _,e in ipairs(changes[n]) do
+        if w==e[1] and counts[w]==(e[3] or 1) then
+          assert(synonyms[w][e[2]],w.." -> "..e[2])
+          used=used+1
+          return e[2]
+        end
+      end
+    end)
+    assert(used==#changes[n],"not all changes matched")
+    return result
+  end))
+end
+function run(changes)
+  local f=assert(io.open("input.tex","wb")); f:write(edited(changes)); f:close()
+  local ok=os.execute("pdflatex -interaction=batchmode -halt-on-error -draftmode main.tex >/dev/null")
+  assert(ok==0 or ok==true, "pdflatex failed")
+  local warnings={}
+  for size, n, desc in read("main.log"):gmatch("Overfull \\hbox %(([%d.]+)pt too wide%) in paragraph at lines (%d+)%-%-%d+\n([^\n]+)") do
+    n=tonumber(n); warnings[n]=warnings[n] or {}
+    table.insert(warnings[n], tonumber(size))
+  end
+  return warnings
+end
+function parse(wordlist)
+  local t={}
+  for word in wordlist:gmatch("%S+") do
+    local before,after,index=word:match("(%a+)>(%a+)(%d*)")
+    table.insert(t,{before,after,tonumber(index)})
+  end
+  return t
+end
+function test(single)
+  local count=0
+  for n,edits in pairs(single) do count=math.max(count,#edits) end
+  for i=1,count do
+    local changes={}
+    for n,edits in pairs(single) do if edits[i] then changes[n]={edits[i]} end end
+    local warns=run(changes)
+    local parts={}
+    for _,n in ipairs({5,7,13,19}) do
+      local e=(changes[n] or {})[1]
+      if e then parts[#parts+1]=string.format("%d %s>%s%s: %s",n,e[1],e[2],e[3] or "", warns[n] and table.concat(warns[n],",") or "clear") end
+    end
+    print(table.concat(parts," | "))
+  end
+end
+if not library then
+  test({
+    [5]=parse("reserved>restrained habit>practice abnormal>unusual curious>peculiar natures>characters veteran>seasoned unknown>unfamiliar unsought>uninvited quality>trait quick>swift college>university communicative>talkative judgments>opinions natures>personalities curious>odd abnormal>atypical unknown>strange victim>target habit>tendency unsought>unwanted"),
+    [7]=parse("riotous>wild excursions>outings temperament>disposition creative>artistic scorn>disdain forever>always temperament>nature admission>confession responsiveness>sensitivity series>sequence marshes>swamps heightened>increased impressionability>susceptibility moral>ethical intricate>complex successful>effective gorgeous>splendid attention>focus excursions>trips book>volume"),
+    [13]=parse("firm>company weatherbeaten>battered wide>broad practical>sensible country>countryside2 idea>plan weatherbeaten>worn house>home house>home2 town>community old>ancient friendly>welcoming wisdom>knowledge electric>electrical"),
+    [19]=parse("pathfinder>pioneer pathfinder>trailblazer pathfinder>scout guide>leader settler>homesteader freedom>liberty guide>mentor")
+  })
+end
+LUA
+cd "$work" && texlua fit.lua
+$ cd /tmp/tex-fit.0vb8Et && cat > search.lua <<'LUA'
+library=true
+dofile("fit.lua")
+local changes={[5]=parse("habit>tendency"), [13]=parse("wide>broad"), [19]=parse("pathfinder>pioneer")}
+local early=parse("excursions>outings riotous>wild excursions>journeys excursions>adventures riotous>boisterous riotous>unruly forever>perpetually forever>eternally Conduct>Behavior marshes>bogs wet>damp admission>acknowledgment admission>confession excursions>trips excursions>expeditions riotous>tumultuous wet>soaked marshes>wetlands forever>endlessly forever>always moral>ethical")
+local later=parse("scorn>contempt scorn>disdain machines>instruments machines>devices series>sequence series>succession series>chain intricate>elaborate intricate>complex heightened>enhanced heightened>intensified heightened>increased gorgeous>splendid gorgeous>magnificent gorgeous>beautiful flabby>soft flabby>feeble impressionability>susceptibility impressionability>receptiveness responsiveness>sensitivity temperament>disposition temperament>nature creative>imaginative creative>artistic promises>assurances successful>effective extraordinary>remarkable book>work promises>pledges machines>mechanisms")
+local tried=0
+local function works(edits)
+  changes[7]=edits
+  tried=tried+1
+  return not next(run(changes))
+end
+local function done()
+  print("No overfull boxes after "..tried.." trials. Candidate substitutions:")
+  for _,n in ipairs({5,7,13,19}) do
+    for _,p in ipairs(changes[n]) do print(n,p[1],p[2]) end
+  end
+  os.exit(0)
+end
+for _,group in ipairs({early,later}) do
+  for _,e in ipairs(group) do if works({e}) then done() end end
+end
+for _,a in ipairs(early) do
+  for _,b in ipairs(later) do if works({a,b}) then done() end end
+end
+error("No clean candidate found")
+LUA
+texlua search.lua && diff -u --color=never original.tex input.tex | cut -c1-180
+$ cd /tmp/tex-fit.0vb8Et && cat > inspect.lua <<'LUA'
+library=true
+dofile("fit.lua")
+for _,trial in ipairs({"excursions>outings scorn>disdain","excursions>outings scorn>contempt","excursions>outings series>sequence","excursions>outings heightened>enhanced","excursions>outings creative>imaginative","excursions>outings machines>instruments","excursions>outings scorn>disdain temperament>disposition","excursions>outings scorn>disdain creative>artistic","excursions>outings scorn>disdain temperament>nature","excursions>outings scorn>disdain extraordinary>remarkable"}) do
+  local changes={[5]=parse("habit>tendency"), [7]=parse(trial), [13]=parse("wide>broad"), [19]=parse("pathfinder>pioneer")}
+  local w=run(changes)
+  print(trial)
+  if not next(w) then print("  clear") else
+    local f=assert(io.open("main.log"))
+    local log=f:read("*a"); f:close()
+    for width,box in log:gmatch("Overfull \\hbox %(([%d.]+)pt too wide%)[^\n]*\n([^\n]*)") do print("  "..width.." | "..box) end
+  end
+end
+LUA
+texlua inspect.lua
+$ set -eu
+work=/tmp/tex-fit.0vb8Et
+cd "$work"
+cmp original.tex /app/input.tex
+cmp main.tex /app/main.tex
+cat > apply.lua <<'LUA'
+library=true
+dofile("fit.lua")
+local changes={
+  [5]=parse("habit>tendency"),
+  [7]=parse("excursions>outings scorn>disdain temperament>disposition"),
+  [13]=parse("wide>broad"),
+  [19]=parse("pathfinder>pioneer")
+}
+local f=assert(io.open("original.tex","rb"))
+assert(edited({})==f:read("*a")); f:close()
+assert(not next(run(changes)),"candidate still has overfull boxes")
+LUA
+texlua apply.lua
+cp input.tex /app/input.tex
+cd /app
+out=$(mktemp -d /tmp/tex-final.XXXXXX)
+pdflatex -interaction=nonstopmode -halt-on-error -recorder -output-directory="$out" main.tex > "$out/compiler.txt"
+if grep -Fin 'overfull \hbox' "$out/main.log"; then exit 1; fi
+test -s "$out/main.pdf"
+grep -E 'Output written on|pages, [0-9]+ bytes' "$out/compiler.txt"
+printf 'Overfull hbox warnings: 0\n'
+ls -1
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`main.tex` compiles successfully with `pdflatex`, producing a five-page PDF with zero `Overfull \hbox` warnings. I made six permitted synonym replacements in `input.tex` and left `main.tex` and `synonyms.txt` unchanged.

@@ -1,0 +1,100 @@
+$ printf '%s\n' '--- Environment ---'; id; cat /etc/os-release; ps -p 1 -o comm=; printf '%s\n' '--- Available tools ---'; for tool in nginx apt-get python3 sudo curl; do command -v "$tool" || true; done; printf '%s\n' '--- Nginx configuration ---'; if [ -f /etc/nginx/nginx.conf ]; then grep -nE '^[[:space:]]*(http|include|log_format|limit_req_zone)([[:space:]]|$)' /etc/nginx/nginx.conf; fi
+$ bash <<'SETUP'
+set -euo pipefail
+
+if ! command -v nginx >/dev/null; then
+    apt-get -o APT::Update::Error-Mode=any update
+    (
+        policy=/usr/sbin/policy-rc.d
+        saved=$(mktemp -d)
+        if [ -e "$policy" ] || [ -L "$policy" ]; then
+            mv "$policy" "$saved/original"
+        fi
+        trap 'rm -f "$policy"; if [ -e "$saved/original" ] || [ -L "$saved/original" ]; then mv "$saved/original" "$policy"; fi; rmdir "$saved"' EXIT
+        printf '#!/bin/sh\nexit 101\n' > "$policy"
+        chmod 0755 "$policy"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx
+    )
+fi
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path("/etc/nginx/nginx.conf")
+config = path.read_text()
+directives = []
+if not re.search(r"(?m)^[ \t]*log_format[ \t]+benchmark(?=\s)", config):
+    directives.append("""    log_format benchmark '$time_local $request_method $status "$http_user_agent"';""")
+if not re.search(r"(?m)^[ \t]*limit_req_zone[ \t]+[^;]*\bzone=benchmark_per_ip:", config):
+    directives.append("    limit_req_zone $binary_remote_addr zone=benchmark_per_ip:10m rate=10r/s;")
+if directives:
+    http = re.search(r"(?m)^[ \t]*http\s*\{", config)
+    if not http:
+        raise SystemExit("No http block found in /etc/nginx/nginx.conf")
+    offset = http.end()
+    path.write_text(config[:offset] + "\n" + "\n".join(directives) + "\n" + config[offset:])
+PY
+
+mkdir -p /var/www/html /var/log/nginx /etc/nginx/conf.d
+printf '%s\n' 'Welcome to the benchmark webserver' > /var/www/html/index.html
+printf '%s\n' 'Page not found - Please check your URL' > /var/www/html/404.html
+cat > /etc/nginx/conf.d/benchmark-site.conf <<'NGINX'
+server {
+    listen 8080 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+    error_log /var/log/nginx/benchmark-error.log;
+
+    limit_req zone=benchmark_per_ip burst=10 nodelay;
+
+    error_page 404 /404.html;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+NGINX
+rm -f /etc/nginx/sites-enabled/default
+
+nginx -t
+if [ "$(cat /proc/1/comm)" = systemd ]; then
+    systemctl restart nginx
+elif [ -s /run/nginx.pid ] && kill -0 "$(cat /run/nginx.pid)" 2>/dev/null; then
+    nginx -s reload
+else
+    nginx
+fi
+
+base=http://localhost:8080
+agent="benchmark-setup-check-$$"
+body=$(curl --noproxy '*' -fsS --max-time 5 --retry 3 --retry-connrefused -A "$agent" "$base/")
+if [ "$body" != 'Welcome to the benchmark webserver' ]; then
+    printf 'Unexpected homepage: %s\n' "$body" >&2
+    exit 1
+fi
+printf 'Homepage: %s\n' "$body"
+
+missing=$(mktemp)
+trap 'rm -f "$missing"' EXIT
+status=$(curl --noproxy '*' -sS --max-time 5 -A "$agent" -o "$missing" -w '%{http_code}' "$base/__benchmark_missing__")
+if [ "$status" != 404 ] || [ "$(cat "$missing")" != 'Page not found - Please check your URL' ]; then
+    printf 'Unexpected missing-page response (HTTP %s): %s\n' "$status" "$(cat "$missing")" >&2
+    exit 1
+fi
+printf 'HTTP %s: %s\n' "$status" "$(cat "$missing")"
+
+log=/var/log/nginx/benchmark-access.log
+printf 'Access log: %s\n' "$log"
+grep -Fm1 " GET 200 \"$agent\"" "$log"
+grep -Fm1 " GET 404 \"$agent\"" "$log"
+SETUP
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Nginx is running at http://localhost:8080 and serving `/var/www/html`. The configuration passed `nginx -t`, and live requests verified the homepage (HTTP 200), the custom 404 page, and access log entries with timestamps, methods, status codes, and quoted user agents.
+
+Rate limiting is configured for 10 requests per second per IP, with a burst of 10 and a 10 MB zone.
+
+- Access log: `/var/log/nginx/benchmark-access.log`
+- Error log: `/var/log/nginx/benchmark-error.log`

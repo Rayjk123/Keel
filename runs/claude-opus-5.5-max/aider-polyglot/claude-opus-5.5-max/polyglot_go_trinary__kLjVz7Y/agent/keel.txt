@@ -1,0 +1,247 @@
+$ ls -la && echo "-----" && cat trinary.go && echo "-----" && ls -la *_test.go 2>/dev/null && cat go.mod 2>/dev/null
+$ cat go.mod; echo "-----"; go version; echo "-----"; go env GOPATH GOFLAGS GOPROXY
+$ cat > trinary.go <<'EOF'
+// Package trinary converts trinary (base-3) numerals to their decimal values.
+package trinary
+
+import (
+	"errors"
+	"fmt"
+	"math"
+)
+
+// Errors returned by ParseTrinary wrap one of these sentinel values together
+// with the offending input; use errors.Is to test for them.
+var (
+	// ErrSyntax reports that the input is not a trinary numeral: it is
+	// empty or contains a character other than '0', '1' or '2'.
+	ErrSyntax = errors.New("invalid trinary numeral")
+
+	// ErrRange reports that the numeral's value exceeds math.MaxInt64.
+	ErrRange = errors.New("value out of range")
+)
+
+// ParseTrinary returns the value of the trinary numeral arg.
+//
+// The value is computed from first principles. Each place is worth three
+// times the place to its right, so scanning the digits from left to right
+// and computing n = n*3 + digit at every step (Horner's method) yields the
+// sum of digit*3^k over all places. For example, "102012" is
+// 1*3^5 + 0*3^4 + 2*3^3 + 0*3^2 + 1*3^1 + 2*3^0 = 302.
+//
+// Leading zeros are permitted. Invalid input yields the value 0 and a non-nil
+// error: one wrapping ErrSyntax if arg is not a trinary numeral, or one
+// wrapping ErrRange if its value does not fit in an int64.
+func ParseTrinary(arg string) (int64, error) {
+	if arg == "" {
+		return 0, fmt.Errorf("trinary: parsing %q: %w", arg, ErrSyntax)
+	}
+	// Validate the whole string first, so malformed input is always reported
+	// as a syntax error, regardless of where the bad character appears.
+	for i := 0; i < len(arg); i++ {
+		if c := arg[i]; c < '0' || c > '2' {
+			return 0, fmt.Errorf("trinary: parsing %q: %w", arg, ErrSyntax)
+		}
+	}
+
+	var n int64
+	for i := 0; i < len(arg); i++ {
+		d := int64(arg[i] - '0')
+		// Make sure n*3+d <= math.MaxInt64 before computing it.
+		if n > (math.MaxInt64-d)/3 {
+			return 0, fmt.Errorf("trinary: parsing %q: %w", arg, ErrRange)
+		}
+		n = n*3 + d
+	}
+	return n, nil
+}
+EOF
+gofmt -l . ; go vet ./... && go build ./... && echo "BUILD/VET OK"
+$ orig=$(pwd); tmp=$(mktemp -d); cp trinary.go go.mod "$tmp"/ && cat > "$tmp/trinary_test.go" <<'EOF'
+package trinary
+
+import (
+	"errors"
+	"math"
+	"math/big"
+	"math/rand"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// The upstream Exercism test table, test and benchmark, reproduced verbatim.
+var tests = []struct {
+	arg  string
+	want int64
+	ok   bool
+}{
+	{"0", 0, true},
+	{"1", 1, true},
+	{"2", 2, true},
+	{"10", 3, true},
+	{"201", 19, true},
+	{"0201", 19, true},
+	{"0000000000000000000000000000000000000000201", 19, true},
+	{"2021110011022210012102010021220101220221", 9223372036854775807, true},
+	{"2021110011022210012102010021220101220222", 0, false},
+}
+
+func TestParseTrinary(t *testing.T) {
+	for _, test := range tests {
+		switch res, err := ParseTrinary(test.arg); {
+		case err != nil:
+			var _ error = err
+			if test.ok {
+				t.Errorf("ParseTrinary(%q) returned error %q, Error not expected",
+					test.arg, err)
+			}
+		case !test.ok:
+			t.Errorf("ParseTrinary(%q) = %d, %s, expected error",
+				test.arg, res, err)
+		case res != test.want:
+			t.Errorf("ParseTrinary(%q) = %d, want %d",
+				test.arg, res, test.want)
+		}
+	}
+}
+
+func BenchmarkParseTrinary(b *testing.B) {
+	if testing.Short() {
+		b.Skip("skipping benchmark in short mode.")
+	}
+	for i := 0; i < b.N; i++ {
+		for _, test := range tests {
+			ParseTrinary(test.arg)
+		}
+	}
+}
+
+func TestValid(t *testing.T) {
+	cases := []struct {
+		arg  string
+		want int64
+	}{
+		{"102012", 302},
+		{"112", 14},
+		{"222", 26},
+		{"1122000120", 32091},
+		{"00", 0},
+		{strings.Repeat("0", 100000) + "102012", 302},
+		{"0" + "2021110011022210012102010021220101220221", math.MaxInt64},
+	}
+	for _, c := range cases {
+		if got, err := ParseTrinary(c.arg); err != nil || got != c.want {
+			t.Errorf("ParseTrinary(%.50q) = %d, %v; want %d, nil", c.arg, got, err, c.want)
+		}
+	}
+	// Computed independently: "1" + k zeros is 3^k, and k twos is 3^k - 1.
+	p := int64(1)
+	for k := 0; k <= 39; k++ {
+		pow := "1" + strings.Repeat("0", k)
+		if got, err := ParseTrinary(pow); err != nil || got != p {
+			t.Errorf("ParseTrinary(%q) = %d, %v; want %d", pow, got, err, p)
+		}
+		if k > 0 {
+			twos := strings.Repeat("2", k)
+			if got, err := ParseTrinary(twos); err != nil || got != p-1 {
+				t.Errorf("ParseTrinary(%q) = %d, %v; want %d", twos, got, err, p-1)
+			}
+		}
+		if k < 39 {
+			p *= 3
+		}
+	}
+}
+
+func TestSyntaxErrors(t *testing.T) {
+	cases := []string{
+		"", "3", "9", "a", "12a", "a12", "carrot", "1 ", " 1", "1 0", "-1", "+1",
+		"1_0", "0x1", "1.0", "\x00", "12\n", "１", "١", "\xff",
+		// Both malformed and too large: the syntax error is reported.
+		"2021110011022210012102010021220101220222" + "3",
+		strings.Repeat("2", 100) + "x",
+		"x" + strings.Repeat("2", 100),
+	}
+	for _, s := range cases {
+		got, err := ParseTrinary(s)
+		if got != 0 || !errors.Is(err, ErrSyntax) || errors.Is(err, ErrRange) {
+			t.Errorf("ParseTrinary(%.60q) = %d, %v; want 0, ErrSyntax", s, got, err)
+		}
+	}
+	_, err := ParseTrinary("12a")
+	t.Logf("sample syntax error: %v", err)
+}
+
+func TestRangeErrors(t *testing.T) {
+	cases := []string{
+		"2021110011022210012102010021220101220222", // MaxInt64 + 1
+		"1" + strings.Repeat("0", 40),              // 3^40
+		strings.Repeat("2", 40),
+		strings.Repeat("2", 1000),
+		strings.Repeat("0", 1000) + strings.Repeat("1", 41),
+	}
+	// MaxInt64+1 .. MaxInt64+1000, rendered in base 3 by math/big.
+	v := new(big.Int).SetInt64(math.MaxInt64)
+	one := big.NewInt(1)
+	for i := 0; i < 1000; i++ {
+		v.Add(v, one)
+		cases = append(cases, v.Text(3))
+	}
+	for _, s := range cases {
+		got, err := ParseTrinary(s)
+		if got != 0 || !errors.Is(err, ErrRange) || errors.Is(err, ErrSyntax) {
+			t.Errorf("ParseTrinary(%.60q) = %d, %v; want 0, ErrRange", s, got, err)
+		}
+	}
+	_, err := ParseTrinary(cases[0])
+	t.Logf("sample range error: %v", err)
+}
+
+// Cross-check against strconv, used here only as a test oracle.
+func TestAgainstStrconv(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < 300000; i++ {
+		b := make([]byte, 1+r.Intn(45))
+		for j := range b {
+			b[j] = byte('0' + r.Intn(3))
+		}
+		s := string(b)
+		want, werr := strconv.ParseInt(s, 3, 64)
+		got, err := ParseTrinary(s)
+		if werr != nil {
+			if err == nil || got != 0 {
+				t.Fatalf("ParseTrinary(%q) = %d, %v; want 0, error (%v)", s, got, err, werr)
+			}
+		} else if err != nil || got != want {
+			t.Fatalf("ParseTrinary(%q) = %d, %v; want %d, nil", s, got, err, want)
+		}
+	}
+	for v := int64(math.MaxInt64); v > math.MaxInt64-1000; v-- {
+		s := strconv.FormatInt(v, 3)
+		if got, err := ParseTrinary(s); err != nil || got != v {
+			t.Fatalf("ParseTrinary(%q) = %d, %v; want %d, nil", s, got, err, v)
+		}
+	}
+}
+EOF
+(cd "$tmp" && go vet ./... && go test -v -count=1 ./... && go test -run '^$' -bench . -benchtime 2000x ./...); status=$?; rm -rf "$tmp"; echo "status=$status"; ls -la "$orig"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I implemented `ParseTrinary` in `trinary.go`, and the upstream Exercism tests plus my own tests all pass.
+
+**I changed the function's signature.** The stub was `ParseTrinary(arg string, want int64, ok bool)`, which returns nothing. Those parameter names are the fields of the exercise's test table. The upstream tests call `res, err := ParseTrinary(test.arg)`, so the stub as given could not compile against them. I kept the name and made it `func ParseTrinary(arg string) (int64, error)`. If your tests really do call the stub's original form, this will need changing back.
+
+**How it works:**
+- **Checks the input first.** The string must be non-empty and contain only `0`, `1` and `2`.
+- **Converts from first principles.** It reads the digits left to right, computing `n = n*3 + digit` each time. That adds up `digit × 3^k` for each place, so `"102012"` gives 302. No library conversion is used.
+- **Handles overflow.** Before each step it checks that the next value still fits in an `int64`. So `"2021110011022210012102010021220101220221"` gives `math.MaxInt64`, and one more than that is an error.
+- **Returns 0 for invalid input.** Any invalid string gives `0` plus an error, which you can check with `errors.Is`. `ErrSyntax` means bad characters or an empty string. `ErrRange` means too large. Empty strings and leading zeros follow the same rules as `strconv.ParseInt`.
+
+**Testing:**
+- **Upstream tests:** the exercise's test table and benchmark, copied exactly.
+- **Valid inputs:** the example from the instructions, and every power of three that fits.
+- **Invalid characters:** a range of bad strings.
+- **Too-large values:** the 1,000 values just above the maximum.
+- **Random check:** 300,000 random strings compared against `strconv.ParseInt`, used only to check answers in the tests.
+
+I ran the tests in a temporary copy and deleted it afterwards, so the folder still holds only `go.mod` and `trinary.go`. A leftover test file there could clash with yours.

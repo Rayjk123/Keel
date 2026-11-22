@@ -1,0 +1,158 @@
+$ ls -la /app
+$ python - <<'PY'
+from pathlib import Path
+import importlib.util
+p = Path('/app/graphene.dat')
+lines = p.read_text(errors='replace').splitlines()
+print(f'{len(lines)} lines')
+print('First lines:')
+for line in lines[:24]:
+    print(repr(line))
+print('Last lines:')
+for line in lines[-6:]:
+    print(repr(line))
+for name in ('numpy', 'scipy'):
+    print(f'{name} available:', importlib.util.find_spec(name) is not None)
+PY
+$ python - <<'PY'
+from pathlib import Path
+from statistics import median
+d = [tuple(map(float, l.replace(',','.').split())) for l in Path('/app/graphene.dat').read_text().splitlines() if l.strip()]
+x, y = zip(*d)
+print('range:', min(x), max(x), min(y), max(y))
+print('index | x | delta x | delta 1/x (*1e6) | y | y median/max nearby')
+for i in sorted(set(range(0, len(x), 100)) | {len(x)-2}):
+    win = y[max(0,i-50):i+50]
+    print(f'{i:4d} {x[i]:12.4f} {x[i+1]-x[i]:10.5f} {(1/x[i+1]-1/x[i])*1e6:10.5f} {y[i]:11.2f} {median(win):11.2f} {max(win):11.2f}')
+for w in (3, 12, 40):
+    smooth = [sum(y[max(i-w,0):i+w+1])/len(y[max(i-w,0):i+w+1]) for i in range(len(y))]
+    candidates = []
+    for i in range(2*w,len(x)-2*w):
+        if smooth[i] != max(smooth[i-2*w:i+2*w+1]):
+            continue
+        a=max(i-5*w,0)
+        b=min(i+5*w+1,len(x))
+        prom=smooth[i]-max(min(smooth[a:i]),min(smooth[i+1:b]))
+        candidates.append((prom,i,x[i],y[i]))
+    print(f'top smoothed peaks (radius {w}): prominence, index, x, y')
+    for p,i,a,b in sorted(candidates,reverse=True)[:14]:
+        print(f'{p:10.2f} {i:4d} {a:12.4f} {b:11.2f}')
+PY
+$ python - <<'PY'
+from pathlib import Path
+from statistics import median
+data = [tuple(map(float, line.replace(',', '.').split())) for line in Path('/app/graphene.dat').read_text().splitlines() if line.strip()]
+s = [(1e7/x, y, x) for x, y in data]
+for center, lo, hi in [(520, 480, 560), (950, 850, 1050), (1350, 1310, 1390), (1580, 1470, 1690), (2670, 2490, 2850), (3240, 3180, 3300)]:
+    nearby = [p for p in s if lo <= p[0] <= hi]
+    p = max(nearby, key=lambda p: p[1])
+    print(f'\nRegion {center}: max at shift {p[0]:.4f} (file coordinate {p[2]:.4f}), intensity {p[1]:.2f}')
+    width = 5 if center in (1580, 2670) else 10
+    for a in range(lo, hi, width):
+        ys = [y for x, y, _ in nearby if a <= x < a+width]
+        if ys:
+            print(f'{a:5d}-{a+width:<5d} {len(ys):3d} median={median(ys):8.2f} min={min(ys):8.2f} max={max(ys):8.2f}')
+PY
+$ cat > /tmp/graphene_raman_fit.py <<'PY'
+from math import exp, log, sqrt
+from pathlib import Path
+
+DATA = []
+for line in Path('/app/graphene.dat').read_text().splitlines():
+    if line.strip():
+        a, y = map(float, line.replace(',', '.').split())
+        DATA.append((1e7 / a, y))
+
+
+def fit(center, left, right, slope=False, shape='lorentzian'):
+    pairs = [(x, y) for x, y in DATA if left <= x <= right]
+    n = len(pairs)
+    xs, ys = zip(*pairs)
+    ts = [x - center for x in xs]
+    mt, my = sum(ts) / n, sum(ys) / n
+    dt, dy = [t - mt for t in ts], [y - my for y in ys]
+    tt = sum(t*t for t in dt)
+    ty = sum(t*y for t, y in zip(dt, dy))
+
+    def solve(x0, log_g):
+        g = exp(log_g)
+        if shape == 'gaussian':
+            ps = [exp(-log(2)*((x-x0)/g)**2) for x in xs]
+        else:
+            ps = [1/(1+((x-x0)/g)**2) for x in xs]
+        mp = sum(ps) / n
+        dp = [p - mp for p in ps]
+        pp = sum(p*p for p in dp)
+        py = sum(p*y for p, y in zip(dp, dy))
+        if slope:
+            tp = sum(t*p for t, p in zip(dt, dp))
+            a = (py - tp*ty/tt) / (pp - tp*tp/tt)
+            m = (ty - tp*a) / tt
+        else:
+            a = py/pp
+            m = 0
+        b = my - mp*a + m*(x0-center-mt)
+        err = [y-a*p-b-m*(x-x0) for x, p, y in zip(xs, ps, ys)]
+        return sum(r*r for r in err), b, a, m, err
+
+    q = [(center + dx, log(g)) for dx in range(-4, 5, 2) for g in (5, 10, 15, 20, 30, 40)]
+    x0, lg = min(q, key=lambda p: solve(*p)[0])
+    loss = solve(x0, lg)[0]
+    sx, sg = 1.0, 0.08
+    while sx > 1e-7:
+        options = ((x0 + i*sx, lg + j*sg)
+                   for i in (-1, 0, 1) for j in (-1, 0, 1) if i or j)
+        new = min(((solve(c, w)[0], c, w) for c, w in options))
+        if new[0] < loss:
+            loss, x0, lg = new
+        else:
+            sx /= 2
+            sg /= 2
+
+    err2, b, a, m, err = solve(x0, lg)
+    return dict(n=n, x0=x0, gamma=exp(lg), amplitude=a, offset=b,
+                slope=m, rmse=sqrt(err2/n), residuals=list(zip(xs, err)))
+
+if __name__ == '__main__':
+    for name, c, windows in [
+        ('G', 1580, (20, 25, 30, 40, 50, 60, 80, 100, 120)),
+        ('2D', 2670, (35, 40, 50, 60, 75, 90, 110, 150, 180)),
+    ]:
+        print(f'\n{name}\nwindow radius | baseline | shape | x0 | gamma (HWHM) | amplitude (height) | offset | slope | RMSE')
+        for radius in windows:
+            for slope, shape in [(False, 'lorentzian'), (True, 'lorentzian'), (True, 'gaussian')]:
+                r = fit(c, c-radius, c+radius, slope, shape)
+                print(f"{radius:4} {'linear' if slope else 'constant':>9} {shape:>10} "
+                      + ' '.join(f'{r[key]:10.3f}' for key in ('x0','gamma','amplitude','offset','slope','rmse')))
+PY
+python /tmp/graphene_raman_fit.py
+$ cd /tmp && python - <<'PY'
+import json
+from math import isfinite
+from pathlib import Path
+from graphene_raman_fit import fit
+
+keys = ('x0', 'gamma', 'amplitude', 'offset')
+results = {}
+for name, center, radius in [('G', 1580, 80), ('2D', 2670, 150)]:
+    fitted = fit(center, center - radius, center + radius, slope=True)
+    values = {key: round(fitted[key], 6) for key in keys}
+    assert all(isfinite(value) for value in values.values())
+    assert abs(values['x0'] - center) < 5
+    assert values['gamma'] > 0 and values['amplitude'] > 0
+    results[name] = values
+
+path = Path('/app/results.json')
+path.write_text(json.dumps(results, indent=2, allow_nan=False) + '\n')
+assert json.loads(path.read_text()) == results
+print(path.read_text(), end='')
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fitted both graphene Raman peaks with Lorentzian profiles and wrote the results to `/app/results.json`.
+
+| Peak | x0 (cm⁻¹) | gamma (cm⁻¹) | Amplitude | Offset |
+|---|---:|---:|---:|---:|
+| G | 1580.533594 | 8.543650 | 8327.160371 | 5726.058676 |
+| 2D | 2670.304979 | 17.436827 | 12306.611215 | 1258.601399 |
+
+`gamma` is the half-width at half maximum, and `offset` is the fitted baseline at the peak center.

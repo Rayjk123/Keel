@@ -1,0 +1,133 @@
+$ cd . && ls -la && git status 2>/dev/null | head -20 && git log --oneline -3 2>/dev/null
+$ n=$(grep -n "    def draw(self, renderer):" lib/mpl_toolkits/mplot3d/axes3d.py | head -1 | cut -d: -f1); echo "Axes3D.draw at line $n"; sed -n "$((n-2)),$((n+30))p" lib/mpl_toolkits/mplot3d/axes3d.py; echo "-----2D base-----"; m=$(grep -n "    def draw(self, renderer):" lib/matplotlib/axes/_base.py | head -1 | cut -d: -f1); sed -n "$((m-2)),$((m+12))p" lib/matplotlib/axes/_base.py
+$ cat > /tmp/repro3d.py <<'EOF'
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+print("matplotlib imported from:", matplotlib.__file__)
+
+
+def pixels(fig):
+    fig.canvas.draw()
+    return np.asarray(fig.canvas.buffer_rgba()).copy()
+
+
+fig_ref = plt.figure()
+fig_test = plt.figure()
+ax = fig_test.add_subplot(projection="3d")
+ax.scatter(1, 1, 1)
+ax.set_visible(False)
+print("3d axes visible:", ax.get_visible())
+print("rendered identically to empty figure:",
+      np.array_equal(pixels(fig_test), pixels(fig_ref)))
+EOF
+
+PY=$(command -v python || command -v python3)
+export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+
+echo "===== BEFORE FIX ====="
+"$PY" /tmp/repro3d.py
+
+echo "===== APPLYING FIX ====="
+"$PY" - <<'EOF'
+path = "lib/mpl_toolkits/mplot3d/axes3d.py"
+with open(path, encoding="utf-8") as f:
+    src = f.read()
+old = (
+    "    @martist.allow_rasterization\n"
+    "    def draw(self, renderer):\n"
+    "        self._unstale_viewLim()\n"
+    "\n"
+    "        # draw the background patch\n"
+)
+new = (
+    "    @martist.allow_rasterization\n"
+    "    def draw(self, renderer):\n"
+    "        # docstring inherited\n"
+    "        if not self.get_visible():\n"
+    "            return\n"
+    "        self._unstale_viewLim()\n"
+    "\n"
+    "        # draw the background patch\n"
+)
+assert src.count(old) == 1, f"expected 1 match, found {src.count(old)}"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(src.replace(old, new))
+print("patched", path)
+EOF
+
+echo "===== AFTER FIX ====="
+"$PY" /tmp/repro3d.py
+echo "===== DIFF ====="
+git diff
+$ cd /testbed
+PY=$(command -v python || command -v python3)
+export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}"
+export MPLBACKEND=Agg
+
+echo "== interpreter / deps =="
+"$PY" -c "import sys, matplotlib, pytest; print(sys.version.split()[0], matplotlib.__file__, pytest.__version__)"
+
+echo "== helper imports + existing visibility-related references in test_mplot3d.py =="
+grep -n "check_figures_equal\|set_visible\|invisible" lib/mpl_toolkits/tests/test_mplot3d.py | head -20
+
+echo "== mplot3d test module (fix applied) =="
+"$PY" -m pytest -p no:cacheprovider -q lib/mpl_toolkits/tests/test_mplot3d.py > /tmp/mplot3d_tests.log 2>&1
+rc=$?
+tail -40 /tmp/mplot3d_tests.log
+echo "pytest exit status: $rc"
+
+echo "== git status =="
+git status --short
+$ cd /testbed && PY=$(command -v python || command -v python3) && export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}" MPLBACKEND=Agg && "$PY" - <<'EOF'
+path = "lib/mpl_toolkits/tests/test_mplot3d.py"
+with open(path, encoding="utf-8") as f:
+    src = f.read()
+assert "def test_invisible_axes" not in src, "regression test already present"
+new_test = '''
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes(fig_test, fig_ref):
+    ax = fig_test.subplots(subplot_kw=dict(projection="3d"))
+    ax.scatter(1, 1, 1)
+    ax.set_visible(False)
+'''
+with open(path, "w", encoding="utf-8") as f:
+    f.write(src.rstrip("\n") + "\n" + new_test)
+print("appended regression test to", path)
+EOF
+echo "== new test + full mplot3d module (fix applied) =="
+"$PY" -m pytest -p no:cacheprovider -q lib/mpl_toolkits/tests/test_mplot3d.py > /tmp/mplot3d_tests2.log 2>&1
+rc_fix=$?
+tail -3 /tmp/mplot3d_tests2.log
+echo "with-fix exit status: $rc_fix"
+echo "== new test against ORIGINAL axes3d.py (should FAIL) =="
+cp lib/mpl_toolkits/mplot3d/axes3d.py /tmp/axes3d_fixed.py
+git show HEAD:lib/mpl_toolkits/mplot3d/axes3d.py > lib/mpl_toolkits/mplot3d/axes3d.py
+"$PY" -m pytest -p no:cacheprovider -q lib/mpl_toolkits/tests/test_mplot3d.py -k test_invisible_axes > /tmp/unfixed.log 2>&1
+rc_unfixed=$?
+cp /tmp/axes3d_fixed.py lib/mpl_toolkits/mplot3d/axes3d.py
+tail -3 /tmp/unfixed.log
+echo "without-fix exit status (non-zero expected): $rc_unfixed"
+echo "== restored state =="
+git diff --stat
+git status --short
+$ cd /testbed && PY=$(command -v python || command -v python3) && export PYTHONPATH="$PWD/lib${PYTHONPATH:+:$PYTHONPATH}" MPLBACKEND=Agg && echo "== full mpl_toolkits test suite (fix applied) ==" && "$PY" -m pytest -p no:cacheprovider -q lib/mpl_toolkits/tests > /tmp/mpl_toolkits_all.log 2>&1; rc=$?; tail -15 /tmp/mpl_toolkits_all.log; echo "mpl_toolkits pytest exit: $rc"; echo "== flake8 on changed files =="; if "$PY" -m flake8 --version >/dev/null 2>&1; then "$PY" -m flake8 lib/mpl_toolkits/mplot3d/axes3d.py lib/mpl_toolkits/tests/test_mplot3d.py && echo "flake8: clean"; else echo "flake8 not installed; skipped"; fi; echo "== final diff =="; git diff; echo "== git status =="; git status --short
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is in place and verified.
+
+**Root cause:** `Axes3D.draw` in `lib/mpl_toolkits/mplot3d/axes3d.py` had no `get_visible()` check. The 2D `_AxesBase.draw` has one, so invisible 3D axes were still drawn.
+
+**Changes (two files):**
+- `lib/mpl_toolkits/mplot3d/axes3d.py`: `Axes3D.draw` now returns early when the axes is not visible, matching the 2D behavior.
+- `lib/mpl_toolkits/tests/test_mplot3d.py`: added `test_invisible_axes`, a `check_figures_equal` test. It passes with the fix and fails against the original `axes3d.py`.
+
+**Verification:**
+- The reproduction on the Agg backend rendered an invisible 3D axes differently from an empty figure before the fix. After the fix the two are pixel-identical.
+- The `lib/mpl_toolkits/tests` suite passes (195 tests), and flake8 is clean on both changed files.
+- `git status` shows only the two intended files modified.
+
+**Limitations:** I tested with Agg rather than the Qt5Agg backend from the report, and I ran the `mpl_toolkits` tests rather than the full matplotlib suite.

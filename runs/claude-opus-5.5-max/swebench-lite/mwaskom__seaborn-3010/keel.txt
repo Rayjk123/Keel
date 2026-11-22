@@ -1,0 +1,213 @@
+$ ls -la && git log --oneline -5 && git status
+$ cat seaborn/_stats/regression.py
+$ cd /tmp && python -c "
+import seaborn.objects as so
+import matplotlib
+matplotlib.use('Agg')
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+p.plot()
+print('OK')
+" 2>&1 | tail -5; python -c "import seaborn, numpy, pandas; print(seaborn.__file__, numpy.__version__, pandas.__version__)"
+$ pwd && ls seaborn/_stats tests/_stats && grep -rn "dropna\|isna\|notna\|nan" seaborn/_stats/ && cat tests/_stats/test_regression.py
+$ cd /testbed && cat seaborn/_core/groupby.py && sed -n 75,100p seaborn/_stats/aggregation.py
+$ cd /testbed && sed -n 25,50p seaborn/_stats/aggregation.py && echo ---- && sed -n 30,45p seaborn/_stats/histogram.py && echo ---- && grep -n "dropna\|isna\|notna" seaborn/_core/plot.py seaborn/_marks/*.py | head -20
+$ cd /testbed && python -c "
+import numpy as np, pandas as pd
+from seaborn._core.groupby import GroupBy
+from seaborn._stats.regression import PolyFit
+df = pd.DataFrame(dict(x=[np.nan]*4, y=[1.,2,3,4], group=list('aabb')))
+print('current code, all-NaN x w/ groups:', PolyFit()(df, GroupBy(['group']), 'x', {}).shape)
+try:
+    PolyFit()(df.dropna(subset=['x','y']), GroupBy(['group']), 'x', {})
+except Exception as e:
+    print('option A (drop before grouping) ->', type(e).__name__, e)
+"; echo ----; grep -n -A5 "pytest" setup.cfg pyproject.toml; echo ----; ls doc/whatsnew | tail -3; grep -n "version" seaborn/__init__.py
+$ cd /testbed && python - <<'EOF'
+from pathlib import Path
+p = Path("seaborn/_stats/regression.py")
+src = p.read_text()
+old = '''    def _fit_predict(self, data):
+
+        x = data["x"]
+        y = data["y"]
+'''
+new = '''    def _fit_predict(self, data):
+
+        # Missing values would break np.polyfit. Dropping them here, rather than
+        # before grouping, keeps all-missing input from erroring in GroupBy.apply.
+        data = data.dropna(subset=["x", "y"])
+        x = data["x"]
+        y = data["y"]
+'''
+assert src.count(old) == 1
+p.write_text(src.replace(old, new))
+EOF
+git diff && ls doc/whatsnew | grep "v0.12" && cat doc/whatsnew/v0.12.1.rst
+$ cd /tmp && MPLBACKEND=Agg python - <<'EOF'
+import numpy as np, pandas as pd
+from pandas.testing import assert_frame_equal
+import seaborn.objects as so
+from seaborn._core.groupby import GroupBy
+from seaborn._stats.regression import PolyFit
+
+# 1. Issue example, end to end
+so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print("issue example: OK")
+
+# 2. Grouped end-to-end with NaNs in x and y
+rng = np.random.default_rng(0)
+n = 100
+df = pd.DataFrame(dict(x=rng.normal(size=n), y=rng.normal(size=n), group=rng.choice(list("ab"), n)))
+df.loc[3:7, "x"] = np.nan
+df.loc[10:14, "y"] = np.nan
+so.Plot(df, "x", "y", color="group").add(so.Line(), so.PolyFit()).plot()
+print("grouped end-to-end: OK")
+
+# 3. Equivalence with pre-dropped data
+gb = GroupBy(["group"])
+for cols in (["x", "y"], ["x", "y", "group"]):
+    res1 = PolyFit()(df[cols], gb, "x", {})
+    res2 = PolyFit()(df[cols].dropna(subset=["x", "y"]), gb, "x", {})
+    assert_frame_equal(res1, res2)
+    print(cols, "equivalent to pre-dropped:", res1.shape, dict(res1.dtypes))
+
+# 4. All-missing: empty result, no error
+allnan = pd.DataFrame(dict(x=[np.nan]*4, y=[1., 2, 3, 4], group=list("aabb")))
+print("all-missing grouped:", PolyFit()(allnan, gb, "x", {}).shape)
+print("all-missing ungrouped:", PolyFit()(allnan[["x", "y"]], gb, "x", {}).shape)
+
+# 5. One group entirely missing, other fine: check dtypes are not degraded
+mixed = df.copy()
+mixed.loc[mixed["group"] == "a", "x"] = np.nan
+res = PolyFit()(mixed, gb, "x", {})
+print("one group all-missing:", res.shape, dict(res.dtypes), res["group"].unique())
+EOF
+$ cd /testbed && sed -n 1490,1496p seaborn/_core/plot.py && cd /tmp && MPLBACKEND=Agg python - <<'EOF'
+import numpy as np, pandas as pd
+from pandas.testing import assert_frame_equal
+import seaborn.objects as so
+from seaborn._core.groupby import GroupBy
+from seaborn._stats.regression import PolyFit
+
+def attempt(label, f):
+    try:
+        out = f()
+    except Exception as e:
+        print(f"{label}: FAILED -> {type(e).__name__}: {e}")
+    else:
+        print(f"{label}: OK", "" if out is None else out)
+
+# 0. Is the render-time OptionError pre-existing? Plain Line plot, no NaN, no PolyFit
+attempt("0. plain Line plot (no NaN, no PolyFit)",
+        lambda: type(so.Plot([1, 2, 3], [1, 2, 3]).add(so.Line()).plot()).__name__)
+
+rng = np.random.default_rng(0)
+n = 100
+df = pd.DataFrame(dict(x=rng.normal(size=n), y=rng.normal(size=n),
+                       group=rng.choice(list("ab"), n)))
+df.loc[3:7, "x"] = np.nan
+df.loc[10:14, "y"] = np.nan
+gb = GroupBy(["group"])
+
+# 1. Ungrouped: identical to fitting pre-dropped data
+res1 = PolyFit()(df[["x", "y"]], gb, "x", {})
+res2 = PolyFit()(df[["x", "y"]].dropna(), gb, "x", {})
+assert_frame_equal(res1, res2)
+print("1. ungrouped == pre-dropped:", res1.shape, "any NaN in output:", res1.isna().any().any())
+
+# 2. Grouped: each group's curve matches an independent np.polyfit on its complete rows
+res = PolyFit()(df, gb, "x", {})
+for g, part in res.groupby("group"):
+    sub = df[df["group"] == g].dropna(subset=["x", "y"])
+    xx = np.linspace(sub["x"].min(), sub["x"].max(), 100)
+    np.testing.assert_allclose(part["x"], xx)
+    np.testing.assert_allclose(part["y"], np.polyval(np.polyfit(sub["x"], sub["y"], 2), xx))
+print("2. grouped matches per-group reference fit:", res.shape, dict(res.dtypes))
+
+# 3. All-missing: empty result, no error
+allnan = pd.DataFrame(dict(x=[np.nan] * 4, y=[1., 2, 3, 4], group=list("aabb")))
+attempt("3a. all-missing grouped", lambda: PolyFit()(allnan, gb, "x", {}).shape)
+attempt("3b. all-missing ungrouped", lambda: PolyFit()(allnan[["x", "y"]], gb, "x", {}).shape)
+
+# 4. One group entirely missing, other fine: dtypes should not degrade
+mixed = df.copy()
+mixed.loc[mixed["group"] == "a", "x"] = np.nan
+res = PolyFit()(mixed, gb, "x", {})
+print("4. one group all-missing:", res.shape, dict(res.dtypes), res["group"].unique())
+
+# 5. End-to-end, with a TEST-ONLY shim for the option pandas 2.0 removed (repo untouched)
+_orig = pd.option_context
+pd.option_context = lambda *a: _orig(*["mode.use_inf_as_na" if k == "mode.use_inf_as_null" else k for k in a])
+
+def issue_example():
+    p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+    xy = p._figure.axes[0].lines[0].get_xydata()
+    xx = np.linspace(1, 4, 100)
+    np.testing.assert_allclose(xy[:, 0], xx)
+    np.testing.assert_allclose(xy[:, 1], np.polyval(np.polyfit([1, 2, 3, 4], [1, 2, 3, 5], 2), xx))
+    return xy.shape
+
+attempt("5a. issue example end-to-end (shimmed), drawn line == fit on complete rows", issue_example)
+attempt("5b. grouped end-to-end (shimmed), #lines drawn",
+        lambda: len(so.Plot(df, "x", "y", color="group").add(so.Line(), so.PolyFit()).plot()._figure.axes[0].lines))
+EOF
+$ cd /testbed && python - <<'EOF'
+from pathlib import Path
+p = Path("tests/_stats/test_regression.py")
+src = p.read_text()
+
+old_import = "from numpy.testing import assert_array_equal, assert_array_almost_equal\n"
+assert src.count(old_import) == 1
+src = src.replace(old_import, old_import + "from pandas.testing import assert_frame_equal\n")
+
+assert src.endswith('            assert part["y"].diff().diff().dropna().abs().gt(0).all()\n')
+src += '''
+    def test_missing_data(self, df):
+
+        groupby = GroupBy(["group"])
+        df.iloc[5:10] = np.nan
+        res1 = PolyFit()(df[["x", "y"]], groupby, "x", {})
+        res2 = PolyFit()(df[["x", "y"]].dropna(), groupby, "x", {})
+        assert_frame_equal(res1, res2)
+
+    def test_missing_data_with_groups(self, df):
+
+        groupby = GroupBy(["group"])
+        df.loc[5:10, "x"] = np.nan
+        df.loc[20:25, "y"] = np.nan
+        res = PolyFit()(df, groupby, "x", {})
+
+        assert res["group"].nunique() == df["group"].nunique()
+        for key, part in res.groupby("group"):
+            complete = df.loc[df["group"] == key, ["x", "y"]].dropna()
+            expected = PolyFit()(complete, groupby, "x", {})
+            assert_frame_equal(part[["x", "y"]].reset_index(drop=True), expected)
+
+    def test_all_missing_data_with_groups(self, df):
+
+        groupby = GroupBy(["group"])
+        df["x"] = np.nan
+        res = PolyFit()(df, groupby, "x", {})
+        assert res.empty
+'''
+p.write_text(src)
+EOF
+git diff tests/ && python -m pytest tests/_stats/test_regression.py -q -p no:cacheprovider 2>&1 | tail -5 && python -m flake8 seaborn/_stats/regression.py tests/_stats/test_regression.py && echo "flake8 clean"
+$ cd /testbed && git stash push -q -- seaborn/_stats/regression.py && echo "=== WITHOUT fix ===" && python -m pytest tests/_stats/test_regression.py -q -p no:cacheprovider 2>&1 | grep -E "passed|failed|FAILED"; git stash pop -q; echo "=== fix restored ===" && git diff --stat && python -m pytest tests/_stats/test_regression.py -q -p no:cacheprovider 2>&1 | tail -1 && echo "=== PolyFit usages ===" && grep -rln "PolyFit" tests/ seaborn/ --include=*.py
+$ cd /testbed && python -m pytest tests/_stats -q -p no:cacheprovider 2>&1 | tail -2 && git status --short && echo "stash entries: $(git stash list | wc -l)" && git diff seaborn/
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fixed the `PolyFit` crash on missing data. The issue's example no longer raises `LinAlgError`, but it still won't render in this environment because of a separate, existing pandas incompatibility (explained below).
+
+**The fix** (`seaborn/_stats/regression.py`): `PolyFit._fit_predict` now drops rows where `x` or `y` is missing before calling `np.polyfit`. It uses `dropna(subset=["x", "y"])`, the same approach `aggregation.py` already uses.
+
+The drop happens inside each group, not before grouping. Dropping before grouping would have broken one case: grouped data where every value is missing. That case currently returns an empty result, but with the earlier drop it would raise `ValueError: No objects to concatenate`. I checked this before choosing.
+
+**Tests** (`tests/_stats/test_regression.py`): I added three tests:
+- `test_missing_data` and `test_missing_data_with_groups` both fail on the old code with numpy's error.
+- `test_all_missing_data_with_groups` covers the all-missing case above.
+
+All 38 tests in `tests/_stats` pass and flake8 is clean.
+
+**The separate render problem:** a full `Plot(...).plot()` fails at the drawing step with `OptionError: 'mode.use_inf_as_null'`. That pandas option was removed in pandas 2.0, and this environment has pandas 2.0.0. A plain `Line` plot with no missing data and no `PolyFit` fails the same way, so it isn't caused by this fix and I left it alone. With a temporary workaround for that option in my test script only (nothing changed in the repo), the issue's example rendered. The drawn line matched a fit on the four complete points. Making seaborn work with pandas 2.0 would be a separate change.
+
+I didn't add a release note because there's no `v0.12.1` notes file yet; that's for the maintainers to decide.

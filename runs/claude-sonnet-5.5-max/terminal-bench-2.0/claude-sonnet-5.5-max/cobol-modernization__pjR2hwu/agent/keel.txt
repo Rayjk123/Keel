@@ -1,0 +1,100 @@
+$ ls -la /app/ /app/src/ /app/data/ 2>&1
+$ cat -A /app/src/program.cbl | head -400
+$ cd /app && echo "=== INPUT.DAT ===" && xxd src/INPUT.DAT && echo && echo "=== ACCOUNTS.DAT ===" && xxd data/ACCOUNTS.DAT && echo && echo "=== BOOKS.DAT ===" && xxd data/BOOKS.DAT && echo && echo "=== TRANSACTIONS.DAT ===" && xxd data/TRANSACTIONS.DAT && echo && echo "=== cat -A ===" && for f in src/INPUT.DAT data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do echo "--- $f"; cat -A $f; echo; done; which cobc; cobc --version 2>&1 | head -3</parameter>
+$ cd /app && echo "=== INPUT.DAT ===" && xxd src/INPUT.DAT && echo && echo "=== ACCOUNTS.DAT ===" && xxd data/ACCOUNTS.DAT && echo && echo "=== BOOKS.DAT ===" && xxd data/BOOKS.DAT && echo && echo "=== TRANSACTIONS.DAT ===" && xxd data/TRANSACTIONS.DAT && echo && echo "=== cat -A ===" && for f in src/INPUT.DAT data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do echo "--- $f"; cat -A $f; echo; done; which cobc; cobc --version 2>&1 | head -3
+$ cd /app && for f in src/INPUT.DAT data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do echo "=== $f ($(stat -c %s $f) bytes) ==="; od -c $f; echo "--- cat -A:"; cat -A $f; echo; done; which python3 python; python3 --version</parameter>
+$ cd /app && for f in src/INPUT.DAT data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do echo "=== $f ($(stat -c %s $f) bytes) ==="; od -c $f; echo "--- cat -A:"; cat -A $f; echo; done; which python3 python; python3 --version
+$ mkdir -p /tmp/orig && cp -a /app/data /app/src /tmp/orig/ && rm -rf /tmp/cob && mkdir -p /tmp/cob && cp -a /app/data /app/src /tmp/cob/ && cd /tmp/cob && echo "--- COB env:" && (env | grep -i '^COB' || echo "(none)") ; cobc -x -o prog src/program.cbl 2>&1; echo "compile exit=$?"; ./prog; echo "run exit=$?"; for f in ACCOUNTS BOOKS TRANSACTIONS; do if cmp -s /app/data/$f.DAT data/$f.DAT; then echo "$f unchanged"; else echo "$f CHANGED"; fi; done
+$ mkdir -p /tmp/exp && cat > /tmp/exp/run_case.sh <<'EOF'
+#!/bin/bash
+# usage: run_case.sh NAME 'printf-format-for-input'
+name="$1"; fmt="$2"
+d=/tmp/exp/$name
+rm -rf "$d"; mkdir -p "$d"
+cp -a /tmp/orig/data "$d/data"; mkdir -p "$d/src"
+printf "$fmt" > "$d/src/INPUT.DAT"
+cd "$d"
+echo "##### $name input=[$(od -An -c src/INPUT.DAT | tr -s ' ' | tr -d '\n')] size=$(stat -c %s src/INPUT.DAT)"
+out=$(/tmp/cob/prog 2>&1); rc=$?
+echo "stdout/stderr: $(echo "$out" | cat -A | tr '\n' '|')  rc=$rc"
+for f in ACCOUNTS BOOKS TRANSACTIONS; do echo "$f: $(cat -A data/$f.DAT)"; done
+EOF
+chmod +x /tmp/exp/run_case.sh
+echo "ORIGINAL:"; for f in ACCOUNTS BOOKS TRANSACTIONS; do echo "$f: $(cat -A /tmp/orig/data/$f.DAT)"; done; echo
+/tmp/exp/run_case.sh short_valid 'U001U002B001200'
+/tmp/exp/run_case.sh full_valid 'U001U002B0010000000200'
+/tmp/exp/run_case.sh full_nl 'U001U002B0010000000200\n'
+/tmp/exp/run_case.sh short_nl 'U001U002B001200\n'
+/tmp/exp/run_case.sh empty ''
+/tmp/exp/run_case.sh very_short 'U001U002B0'
+/tmp/exp/run_case.sh orig_input 'U001U002B007200'
+$ mkdir -p /tmp/exp /tmp/lab && cat > /tmp/exp/lab.py <<'EOF'
+import os, shutil, subprocess, tempfile
+
+COB = '/tmp/cob/prog'
+ACC0 = open('/tmp/orig/data/ACCOUNTS.DAT', 'rb').read()
+BOOKS0 = open('/tmp/orig/data/BOOKS.DAT', 'rb').read()
+TRANS0 = open('/tmp/orig/data/TRANSACTIONS.DAT', 'rb').read()
+NAMES = ['ACCOUNTS', 'BOOKS', 'TRANSACTIONS']
+
+def run(cmd, acc=ACC0, books=BOOKS0, trans=TRANS0, inp=b'', base='/tmp/lab'):
+    d = tempfile.mkdtemp(dir=base)
+    os.makedirs(d + '/data'); os.makedirs(d + '/src')
+    for n, c in zip(NAMES, (acc, books, trans)):
+        if c is not None:
+            open('%s/data/%s.DAT' % (d, n), 'wb').write(c)
+    if inp is not None:
+        open(d + '/src/INPUT.DAT', 'wb').write(inp)
+    p = subprocess.run(cmd, cwd=d, capture_output=True)
+    files = {}
+    for n in NAMES:
+        fp = '%s/data/%s.DAT' % (d, n)
+        files[n] = open(fp, 'rb').read() if os.path.exists(fp) else None
+    shutil.rmtree(d)
+    return dict(rc=p.returncode, out=p.stdout, err=p.stderr, files=files)
+
+def run_cobol(**kw):
+    return run([COB], **kw)
+
+def show(title, r, acc=ACC0, books=BOOKS0, trans=TRANS0):
+    print('=== ' + title)
+    print('  rc=%s out=%r err=%r' % (r['rc'], r['out'], r['err'][:200]))
+    base = dict(zip(NAMES, (acc, books, trans)))
+    for n in NAMES:
+        f = r['files'][n]
+        if f == base[n]:
+            print('  %s: unchanged' % n)
+        else:
+            print('  %s: %r' % (n, f))
+EOF
+cat > /tmp/exp/e1.py <<'EOF'
+import sys; sys.path.insert(0, '/tmp/exp')
+from lab import *
+
+# E1: buyer == seller, valid owner (U002 owns B001). Two REWRITEs in a row on one record?
+show('E1 buyer==seller U002 B001 amt 100 (full 22 bytes)', run_cobol(inp=b'U002U002B0010000000100'))
+show('E1b buyer==seller U002, balance smaller than amt', run_cobol(inp=b'U002U002B0010000009999'))
+
+# E3: pad byte semantics: account id "U0  " ; input short so seller = "U0"+pad
+acc = ACC0 + b'U0  ' + b'Padtest'.ljust(20) + b'0000000500'
+show('E3 pad=space? seller "U0"+pad, buyer U001, book B001 owner must match -> use books with owner "U0  "',
+     run_cobol(acc=acc, books=b'B001' + b'Python Basics'.ljust(20) + b'U0  ', inp=b'U001U0'),
+     acc=acc, books=b'B001' + b'Python Basics'.ljust(20) + b'U0  ')
+
+# E3b: short book id: input 'U001U002B0' -> book 'B0'+pad ; books file has 'B0  '
+bk = b'B0  ' + b'Padbook'.ljust(20) + b'U002'
+show('E3b book id B0+pad vs "B0  " in books', run_cobol(books=bk, inp=b'U001U002B0'), books=bk)
+
+# E4: weird amounts
+show('E4a amount "\\n" only', run_cobol(inp=b'U001U002B001\n'))
+show('E4b amount "5\\n"', run_cobol(inp=b'U001U002B0015\n'))
+show('E4c amount "abc"', run_cobol(inp=b'U001U002B001abc'))
+show('E4d amount "-5"', run_cobol(inp=b'U001U002B001-5'))
+show('E4e amount " 5" (leading space)', run_cobol(inp=b'U001U002B001 5'))
+
+# E5: missing TRANSACTIONS.DAT
+show('E5 missing TRANSACTIONS.DAT, valid txn', run_cobol(trans=None, inp=b'U001U002B0010000000100'), trans=b'')
+# E6: longer input
+show('E6 input 2 lines', run_cobol(inp=b'U001U002B0010000000100\nU003U002B0020000000999\n'))
+EOF
+cd /tmp/exp && python3 e1.py</parameter>

@@ -1,0 +1,328 @@
+$ cd . && ls -la && git log --oneline | head -5 && git status | head -10
+$ cd . && grep -n "def __eq__" -A 45 sympy/core/basic.py | head -120; echo ------; grep -n "def __eq__" -A 30 sympy/core/expr.py | head -80
+$ cd . && grep -n "def sympify" sympy/core/sympify.py && sed -n 90,130p sympy/core/sympify.py && echo ------- && sed -n 255,420p sympy/core/sympify.py
+$ cd . && echo "=== expr.py sympify usage ===" && grep -n "sympify" sympy/core/expr.py | head -60 && echo && echo "=== __eq__ implementations near a non-strict sympify( call ===" && grep -rn -A14 "def __eq__" sympy --include=*.py | grep -v "/tests/" | grep -E "[^_]sympify\("
+$ cd . && python --version && cat > /tmp/repro.py <<'EOF'
+import sympy
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+try:
+    print("Symbol('x') == C() [repr 'x.y']:", sympy.Symbol('x') == C())
+except Exception as e:
+    print("ERROR:", type(e).__name__, e)
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+print("Symbol('x') != D() [repr 'x']:", sympy.Symbol('x') != D())
+print("Symbol('x') == 'x':", sympy.Symbol('x') == 'x')
+EOF
+python /tmp/repro.py; echo ----; sed -n 30,75p sympy/matrices/dense.py; echo ----; grep -n "__ne__" sympy/core/expr.py sympy/core/basic.py
+$ cd . && cat > /tmp/scan.py <<'EOF'
+import ast, os
+
+targets = {'__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__'}
+risky = {'sympify', 'S', 'parse_expr', 'eval', 'str', 'repr', 'unicode', 'kernS'}
+
+def deco_names(fn):
+    out = []
+    for d in fn.decorator_list:
+        if isinstance(d, ast.Call):
+            d = d.func
+        out.append(getattr(d, 'id', None) or getattr(d, 'attr', '?'))
+    return out
+
+rows = []
+for root, dirs, files in os.walk('sympy'):
+    if 'tests' in root.split(os.sep):
+        continue
+    for f in sorted(files):
+        if not f.endswith('.py'):
+            continue
+        path = os.path.join(root, f)
+        try:
+            tree = ast.parse(open(path, encoding='utf-8').read(), path)
+        except Exception as e:
+            print('PARSE FAIL', path, e)
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in targets:
+                hits = []
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        fn = sub.func
+                        name = fn.id if isinstance(fn, ast.Name) else None
+                        if name in risky:
+                            hits.append('%s@%d' % (name, sub.lineno))
+                rows.append((path, node.lineno, node.name, deco_names(node), hits))
+
+print("total defs:", len(rows))
+print("\n=== defs that call a risky (parsing / str / repr) function ===")
+for r in sorted(rows):
+    if r[4]:
+        print("%s:%d %s deco=%s hits=%s" % r)
+print("\n=== defs decorated with a sympify decorator ===")
+for r in sorted(rows):
+    if any('sympify' in d for d in r[3]):
+        print("%s:%d %s deco=%s" % r[:4])
+EOF
+python /tmp/scan.py</parameter>
+$ cd . && cat > /tmp/scan.py <<'EOF'
+import ast, os
+
+targets = {'__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__'}
+risky = {'sympify', 'S', 'parse_expr', 'eval', 'str', 'repr', 'unicode', 'kernS'}
+
+def deco_names(fn):
+    out = []
+    for d in fn.decorator_list:
+        if isinstance(d, ast.Call):
+            d = d.func
+        out.append(getattr(d, 'id', None) or getattr(d, 'attr', '?'))
+    return out
+
+rows = []
+for root, dirs, files in os.walk('sympy'):
+    if 'tests' in root.split(os.sep):
+        continue
+    for f in sorted(files):
+        if not f.endswith('.py'):
+            continue
+        path = os.path.join(root, f)
+        try:
+            tree = ast.parse(open(path, encoding='utf-8').read(), path)
+        except Exception as e:
+            print('PARSE FAIL', path, e)
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in targets:
+                hits = []
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        fn = sub.func
+                        name = fn.id if isinstance(fn, ast.Name) else None
+                        if name in risky:
+                            hits.append('%s@%d' % (name, sub.lineno))
+                rows.append((path, node.lineno, node.name, deco_names(node), hits))
+
+print("total defs:", len(rows))
+print("\n=== defs that call a risky (parsing / str / repr) function ===")
+for r in sorted(rows):
+    if r[4]:
+        print("%s:%d %s deco=%s hits=%s" % r)
+print("\n=== defs decorated with a sympify decorator ===")
+for r in sorted(rows):
+    if any('sympify' in d for d in r[3]):
+        print("%s:%d %s deco=%s" % r[:4])
+EOF
+python /tmp/scan.py
+$ cd . && python -m pytest --version 2>&1 | head -2; python -c "import xdist; print('xdist', xdist.__version__)" 2>&1 | tail -1; nproc; echo ----; sed -n 1,28p sympy/matrices/dense.py; echo ----; sed -n 730,745p sympy/core/expr.py
+$ cd . && echo "=== bin/test options ===" && python bin/test --help 2>&1 | head -40; echo; echo "=== doctests/docs comparing to a string literal with == ===" && grep -rnE ">>>.*[^=!<>]==\s*['\"]" sympy doc --include=*.py --include=*.rst --include=*.txt 2>/dev/null | head -30; echo; echo "=== non-test library code comparing with == to a string literal (count, then sample) ===" && grep -rnE "[^=!<>]==\s*['\"]" sympy --include=*.py | grep -v "/tests/" | wc -l; grep -rnE "[^=!<>]==\s*['\"]" sympy --include=*.py | grep -v "/tests/" | grep -vE "(str|repr|name|\.type|kind|mode|method|fmt|format|op|key|attr|dialect|lang|language|algo|style|order|domain)\b" | head -60
+$ cd . && python - <<'EOF'
+import io
+
+def patch(path, old, new):
+    with io.open(path, encoding='utf-8', newline='') as f:
+        src = f.read()
+    assert src.count(old) == 1, (path, src.count(old))
+    src = src.replace(old, new)
+    with io.open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(src)
+
+# 1. Expr.__eq__: never parse/eval strings or reprs of unknown objects
+patch('sympy/core/expr.py',
+"""    def __eq__(self, other):
+        try:
+            other = sympify(other)
+            if not isinstance(other, Expr):
+""",
+"""    def __eq__(self, other):
+        try:
+            other = _sympify(other)
+            if not isinstance(other, Expr):
+""")
+
+# 2. DenseMatrix.__eq__: same problem, same fix
+patch('sympy/matrices/dense.py',
+"""    def __eq__(self, other):
+        other = sympify(other)
+        self_shape = getattr(self, 'shape', None)
+""",
+"""    def __eq__(self, other):
+        try:
+            other = _sympify(other)
+        except SympifyError:
+            return False
+        self_shape = getattr(self, 'shape', None)
+""")
+patch('sympy/matrices/dense.py',
+"from sympy.core.sympify import sympify\n",
+"from sympy.core.sympify import _sympify, sympify\n")
+EOF
+echo "=== remaining uses of plain sympify in dense.py ===" && grep -nE "(^|[^_])sympify" sympy/matrices/dense.py
+echo "=== diff ===" && git diff
+echo "=== repro ===" && python /tmp/repro.py
+$ cd . && free -g | head -2 && rm -rf /tmp/testlogs && mkdir -p /tmp/testlogs && date +%s > /tmp/testlogs/start_time && for i in $(seq 1 32); do (setsid nohup python bin/test --split=$i/32 --no-colors > /tmp/testlogs/test_$i.log 2>&1 &) ; done; sleep 5; echo "log files: $(ls /tmp/testlogs | grep -c '^test_')"; echo "running procs: $(pgrep -fc 'bin/test')"
+$ sleep 240; cd . && echo "running procs: $(pgrep -fc 'bin/test')"; echo "elapsed: $(( $(date +%s) - $(cat /tmp/testlogs/start_time) ))s"; for i in $(seq 1 32); do f=/tmp/testlogs/test_$i.log; printf "shard %2d: %6d bytes | last: %s\n" $i $(stat -c %s $f) "$(tail -c 150 $f | tr '\n' ' ' | tail -c 110)"; done
+$ cd . && echo "running procs: $(pgrep -fc 'bin/test')"; echo "elapsed: $(( $(date +%s) - $(cat /tmp/testlogs/start_time) ))s"; for i in $(seq 1 32); do f=/tmp/testlogs/test_$i.log; printf "shard %2d: %6d bytes | last: %s\n" $i $(stat -c %s $f) "$(tail -c 150 $f | tr '\n' ' ' | tail -c 100)"; done
+$ cd . && echo "running procs: $(pgrep -fc 'bin/test')"; echo "elapsed: $(( $(date +%s) - $(cat /tmp/testlogs/start_time) ))s"; echo; for i in 1 4 14 18 19 27; do echo "=================== shard $i ==================="; grep -nE "^(_{5,}|=+) *(sympy/|test_)|^(Traceback|[A-Za-z]*Error|[A-Za-z]*Exception)|^sympy/.*(\.py:[0-9]+|\.py\[)|^test_[A-Za-z0-9_]+ *(F|E)" /tmp/testlogs/test_$i.log | head -40; done
+$ cd . && cat > /tmp/parse_logs.py <<'EOF'
+import re, sys, glob
+
+logdir = sys.argv[1]
+hdr = re.compile(r'^_+ (sympy/\S+\.py):(\S+) _+$')
+res = {}
+cur = None
+buf = []
+
+def flush():
+    if cur is None:
+        return
+    body = [l for l in buf if l.strip()]
+    while body and ('tests finished' in body[-1] or 'DO *NOT* COMMIT' in body[-1]):
+        body.pop()
+    res[cur] = body[-1].strip() if body else ''
+
+def shard_no(p):
+    return int(re.search(r'test_(\d+)\.log', p).group(1))
+
+for path in sorted(glob.glob(logdir + '/test_*.log'), key=shard_no):
+    cur = None
+    buf = []
+    for l in open(path, errors='replace').read().splitlines():
+        m = hdr.match(l)
+        if m:
+            flush()
+            cur = m.group(1) + ':' + m.group(2)
+            buf = []
+        else:
+            buf.append(l)
+    flush()
+
+for k in sorted(res):
+    print('%s | %s' % (k, res[k][:150]))
+print('TOTAL failures/exceptions: %d' % len(res))
+EOF
+echo "bin/test path handling:"; grep -n "sys.path" bin/test
+echo "still running (count includes this shell): $(pgrep -fc 'bin/test')"
+echo "=== failures/exceptions in MY run (shards 9 and 26 may be incomplete) ==="
+python /tmp/parse_logs.py /tmp/testlogs
+echo
+echo "=== setting up pristine baseline from HEAD ==="
+rm -rf /tmp/baseline /tmp/baselogs && mkdir -p /tmp/baseline /tmp/baselogs && git archive HEAD | tar -x -C /tmp/baseline && (cd /tmp/baseline && python -c "import sympy; print('baseline sympy imported from', sympy.__file__)" && grep -c "sympify(other)" sympy/core/expr.py && grep -c "_sympify(other)" sympy/core/expr.py)
+cd /tmp/baseline && for i in $(seq 1 32); do (setsid nohup python bin/test --split=$i/32 --no-colors > /tmp/baselogs/test_$i.log 2>&1 &); done; sleep 3; echo "baseline shards launched: $(ls /tmp/baselogs | wc -l)"
+$ cd . && cat > /tmp/cmp_logs.py <<'EOF'
+import re, glob, sys
+from collections import Counter
+
+repo = sys.argv[1].rstrip('/') + '/'
+base = '/tmp/baseline/'
+
+hdr = re.compile(r'^_+ (\S+\.py)(?::(\S+))? _+\s*$')
+sepline = re.compile(r'^[_=]{10,}\s*$')
+
+def shard_no(p):
+    return int(re.search(r'test_(\d+)\.log$', p).group(1))
+
+def parse(logdir):
+    fails, sums, missing, nblocks = {}, {}, [], {}
+    frames = {'repo': 0, 'base': 0, 'other': 0}
+    for path in sorted(glob.glob(logdir + '/test_*.log'), key=shard_no):
+        sh = shard_no(path)
+        text = open(path, errors='replace').read()
+        m = re.search(r'tests finished:(.*?)seconds', text, re.S)
+        if m:
+            sums[sh] = ' '.join(m.group(1).split())
+        else:
+            missing.append(sh)
+        blocks, cur = [], None
+        for l in text.splitlines():
+            h = hdr.match(l)
+            if h:
+                if cur is not None:
+                    blocks.append(cur)
+                name = h.group(1) + (':' + h.group(2) if h.group(2) else '')
+                cur = [name, []]
+            elif cur is not None:
+                if sepline.match(l) or 'tests finished' in l:
+                    blocks.append(cur)
+                    cur = None
+                else:
+                    cur[1].append(l)
+        if cur is not None:
+            blocks.append(cur)
+        nblocks[sh] = len(blocks)
+        for name, body in blocks:
+            body = [b for b in body if b.strip()]
+            exc = body[-1].strip() if body else '<empty>'
+            where = ''
+            for b in body:
+                if b.lstrip().startswith('File "'):
+                    where = b.strip()
+                    if repo in b:
+                        frames['repo'] += 1
+                    elif base in b:
+                        frames['base'] += 1
+                    else:
+                        frames['other'] += 1
+            for p in (repo, base):
+                exc = exc.replace(p, '')
+                where = where.replace(p, '')
+            where = re.sub(r', line \d+', '', where)
+            fails[name] = (exc, where)
+    return fails, sums, missing, nblocks, frames
+
+def counts(s):
+    f = re.search(r'(\d+) failed', s)
+    e = re.search(r'(\d+) exceptions?', s)
+    return (int(f.group(1)) if f else 0) + (int(e.group(1)) if e else 0)
+
+def strip_t(s):
+    return re.sub(r'\s*in [\d.]+\s*$', '', s)
+
+mine = parse('/tmp/testlogs')
+bas = parse('/tmp/baselogs')
+
+for label, (fails, sums, missing, nblocks, frames) in (('MINE', mine), ('BASE', bas)):
+    print('%s: shards with final summary=%d/32, missing=%s' % (label, len(sums), missing))
+    print('%s: traceback frames by tree: repo=%d baseline=%d other=%d' % (label, frames['repo'], frames['base'], frames['other']))
+    odd = [(sh, nblocks[sh], counts(sums[sh])) for sh in sorted(sums) if nblocks[sh] != counts(sums[sh])]
+    print('%s: shards where parsed blocks != summary count (shard, parsed, summary): %s' % (label, odd))
+    print('%s: total failing tests parsed: %d' % (label, len(fails)))
+
+print()
+print('=== per-shard summaries that differ (time ignored) ===')
+d = 0
+for sh in sorted(set(mine[1]) & set(bas[1])):
+    if strip_t(mine[1][sh]) != strip_t(bas[1][sh]):
+        d += 1
+        print('shard %d\n  mine: %s\n  base: %s' % (sh, strip_t(mine[1][sh]), strip_t(bas[1][sh])))
+print('shards with differing summaries: %d' % d)
+
+mf, bf = mine[0], bas[0]
+only_mine = sorted(set(mf) - set(bf))
+only_base = sorted(set(bf) - set(mf))
+both = sorted(set(mf) & set(bf))
+print('\n=== failing ONLY with my change (%d) ===' % len(only_mine))
+for k in only_mine:
+    print('  %s | %s' % (k, mf[k][0][:120]))
+print('\n=== failing ONLY in baseline (%d) ===' % len(only_base))
+for k in only_base:
+    print('  %s | %s' % (k, bf[k][0][:120]))
+diffs = [k for k in both if mf[k] != bf[k]]
+print('\n=== failing in both (%d); with a different exception/location: %d ===' % (len(both), len(diffs)))
+for k in diffs:
+    print('  ' + k)
+    print('    mine: %s' % (mf[k],))
+    print('    base: %s' % (bf[k],))
+print('\n=== distinct final exception lines among failures common to both ===')
+for exc, n in Counter(mf[k][0] for k in both).most_common():
+    print('  %3d  %s' % (n, exc[:140]))
+EOF
+for t in $(seq 1 20); do n=$(grep -l "tests finished" /tmp/baselogs/test_*.log 2>/dev/null | wc -l); [ "$n" -ge 32 ] && break; sleep 5; done
+echo "baseline shards with a final summary: $n/32"
+python /tmp/cmp_logs.py "$(pwd)"

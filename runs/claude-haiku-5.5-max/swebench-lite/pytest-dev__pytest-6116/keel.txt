@@ -1,0 +1,84 @@
+$ ls -la && git -C . status 2>/dev/null | head -20 && git -C . log --oneline -5 2>/dev/null
+$ grep -rn "collect-only\|collectonly" src doc changelog CONTRIBUTING.rst README.rst testing | head -n 80
+$ sed -n '96,130p' src/_pytest/main.py
+$ grep -rn -e '"--co"' -e '"--co ' src testing 2>/dev/null | head -20; python - <<'EOF'
+p = "src/_pytest/main.py"
+s = open(p, encoding="utf-8").read()
+old = '''    group.addoption(
+        "--collectonly",
+        "--collect-only",
+        action="store_true",
+        help="only collect tests, don't execute them.",
+    ),'''
+new = '''    group.addoption(
+        "--collectonly",
+        "--collect-only",
+        "--co",
+        action="store_true",
+        help="only collect tests, don't execute them.",
+    ),'''
+assert s.count(old) == 1, s.count(old)
+open(p, "w", encoding="utf-8").write(s.replace(old, new))
+print("patched")
+EOF
+git diff --stat && git diff
+$ repo=$(pwd); tmp=$(mktemp -d); printf 'def test_a():\n    pass\n\n\ndef test_b():\n    pass\n' > "$tmp/test_sample.py"; cd "$tmp" || exit 1; PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"; echo "--- which _pytest is imported"; $PY -c "import _pytest, pytest; print(_pytest.__file__, pytest.__version__)"; echo "--- --co"; $PY -m pytest --co -q -p no:cacheprovider; echo "exit=$?"; echo "--- --collect-only"; $PY -m pytest --collect-only -q -p no:cacheprovider; echo "exit=$?"; echo "--- help entry"; $PY -m pytest -h 2>&1 | grep -n -A2 'collectonly'; echo "--- single-letter short options registered in src"; grep -rhoE '"-[A-Za-z]"' "$repo/src/_pytest" | sort -u | tr '\n' ' '; echo; echo "--- git status"; cd "$repo" && git status --short
+$ repo=$(pwd); PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"; echo "--- help lines mentioning collect-only"; $PY -m pytest -h 2>&1 | grep -n -A1 'collect-only'; echo "--- targeted test modules"; $PY -m pytest -q -p no:cacheprovider testing/test_terminal.py testing/test_collection.py testing/test_session.py testing/test_config.py 2>&1 | tail -n 15; echo "--- git status"; git status --short
+$ repo=$(pwd); PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"; T="testing/test_config.py::TestPytestPluginsVariable::test_pytest_plugins_in_non_top_level_conftest_unsupported_pyargs"; echo "--- with change: error lines"; $PY -m pytest -q -p no:cacheprovider "$T" 2>&1 | grep -E '^E |passed|failed' | head -n 8; if git stash push -q -- src/_pytest/main.py; then echo "--- baseline (change stashed): summary"; $PY -m pytest -q -p no:cacheprovider "$T" 2>&1 | tail -n 1; git stash pop -q || echo "STASH POP FAILED"; fi; echo "--- restored state"; git status --short; git stash list | head -n 3; echo "--- parseopt + helpconfig tests (with change)"; $PY -m pytest -q -p no:cacheprovider testing/test_parseopt.py testing/test_helpconfig.py 2>&1 | tail -n 2
+$ repo=$(pwd); PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"; T="testing/test_parseopt.py testing/test_helpconfig.py"
+run() { $PY -m pytest -q -p no:cacheprovider -rfE $T > "$1" 2>&1; rc=$?; echo "exit=$rc :: $(tail -n 1 "$1")"; grep -E '^(FAILED|ERROR) ' "$1" | sed 's/ - .*//' | sort > "$1.ids"; }
+echo "--- with change"; run /tmp/pt_with.log
+if git stash push -q -- src/_pytest/main.py; then echo "--- baseline (change stashed)"; run /tmp/pt_base.log; git stash pop -q || echo "STASH POP FAILED"; fi
+echo "--- restored state"; git status --short; git stash list | head -n 3
+echo "--- failing ids with change:"; cat /tmp/pt_with.log.ids
+echo "--- failing only with change:"; comm -23 /tmp/pt_with.log.ids /tmp/pt_base.log.ids
+echo "--- failing only at baseline:"; comm -13 /tmp/pt_with.log.ids /tmp/pt_base.log.ids
+echo "--- sample error lines (with change):"; grep -m 2 -E '^E  ' /tmp/pt_with.log
+$ repo=$(pwd); PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"
+$PY - <<'EOF'
+p = "testing/test_terminal.py"
+s = open(p, encoding="utf-8").read()
+anchor = "    def test_collectonly_skipped_module(self, testdir):"
+new = '''    def test_collectonly_short_alias(self, testdir):
+        testdir.makepyfile(
+            test_collectonly_short_alias="""
+                def test_func():
+                    pass
+            """
+        )
+        result = testdir.runpytest("--co")
+        result.stdout.fnmatch_lines(
+            ["<Module test_collectonly_short_alias.py>", "  <Function test_func>"]
+        )
+
+'''
+assert s.count(anchor) == 1, s.count(anchor)
+open(p, "w", encoding="utf-8").write(s.replace(anchor, new + anchor))
+print("added test")
+EOF
+run() { $PY -m pytest -q -p no:cacheprovider testing/test_terminal.py -k test_collectonly_short_alias 2>&1 | tail -n 1; }
+echo "--- with change"; run
+if git stash push -q -- src/_pytest/main.py; then echo "--- baseline (main.py stashed)"; run; git stash pop -q || echo "STASH POP FAILED"; fi
+echo "--- state"; git status --short; git stash list | head -n 3
+echo "--- diff stat"; git diff --stat
+$ repo=$(pwd); PY=$(command -v python || command -v python3); export PYTHONPATH="$repo/src"; echo "--- full test_terminal.py"; $PY -m pytest -q -p no:cacheprovider testing/test_terminal.py 2>&1 | tail -n 2; echo "--- syntax check"; $PY -c 'import ast,sys; [ast.parse(open(f, encoding="utf-8").read(), f) for f in sys.argv[1:]]; print("parse-ok")' src/_pytest/main.py testing/test_terminal.py; echo "--- diff"; git diff; echo "--- status/stash"; git status --short; git stash list | head -n 3
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I added `--co` as a short alias for `--collect-only` and a regression test. This doesn't fully match the issue, which asks for a one-character flag (see below).
+
+**Changes**
+- `src/_pytest/main.py`: added `"--co"` alongside `--collectonly` and `--collect-only`. The option's dest is still `collectonly`, so existing readers are unaffected.
+- `testing/test_terminal.py`: added `TestCollectonly.test_collectonly_short_alias`.
+
+**Deviations and open items**
+- The issue asks for one character, and `--co` is two. I didn't choose a letter because the issue asks for community input on that. I also didn't check third-party plugin flags for conflicts. My earlier claim that single letters are "mostly taken" was wrong: 12 of the 26 lowercase letters are registered in `src/_pytest`, and `-V` isn't one of the 13 single-letter flags the grep found.
+- The issue asks for up/down votes before implementing. I can't vote. If the vote has to come first, revert with `git checkout -- src/_pytest/main.py testing/test_terminal.py`.
+- I didn't add a changelog entry. `changelog/` fragments are named after the issue number, which I don't have.
+
+**Verification**
+- `pytest --co` and `pytest --collect-only` produce identical output on a sample file. `pytest -h` lists `--collect-only, --co`.
+- The new test fails with `main.py` stashed and passes with the change.
+- `testing/test_terminal.py`: 126 passed, 7 skipped.
+- The 8 failures in `test_config.py` (2), `test_helpconfig.py` (5), and `test_parseopt.py` (1) are identical with the change stashed, so they predate it. The ones I inspected are DeprecationWarnings from installed packages.
+- I did not run the full test suite.
+
+Only the two files above are modified, and the stash is empty.

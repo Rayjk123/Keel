@@ -1,0 +1,168 @@
+$ cd . && ls -la && git log --oneline -3 && git status
+$ cd . && grep -n "def __eq__" -A 40 sympy/core/expr.py | head -60
+$ cd . && grep -n "^from\|^import" sympy/core/expr.py && echo ---- && grep -n "def _sympify" -A 30 sympy/core/sympify.py
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import sympy
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+try:
+    r = sympy.Symbol('x') == C()
+    print("case 1 (repr 'x.y'): result =", r)
+except Exception as e:
+    print("case 1 (repr 'x.y'): EXCEPTION", type(e).__name__, e)
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+print("case 2 (repr 'x'): Symbol('x') == D() ->", sympy.Symbol('x') == D(), "(expected False)")
+print("case 2 (repr 'x'): Symbol('x') != D() ->", sympy.Symbol('x') != D(), "(expected True)")
+EOF
+python /tmp/repro.py</reasoning_effort>
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import sympy
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+try:
+    r = sympy.Symbol('x') == C()
+    print("case 1 (repr 'x.y'): result =", r)
+except Exception as e:
+    print("case 1 (repr 'x.y'): EXCEPTION", type(e).__name__, e)
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+print("case 2 (repr 'x'): Symbol('x') == D() ->", sympy.Symbol('x') == D(), "(expected False)")
+print("case 2 (repr 'x'): Symbol('x') != D() ->", sympy.Symbol('x') != D(), "(expected True)")
+EOF
+python /tmp/repro.py
+$ cd . && grep -n "^def sympify" sympy/core/sympify.py && sed -n '/^def sympify/,/^def _sympify/p' sympy/core/sympify.py | grep -n "strict\|_sympy_\|converter\|coerce\|string_types\|unicode(a)\|parse_expr\|raise SympifyError\|CantSympify\|numpy" | head -50 && echo ---- && grep -n "class SympifyError" -A 16 sympy/core/sympify.py
+$ cd . && sed -n '258,345p' sympify_dummy 2>/dev/null; sed -n '260,345p' sympy/core/sympify.py
+$ cd . && grep -rn "def __eq__\|def __ne__" sympy --include=*.py | grep -v "/tests/" | while IFS=: read f l rest; do body=$(sed -n "$((l+1)),$((l+12))p" "$f" | grep -n "sympify(other)\|sympify(o)\|sympify(" | head -2); if [ -n "$body" ]; then echo "$f:$l: $rest"; echo "$body" | sed 's/^/      /'; fi; done
+$ cd . && echo "== dense.py ==" && sed -n '44,62p' sympy/matrices/dense.py && echo "== polytools.py ==" && sed -n '4125,4160p' sympy/polys/polytools.py && echo "== ellipse.py ==" && sed -n '113,130p' sympy/geometry/ellipse.py && echo "== basic.py __eq__ ==" && awk '/    def __eq__/{f=1} f{print NR": "$0} /return self._hashable_content\(\) == other._hashable_content\(\)|^    def __ne__/{if(f){exit}}' sympy/core/basic.py | grep -v '^\s*[0-9]*: *$' | grep -n "sympify\|def \|return" 
+$ cd . && sed -i '124s/^            other = sympify(other)$/            other = _sympify(other)/' sympy/core/expr.py && git diff && echo "== __ne__ ==" && grep -n "def __ne__" -A 3 sympy/core/basic.py sympy/core/expr.py && echo "== repro ==" && python /tmp/repro.py
+$ cd . && grep -n "sympify(" sympy/core/expr.py | head -40 && echo "== tools ==" && python -c "import pytest; print('pytest', pytest.__version__)"; python -c "import numpy; print('numpy', numpy.__version__)"; python -c "import xdist; print('xdist ok')" 2>&1 | tail -1; nproc; python --version
+$ cd . && echo "== expr.py around 335 ==" && sed -n '328,337p' sympy/core/expr.py && echo "== expr.py around 739 ==" && awk 'NR<=739 && /^    def /{d=NR": "$0} NR==739{print d}' sympy/core/expr.py && sed -n '736,741p' sympy/core/expr.py && echo "== runner options ==" && python bin/test --help 2>&1 | grep -i -A1 "split\|--timeout" | head -12 && python bin/doctest --help 2>&1 | grep -i -A1 "split" | head -4
+$ cd . && avail=$(free -m | awk '/Mem:/{print $7}'); n=$(( avail / 700 )); [ $n -gt 32 ] && n=32; [ $n -lt 2 ] && n=2; d=$(( n / 3 )); [ $d -lt 1 ] && d=1; echo "avail=${avail}MB test_splits=$n doctest_splits=$d"; mkdir -p /tmp/testlogs && rm -f /tmp/testlogs/*; echo "$n $d" > /tmp/testlogs/splits; date +%s > /tmp/testlogs/start; for i in $(seq 1 $n); do (nohup python bin/test --split=$i/$n > /tmp/testlogs/t_$i.log 2>&1 &); done; for i in $(seq 1 $d); do (nohup python bin/doctest --split=$i/$d > /tmp/testlogs/d_$i.log 2>&1 &); done; sleep 3; echo "running: $(pgrep -fc 'bin/(test|doctest) --split')"
+$ cd . && read n d < /tmp/testlogs/splits; for f in /tmp/testlogs/t_*.log /tmp/testlogs/d_*.log; do i=$(basename $f .log); kind=${i%%_*}; num=${i#*_}; if [ $kind = t ]; then pat="bin/test --split=$num/$n\$"; else pat="bin/doctest --split=$num/$d\$"; fi; pgrep -f "$pat" >/dev/null || { echo "== NOT RUNNING: $f =="; tail -15 "$f"; }; done; echo "running now: $(pgrep -fc 'bin/(test|doctest) --split')"; echo "== existing eq/sympify-related tests in test_expr.py =="; grep -n "^def test_.*\(eq\|sympify\|str\|repr\|issue_1[0-9]\{4\}\)" sympy/core/tests/test_expr.py | tail -15; grep -n "^def test_" sympy/core/tests/test_expr.py | tail -3; wc -l sympy/core/tests/test_expr.py
+$ cd . && for t in $(seq 1 58); do c=$(pgrep -fc 'bin/(test|doctest) --split'); [ "$c" -eq 0 ] && break; sleep 5; done; echo "still running: $(pgrep -fc 'bin/(test|doctest) --split') after $(( $(date +%s) - $(cat /tmp/testlogs/start) ))s"; echo "== per-split summaries with problems (failed/exceptions/missing summary) =="; for f in /tmp/testlogs/t_*.log /tmp/testlogs/d_*.log; do s=$(grep -a "tests finished" "$f" | tr '\n' '|'); if [ -z "$s" ] || echo "$s" | grep -q "failed\|exception"; then echo "$(basename $f): ${s:-<no summary yet>}"; fi; done; echo "== totals =="; cat /tmp/testlogs/t_*.log | grep -a "tests finished" | grep -o "[0-9]* \(passed\|failed\|exceptions\?\)" | awk '{s[$2]+=$1} END{for(k in s) print "  unit tests:", k, s[k]}'; cat /tmp/testlogs/d_*.log | grep -a "tests finished" | grep -o "[0-9]* \(passed\|failed\|exceptions\?\)" | awk '{s[$2]+=$1} END{for(k in s) print "  doctests:", k, s[k]}'
+$ cd . && echo "still running: $(pgrep -fc 'bin/(test|doctest) --split') (elapsed $(( $(date +%s) - $(cat /tmp/testlogs/start) ))s)"; pgrep -fa 'bin/(test|doctest) --split' | sed 's/.*bin\//  bin\//' | head -20; echo "== splits with no summary yet =="; for f in /tmp/testlogs/t_*.log /tmp/testlogs/d_*.log; do grep -aq "tests finished" "$f" || echo "  $(basename $f) (last: $(tail -c 300 "$f" | tr '\n' ' ' | tail -c 120))"; done
+$ cd . && echo "== splits reporting failures/exceptions =="; for f in /tmp/testlogs/t_*.log /tmp/testlogs/d_*.log; do s=$(grep -a "tests finished" "$f" | tr '\n' '|'); echo "$s" | grep -q "failed\|exception" && echo "  $(basename $f): $s"; done; echo "== totals so far =="; cat /tmp/testlogs/t_*.log | grep -a "tests finished" | grep -o "[0-9]* \(passed\|failed\|exceptions\?\)" | awk '{s[$2]+=$1} END{for(k in s) print "  unit tests:", k, s[k]}'; cat /tmp/testlogs/d_*.log | grep -a "tests finished" | grep -o "[0-9]* \(passed\|failed\|exceptions\?\)" | awk '{s[$2]+=$1} END{for(k in s) print "  doctests:", k, s[k]}'; echo "== failing doctest items (d_7, d_10) =="; grep -an "^File \"\|Failed example\|items had failures\|of .* in \|Error:" /tmp/testlogs/d_7.log /tmp/testlogs/d_10.log | grep -v "^\s*$" | head -40
+$ cd . && echo "t_9 running: $(pgrep -fc 'bin/test --split=9/32')"; echo "== failing unit tests -> last error line =="; for f in /tmp/testlogs/t_*.log; do awk -v F="$(basename $f .log)" '/^_+ [^ ]+ _+$/ { if (hdr) print "  "F": "hdr" -> "last; hdr=$0; gsub(/^_+ | _+$/, "", hdr); last=""; next } /tests finished/ { if (hdr) print "  "F": "hdr" -> "last; hdr=""; next } hdr && NF && !/^=+$/ { last=substr($0,1,110) }' "$f"; done; echo "== failing doctest objects (count of failed examples) =="; grep -ah '^File "' /tmp/testlogs/d_*.log | sed -E 's/^File "([^"]+)", line [0-9]+, in (.*)$/\1 :: \2/; s#/testbed/##' | sort | uniq -c | sed 's/^/  /'
+$ cd . && echo "t_9 running: $(pgrep -fc 'bin/test --split=9/32')"; echo "== wrapped summaries =="; grep -a -A1 "tests finished" /tmp/testlogs/t_9.log /tmp/testlogs/t_19.log | sed 's#/tmp/testlogs/##'; echo "== failing unit tests -> final error line =="; for f in /tmp/testlogs/t_*.log; do awk -v F="$(basename $f .log)" '/^_+ [^ ]+ _+$/ { if (hdr) print "  "F": "hdr" -> "last; hdr=$0; gsub(/^_+ | _+$/, "", hdr); last=""; next } /tests finished/ { if (hdr) print "  "F": "hdr" -> "last; hdr=""; next } hdr && NF && !/^=+$/ && !/^_+$/ { last=substr($0,1,120) }' "$f"; done; echo "== test_var traceback =="; grep -a -A8 "test_var.py:test_var _" /tmp/testlogs/t_4.log; echo "== test_var source (return-value check) =="; grep -n "check return value" -A4 sympy/core/tests/test_var.py
+$ cd . && rm -rf /tmp/baseline /tmp/cmp && mkdir -p /tmp/baseline /tmp/cmp && git archive HEAD | tar -x -C /tmp/baseline && echo "baseline expr.py line 124: $(sed -n '124p' /tmp/baseline/sympy/core/expr.py)" && for f in sympy/codegen/tests/test_fnodes.py sympy/parsing/tests/test_sympy_parser.py sympy/polys/tests/test_modulargcd.py sympy/printing/pretty/tests/test_pretty.py sympy/printing/tests/test_latex.py sympy/solvers/tests/test_solvers.py sympy/core/tests/test_sympify.py sympy/core/tests/test_var.py; do n=$(basename $f .py); (cd /tmp/baseline && nohup python bin/test $f > /tmp/cmp/base_$n.log 2>&1 &); done; (cd /tmp/baseline && nohup python bin/doctest sympy/core/sympify.py sympy/parsing/sympy_parser.py sympy/polys/modulargcd.py doc/src/tutorial/manipulation.rst > /tmp/cmp/base_doctest.log 2>&1 &); sleep 1; echo "baseline jobs running: $(pgrep -fc '^python bin/(test|doctest)')"; echo "== xpassed in t_19 =="; grep -a -A3 -i "xpass" /tmp/testlogs/t_19.log | head -8; echo "== sympify.py doctest failure =="; grep -ah -A14 'core/sympify.py", line' /tmp/testlogs/d_*.log | head -18; echo "== test_var.py =="; sed -n '1,6p;19,23p' sympy/core/tests/test_var.py; echo "== test_expr.py imports / tail =="; sed -n '1,22p' sympy/core/tests/test_expr.py; echo ...; tail -6 sympy/core/tests/test_expr.py
+$ cd . && cat -n sympy/core/tests/test_var.py | sed -n '1,30p'; (cd /tmp/baseline && nohup python bin/test sympy/printing/tests/test_tree.py > /tmp/cmp/base_test_tree.log 2>&1 &); sleep 2; echo "== baseline jobs still running: $(pgrep -fc '^python bin/(test|doctest)') =="; for f in /tmp/cmp/base_*.log; do s=$(grep -a -A1 "tests finished" "$f" | tr '\n' ' ' | tr -s ' '); echo "  $(basename $f .log): ${s:-<running>}"; done; echo "== which sympy do baseline tracebacks reference? =="; grep -aoh '"/[a-z]*/[a-z]*/sympy/' /tmp/cmp/base_*.log | sort | uniq -c
+$ cd . && norm() { sed -E 's#/(testbed|tmp/baseline)/##'; }; echo "== unit-test failures by name: baseline (<) vs patched (>) =="; grep -ahE '^_+ sympy/[^ ]+:[^ ]+ _+$' /tmp/testlogs/t_*.log | sed -E 's/^_+ | _+$//g' | sort > /tmp/cmp/patched_fail.txt; grep -ahE '^_+ sympy/[^ ]+:[^ ]+ _+$' /tmp/cmp/base_test_*.log | sed -E 's/^_+ | _+$//g' | sort > /tmp/cmp/base_fail.txt; echo "  counts: baseline=$(wc -l < /tmp/cmp/base_fail.txt) patched=$(wc -l < /tmp/cmp/patched_fail.txt)"; diff /tmp/cmp/base_fail.txt /tmp/cmp/patched_fail.txt | sed 's/^/  /'; echo "== doctest failures (failed examples per object): baseline (<) vs patched (>) =="; grep -ahE '^File "' /tmp/cmp/base_doctest.log | norm | sed -E 's/^File "([^"]+)", line [0-9]+, in (.*)$/\1 :: \2/' | sort | uniq -c > /tmp/cmp/base_doc.txt; grep -ahE '^File "' /tmp/testlogs/d_*.log | norm | sed -E 's/^File "([^"]+)", line [0-9]+, in (.*)$/\1 :: \2/' | sort | uniq -c > /tmp/cmp/patched_doc.txt; sed 's/^/  base: /' /tmp/cmp/base_doc.txt; if diff -q /tmp/cmp/base_doc.txt /tmp/cmp/patched_doc.txt >/dev/null; then echo "  -> identical in patched run"; else diff /tmp/cmp/base_doc.txt /tmp/cmp/patched_doc.txt | sed 's/^/  /'; fi; echo "== test_tree.py: XFAIL'd test =="; grep -n -B2 "^def test_print_tree_MatAdd" sympy/printing/tests/test_tree.py; echo "== test_tree.py in isolation (each run gets a fresh hash seed) =="; for t in patched baseline; do d=$PWD; [ $t = baseline ] && d=/tmp/baseline; for r in 1 2 3; do echo "  $t run $r: $(cd $d && python bin/test sympy/printing/tests/test_tree.py 2>&1 | grep -a 'tests finished' | tr -s '= ')"; done; done
+$ cd . && python - <<'EOF'
+p = 'sympy/core/tests/test_var.py'
+s = open(p).read()
+old = "    assert v == ['d', 'e', 'fg']\n"
+assert s.count(old) == 1, 'test_var anchor not found'
+open(p, 'w').write(s.replace(old, "    assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]\n"))
+
+p = 'sympy/core/tests/test_expr.py'
+s = open(p).read()
+assert 'def test_eq_with_unsympifiable_objects' not in s
+s = s.rstrip('\n') + '\n' + '''
+
+def test_eq_with_unsympifiable_objects():
+    # Expr.__eq__ must not sympify ``other`` by parsing its str/repr: that
+    # would eval code derived from an arbitrary object, and could make such
+    # an object compare equal to an expression whose repr it happens to share.
+    class C(object):
+        def __repr__(self):
+            return 'x.y'
+
+    # used to raise AttributeError: 'Symbol' object has no attribute 'y'
+    assert (x == C()) is False
+    assert (x != C()) is True
+
+    class D(object):
+        def __repr__(self):
+            return 'x'
+
+    # used to compare equal because repr(D()) parses to Symbol('x')
+    assert (x == D()) is False
+    assert (x != D()) is True
+
+    # strings are not parsed either
+    assert (x == 'x') is False
+    assert (x != 'x') is True
+
+    # objects can still opt in to comparisons by defining _sympy_
+    class E(object):
+        def _sympy_(self):
+            return x
+
+    assert (x == E()) is True
+    assert (x != E()) is False
+'''
+open(p, 'w').write(s)
+EOF
+git diff --stat; echo "== patched: core tests =="; python bin/test sympy/core/tests/test_var.py sympy/core/tests/test_expr.py sympy/core/tests/test_equal.py sympy/core/tests/test_basic.py sympy/core/tests/test_sympify.py > /tmp/cmp/patched_core.log 2>&1; sed -n '/^sympy\//,$p' /tmp/cmp/patched_core.log | grep -av '^  \|^Traceback\|^$'; echo "== baseline (unfixed expr.py) running the new test: should FAIL =="; cp sympy/core/tests/test_expr.py /tmp/baseline/sympy/core/tests/test_expr.py && (cd /tmp/baseline && python bin/test sympy/core/tests/test_expr.py -k test_eq_with_unsympifiable_objects > /tmp/cmp/base_newtest.log 2>&1); sed -n '/^sympy\//,$p' /tmp/cmp/base_newtest.log | grep -av '^$'; seed=$(grep -a "random seed:" /tmp/testlogs/t_19.log | awk '{print $NF}'); hs=$(grep -ao "PYTHONHASHSEED=[0-9]*" /tmp/testlogs/t_19.log | head -1 | cut -d= -f2); echo "== launching split 19 same-seed rerun (seed=$seed PYTHONHASHSEED=$hs) =="; (cd /tmp/baseline && PYTHONHASHSEED=$hs nohup python bin/test --split=19/32 --seed=$seed > /tmp/cmp/base_split19.log 2>&1 &); (PYTHONHASHSEED=$hs nohup python bin/test --split=19/32 --seed=$seed > /tmp/cmp/patched_split19.log 2>&1 &); sleep 1; echo "split19 jobs running: $(pgrep -fc 'split=19/32')"
+$ cd . && for i in $(seq 1 8); do [ "$(pgrep -fc '^python bin/test --split=19/32')" -eq 0 ] && break; sleep 5; done; echo "== split 19, same seeds (still running: $(pgrep -fc '^python bin/test --split=19/32')) =="; for t in base patched; do f=/tmp/cmp/${t}_split19.log; echo "  $t: $(grep -a 'random seed\|hash randomization' $f | tr -s ' ' | tr '\n' ';')"; echo "    $(grep -a -A1 'tests finished' $f | tr '\n' ' ' | tr -s ' =')"; echo "    xpassed: $(grep -a -A2 'xpassed tests' $f | grep -a 'sympy/' | tr '\n' ' ')"; done; echo "  original full-suite t_19: $(grep -a 'random seed\|hash randomization' /tmp/testlogs/t_19.log | tr -s ' ' | tr '\n' ';')"; cat > /tmp/scan_eq.py << 'EOF'
+import ast, os
+def name(call):
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+def strict(call):
+    return any(k.arg == 'strict' and isinstance(k.value, ast.Constant) and k.value.value is True for k in call.keywords)
+rows, nfiles, nmeth = [], 0, 0
+for root, dirs, files in os.walk('sympy'):
+    dirs[:] = sorted(d for d in dirs if d not in ('tests', 'benchmarks'))
+    for fn in sorted(f for f in files if f.endswith('.py')):
+        p = os.path.join(root, fn); src = open(p, encoding='utf-8').read(); nfiles += 1
+        for cls in ast.walk(ast.parse(src, p)):
+            if not isinstance(cls, ast.ClassDef): continue
+            for m in cls.body:
+                if isinstance(m, ast.FunctionDef) and m.name in ('__eq__', '__ne__'):
+                    nmeth += 1
+                    for c in ast.walk(m):
+                        if isinstance(c, ast.Call) and name(c) in ('sympify', 'S') and not strict(c):
+                            rows.append('  %s:%d %s.%s -> %s' % (p, c.lineno, cls.name, m.name, ast.get_source_segment(src, c)))
+print('scanned %d files, %d __eq__/__ne__ methods; non-strict sympify/S calls inside them:' % (nfiles, nmeth))
+print('\n'.join(rows) or '  none')
+EOF
+echo "== AST scan =="; python /tmp/scan_eq.py; echo "== DenseMatrix.__eq__ with the issue's objects =="; python - << 'EOF'
+from sympy import Matrix
+class C(object):
+    def __repr__(self): return 'x.y'
+class D(object):
+    def __repr__(self): return 'Matrix([1])'
+for obj in (C(), D()):
+    try:
+        print('  Matrix([1]) == <repr %r> -> %r' % (repr(obj), Matrix([1]) == obj))
+    except Exception as e:
+        print('  Matrix([1]) == <repr %r> -> raised %s: %s' % (repr(obj), type(e).__name__, e))
+EOF
+$ cd . && echo "== dense.py imports ==" && grep -n "^from\|^import" sympy/matrices/dense.py && echo "== DenseMatrix __ne__ ==" && grep -n "def __ne__" -A3 sympy/matrices/dense.py && python - << 'EOF'
+from sympy import Matrix, ImmutableMatrix, SparseMatrix, ImmutableSparseMatrix
+classes = (Matrix, ImmutableMatrix, SparseMatrix, ImmutableSparseMatrix)
+print("== which class provides __eq__ ==")
+for cls in classes:
+    print('  %-24s -> %s' % (cls.__name__, next(k.__name__ for k in cls.__mro__ if '__eq__' in vars(k))))
+class C(object):
+    def __repr__(self): return 'x.y'
+class D(object):
+    def __repr__(self): return 'Matrix([1])'
+cases = [("repr 'x.y'", C()), ("repr 'Matrix([1])'", D()), ("object()", object()),
+         ("str 'Matrix([1])'", 'Matrix([1])'), ("list [1]", [1]), ("None", None)]
+print("== current behaviour of cls([1]) == other ==")
+for cls in classes:
+    row = []
+    for label, obj in cases:
+        try:
+            r = repr(cls([1]) == obj)
+        except Exception as e:
+            r = 'raises ' + type(e).__name__
+        row.append('%s: %s' % (label, r))
+    print('  %-21s %s' % (cls.__name__, ' | '.join(row)))
+EOF
+echo "== matrix tests comparing against string literals ==" && grep -rnE "(==|!=) *['\"]" sympy/matrices/tests/ | head; echo "(end)"

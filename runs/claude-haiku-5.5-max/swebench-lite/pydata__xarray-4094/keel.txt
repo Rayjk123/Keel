@@ -1,0 +1,107 @@
+$ cd . && git status 2>/dev/null | head -20; echo "---"; ls -la; echo "---"; grep -rn "to_unstacked_dataset" --include=*.py . | head -50
+$ git log --oneline -3; echo "---"; sed -n '1895,1960p' xarray/core/dataarray.py; echo "---"; L=$(grep -n "def to_stacked_array" xarray/core/dataset.py | cut -d: -f1); sed -n "${L},$((L+100))p" xarray/core/dataset.py; echo "---"; which python; python -c "import xarray, pandas, numpy as np; print(xarray.__version__, pandas.__version__, np.__version__)"
+$ python -c "import xarray; print(xarray.__file__)"; echo "---"; L=$(grep -n "pull variables out of datarray" xarray/core/dataarray.py | cut -d: -f1); sed -n "${L},$((L+12))p" xarray/core/dataarray.py; echo "---"; L=$(grep -n "concatenate the arrays" xarray/core/dataset.py | cut -d: -f1); sed -n "${L},$((L+20))p" xarray/core/dataset.py; echo "---"; python - <<'EOF'
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array("y", sample_dims=["x"])
+print(stacked)
+print(stacked.indexes["y"])
+print("--- sel without drop:")
+print(stacked.sel({"variable": "a"}))
+print("--- sel with drop=True:")
+print(stacked.sel({"variable": "a"}, drop=True).squeeze(drop=True))
+try:
+    unstacked = stacked.to_unstacked_dataset("y")
+    print(unstacked)
+    print("identical:", data.identical(unstacked))
+except Exception as e:
+    print(type(e).__name__, ":", e)
+EOF
+$ cd /testbed; echo "=== existing stacked-array tests ==="; sed -n '3030,3062p' xarray/tests/test_dataset.py; echo "=== helper ==="; grep -rn "def create_test_stacked_array" -A 12 xarray/tests/; echo "=== baseline: dataset/dataarray ==="; python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -k "stack" -q -p no:cacheprovider 2>&1 | tail -n 15; echo "=== baseline: units ==="; python -m pytest xarray/tests/test_units.py -k "unstack" -q -p no:cacheprovider 2>&1 | tail -n 8
+$ cd /testbed && python - <<'EOF'
+import pathlib
+
+# 1) Fix: drop the scalar coordinate that label-based selection leaves behind
+p = pathlib.Path("xarray/core/dataarray.py")
+src = p.read_text()
+old = "data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)"
+new = "data_dict[k] = self.sel({variable_dim: k}, drop=True).squeeze(drop=True)"
+assert src.count(old) == 1, src.count(old)
+p.write_text(src.replace(old, new))
+
+# 2) Regression test next to the existing to_stacked_array roundtrip tests
+p = pathlib.Path("xarray/tests/test_dataset.py")
+src = p.read_text()
+anchor = (
+    '        y = D.to_stacked_array("features", sample_dims)\n'
+    '        x = y.to_unstacked_dataset("features")\n'
+    '        assert_identical(D, x)\n'
+    '\n'
+    '    def test_update(self):'
+)
+assert src.count(anchor) == 1, src.count(anchor)
+added = '''        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+    def test_to_stacked_array_to_unstacked_dataset_single_dim(self):
+        # regression test: every variable is one-dimensional, so the stacked
+        # coordinate has a single MultiIndex level and selecting one variable
+        # must not leave a conflicting scalar coordinate behind
+        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+        D = xr.Dataset({"a": arr, "b": arr})
+        sample_dims = ["x"]
+
+        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+        # test on just one sample
+        x0 = y[0].to_unstacked_dataset("features")
+        d0 = D.isel(x=0)
+        assert_identical(d0, x0)
+
+    def test_update(self):'''
+p.write_text(src.replace(anchor, added))
+print("edits applied")
+EOF
+echo "--- git diff ---"; git diff --stat; git diff -- xarray/core/dataarray.py
+echo "--- MCVE from the issue ---"; python -c "
+import numpy as np, xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+print('MCVE roundtrip identical:', data.identical(unstacked))
+"
+echo "--- docstring example roundtrip ---"; python -c "
+import numpy as np, xarray as xr
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[('x', ['a', 'b']), ('y', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr.isel(y=0)})
+stacked = data.to_stacked_array('z', ['y'])
+roundtripped = stacked.to_unstacked_dataset(dim='z')
+print('docstring roundtrip identical:', data.identical(roundtripped))
+"
+echo "--- targeted tests ---"; python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -k "stack" -q -p no:cacheprovider 2>&1 | tail -n 3; python -m pytest xarray/tests/test_units.py -k "unstack" -q -p no:cacheprovider 2>&1 | tail -n 2
+$ cd /testbed && echo "=== working tree ==="; git status --short; echo "=== test diff ==="; git diff -- xarray/tests/test_dataset.py; echo "=== added lines over 88 cols ==="; git diff -U0 | grep '^+' | grep -v '^+++' | awk 'length($0) > 89 {print "LONG: " $0}'; echo "=== full test_dataset.py + test_dataarray.py ==="; python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -q -rfE -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|[0-9]+ (passed|failed)" | tail -n 40
+$ cd /testbed && cp xarray/core/dataarray.py /tmp/dataarray.fixed.py && git checkout -- xarray/core/dataarray.py && echo "=== BASELINE: original dataarray.py, full test_dataset.py + test_dataarray.py ===" && COLUMNS=300 python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -q -rfE -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|[0-9]+ (passed|failed)"; cp /tmp/dataarray.fixed.py xarray/core/dataarray.py && echo "=== restored fixed dataarray.py ===" && git status --short && git diff --stat && git diff -- xarray/core/dataarray.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix and regression test are complete, and the baseline comparison confirms the new test catches the bug.
+
+**Root cause:** `DataArray.to_unstacked_dataset` extracts each variable with `self.sel({variable_dim: k}).squeeze(drop=True)`. When every variable is 1-D, the stacked dimension's MultiIndex has only the `variable` level. Selecting one label leaves the MultiIndex coordinate `y` as a 0-d coordinate holding `('a',)` or `('b',)`. `squeeze(drop=True)` only removes size-1 dimensions, so that coordinate survives. The per-variable arrays then disagree on `y`, and `Dataset(data_dict)` raises `MergeError`.
+
+**Changes (2 files, +18/−1):**
+- `xarray/core/dataarray.py`: the selection is now `self.sel({variable_dim: k}, drop=True).squeeze(drop=True)`, which drops the scalar coordinate created by the label selection.
+- `xarray/tests/test_dataset.py`: added `test_to_stacked_array_to_unstacked_dataset_single_dim`, which round-trips the issue's example and also checks the single-sample case `y[0]`.
+
+**Verification:**
+- The issue's example now round-trips and is `identical` to the input.
+- Stack-related tests in `test_dataset.py` and `test_dataarray.py`: 19 passed (18 at baseline, plus the new test).
+- `test_units.py` unstack tests: 6 passed, 4 xfailed, same as baseline.
+- Full `test_dataset.py` and `test_dataarray.py`: without the fix, 6 failed and 1678 passed. With the fix, 5 failed and 1679 passed. The only status change is the new regression test, which fails on the original code with the `MergeError`.
+- The 5 remaining failures (`test_sel_categorical`, `test_sel_categorical_error`, `test_categorical_multiindex`, `test_from_dataframe_categorical`, `test_from_series_multiindex`) also fail without my change. They are environmental: pandas 1.5.3 rejects the dev version string `0.15.2.dev110+...` with `ImportError: Pandas requires version '0.19.0' or newer of 'xarray'`.
+
+**Not changed:** the docstring example in `to_unstacked_dataset` calls `data.to_stacked_array("z", ["y"])`, but variable `b` has no `y` dimension, so `to_stacked_array` raises `ValueError` before the changed code runs. This is a separate, pre-existing docstring bug (the sample dim is likely meant to be `"x"`), so I left it out of this fix.

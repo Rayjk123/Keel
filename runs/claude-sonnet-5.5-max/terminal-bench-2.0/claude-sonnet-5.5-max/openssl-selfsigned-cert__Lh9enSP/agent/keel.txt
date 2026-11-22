@@ -1,0 +1,230 @@
+$ pwd; ls -la; echo "--- openssl ---"; which openssl && openssl version; echo "--- python ---"; which python3 && python3 --version; python3 -c "import cryptography; print('cryptography', cryptography.__version__)" 2>&1; python3 -c "import OpenSSL; print('pyOpenSSL', OpenSSL.__version__)" 2>&1; echo "--- /app ---"; ls -la /app 2>&1; id</parameter>
+$ pwd; ls -la; echo "--- openssl ---"; which openssl && openssl version; echo "--- python ---"; which python3 && python3 --version; python3 -c "import cryptography; print('cryptography', cryptography.__version__)" 2>&1; python3 -c "import OpenSSL; print('pyOpenSSL', OpenSSL.__version__)" 2>&1; echo "--- /app ---"; ls -la /app 2>&1; id
+$ set -euo pipefail
+
+mkdir -p /app/ssl
+
+# 1) 2048-bit RSA key, created under a restrictive umask so it is never world-readable
+( umask 077 && openssl genrsa -out /app/ssl/server.key 2048 )
+chmod 600 /app/ssl/server.key
+
+# 2) Self-signed cert: 365 days, O=DevOps Team, CN=dev-internal.company.local (+ SAN)
+openssl req -x509 -new -key /app/ssl/server.key -sha256 -days 365 \
+  -subj "/O=DevOps Team/CN=dev-internal.company.local" \
+  -addext "subjectAltName=DNS:dev-internal.company.local" \
+  -out /app/ssl/server.crt
+chmod 644 /app/ssl/server.crt
+
+# 3) Combined PEM (key + cert); contains the private key so keep it 600
+( umask 077 && cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem )
+chmod 600 /app/ssl/server.pem
+
+echo "=== files ==="; ls -l /app/ssl
+echo "=== key ==="; openssl rsa -in /app/ssl/server.key -check -noout; openssl pkey -in /app/ssl/server.key -noout -text | sed -n '1p'
+echo "=== cert ==="; openssl x509 -in /app/ssl/server.crt -noout -subject -issuer -dates -fingerprint -sha256
+echo "=== extensions ==="; openssl x509 -in /app/ssl/server.crt -noout -text | sed -n '/X509v3 extensions/,/Signature Algorithm/p'
+echo "=== key matches cert? ==="; diff <(openssl x509 -in /app/ssl/server.crt -noout -pubkey) <(openssl pkey -in /app/ssl/server.key -pubout) && echo yes
+$ set -euo pipefail
+CRT=/app/ssl/server.crt
+OUT=/app/ssl/verification.txt
+
+not_before=$(openssl x509 -in "$CRT" -noout -startdate | cut -d= -f2-)
+not_after=$(openssl x509 -in "$CRT" -noout -enddate | cut -d= -f2-)
+from_d=$(date -u -d "$not_before" +%Y-%m-%d)
+until_d=$(date -u -d "$not_after" +%Y-%m-%d)
+
+{
+  echo "Certificate verification report"
+  echo "File: $CRT"
+  echo
+  openssl x509 -in "$CRT" -noout -subject -dates -fingerprint -sha256
+  echo
+  echo "Valid from  (YYYY-MM-DD): $from_d"
+  echo "Valid until (YYYY-MM-DD): $until_d"
+} > "$OUT"
+chmod 644 "$OUT"
+
+echo "=== system clock (UTC) ==="; date -u
+echo "=== verification.txt ==="; cat "$OUT"
+
+echo "=== independent fingerprint cross-check ==="
+file_fp=$(grep -i 'fingerprint=' "$OUT" | cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
+calc_fp=$(openssl x509 -in "$CRT" -outform DER | sha256sum | cut -d' ' -f1)
+echo "file: $file_fp"; echo "calc: $calc_fp"
+if [ "$file_fp" = "$calc_fp" ]; then echo "fingerprint MATCH"; else echo "fingerprint MISMATCH"; exit 1; fi
+
+echo "=== key header / combined PEM structure ==="
+head -1 /app/ssl/server.key
+grep -n '^-----' /app/ssl/server.pem
+openssl x509 -in /app/ssl/server.pem -noout -subject
+openssl pkey -in /app/ssl/server.pem -noout && echo "private key inside server.pem parses OK"
+
+echo "=== permissions ==="
+stat -c '%a %U:%G %n' /app/ssl /app/ssl/*
+$ cat > /app/check_cert.py <<'PYEOF'
+#!/usr/bin/env python3
+"""Check the self-signed development certificate (default: /app/ssl/server.crt).
+
+Needs only the Python standard library and the ``openssl`` command line tool.
+
+Usage:  check_cert.py [path/to/certificate.pem]
+Exit status is 0 when every check passes and 1 otherwise.
+"""
+
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+DEFAULT_CERT = "/app/ssl/server.crt"
+EXPECTED_CN = "dev-internal.company.local"
+EXPECTED_ORG = "DevOps Team"
+
+
+class CertError(Exception):
+    """Raised when OpenSSL cannot load or describe the certificate."""
+
+
+def dn_value(dn, attr):
+    """Return the value of `attr` (e.g. "CN") from an RFC 2253 name, or None."""
+    match = re.search(rf"(?:^|[,+]){attr}=((?:[^,+\\]|\\.)*)", dn)
+    return re.sub(r"\\(.)", r"\1", match.group(1)) if match else None
+
+
+def parse_openssl_date(text):
+    """Turn OpenSSL's 'Nov 22 02:52:13 2027 GMT' into a timezone-aware datetime."""
+    return datetime.strptime(text, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+
+
+def load_certificate(path):
+    """Load the certificate with `openssl x509` and return its details as a dict."""
+    command = [
+        "openssl", "x509", "-in", path, "-noout", "-nameopt", "RFC2253",
+        "-subject", "-issuer", "-startdate", "-enddate", "-fingerprint", "-sha256",
+    ]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True)
+    except OSError as exc:
+        raise CertError(f"cannot run openssl: {exc}") from exc
+    if proc.returncode != 0:
+        details = "; ".join(l.strip() for l in proc.stderr.splitlines() if l.strip())
+        raise CertError(details or f"openssl exited with status {proc.returncode}")
+
+    fields = {}
+    for line in proc.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip().lower()] = value.strip()
+    try:
+        return {
+            "subject": fields["subject"],
+            "issuer": fields["issuer"],
+            "not_before": parse_openssl_date(fields["notbefore"]),
+            "not_after": parse_openssl_date(fields["notafter"]),
+            "fingerprint": fields["sha256 fingerprint"],
+        }
+    except (KeyError, ValueError) as exc:
+        raise CertError(f"unexpected output from openssl: {exc}") from exc
+
+
+def run_checks(cert, now):
+    """Return [(description, passed), ...] for the policy checks on `cert`."""
+    cn = dn_value(cert["subject"], "CN")
+    org = dn_value(cert["subject"], "O")
+    return [
+        (f"Common Name is {EXPECTED_CN}", cn == EXPECTED_CN),
+        (f"Organization is {EXPECTED_ORG}", org == EXPECTED_ORG),
+        ("Validity period has started", cert["not_before"] <= now),
+        ("Certificate has not expired", now <= cert["not_after"]),
+    ]
+
+
+def main(argv):
+    path = argv[1] if len(argv) > 1 else DEFAULT_CERT
+
+    if not os.path.isfile(path):
+        print(f"[FAIL] Certificate file not found: {path}")
+        print("Certificate verification failed", file=sys.stderr)
+        return 1
+    print(f"[PASS] Certificate file exists: {path}")
+
+    try:
+        cert = load_certificate(path)
+    except CertError as exc:
+        print(f"[FAIL] Certificate could not be loaded: {exc}")
+        print("Certificate verification failed", file=sys.stderr)
+        return 1
+    print("[PASS] Certificate loaded successfully")
+
+    print()
+    print("Certificate details")
+    print("-------------------")
+    print(f"Subject: {cert['subject']}")
+    print(f"Common Name: {dn_value(cert['subject'], 'CN')}")
+    print(f"Organization: {dn_value(cert['subject'], 'O')}")
+    print(f"Issuer: {cert['issuer']}")
+    print(f"Valid From: {cert['not_before']:%Y-%m-%d}")
+    print(f"Expiration Date: {cert['not_after']:%Y-%m-%d}")
+    print(f"SHA-256 Fingerprint: {cert['fingerprint']}")
+    print()
+
+    results = run_checks(cert, datetime.now(timezone.utc))
+    for description, passed in results:
+        print(f"[{'PASS' if passed else 'FAIL'}] {description}")
+    print()
+
+    if all(passed for _, passed in results):
+        print("Certificate verification successful")
+        return 0
+    print("Certificate verification failed", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PYEOF
+chmod 755 /app/check_cert.py
+
+export PYTHONDONTWRITEBYTECODE=1
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+
+echo "===== 1) normal run ====="
+python3 /app/check_cert.py; echo "exit code: $?"
+
+echo; echo "===== 2) missing file ====="
+python3 /app/check_cert.py /nonexistent/server.crt; echo "exit code: $?"
+
+echo; echo "===== 3) file that is not a certificate ====="
+echo "not a certificate" > "$T/garbage.crt"
+python3 /app/check_cert.py "$T/garbage.crt"; echo "exit code: $?"
+
+echo; echo "===== 4) certificate with the wrong CN ====="
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/wrong.key" \
+  -subj "/O=DevOps Team/CN=other.local" -days 30 -out "$T/wrong.crt" 2>/dev/null \
+  || echo "(could not generate test cert)"
+python3 /app/check_cert.py "$T/wrong.crt"; echo "exit code: $?"
+
+echo; echo "===== 5) expiry logic with simulated clocks ====="
+python3 - <<'EOF'
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, "/app")
+from datetime import datetime, timezone
+import check_cert
+
+cert = check_cert.load_certificate("/app/ssl/server.crt")
+cases = [
+    ("clock = 2020-01-01 (before notBefore)", datetime(2020, 1, 1, tzinfo=timezone.utc)),
+    ("clock = now", datetime.now(timezone.utc)),
+    ("clock = 2030-01-01 (after notAfter)", datetime(2030, 1, 1, tzinfo=timezone.utc)),
+]
+for label, when in cases:
+    results = check_cert.run_checks(cert, when)
+    failed = [d for d, ok in results if not ok]
+    print(f"{label:40} -> " + ("all checks pass" if not failed else "FAIL: " + "; ".join(failed)))
+EOF
+
+echo; echo "===== final file listing ====="
+ls -la /app /app/ssl
+find /app -name __pycache__ | grep . || echo "no __pycache__ left behind"

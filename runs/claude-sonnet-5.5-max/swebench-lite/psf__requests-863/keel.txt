@@ -1,0 +1,472 @@
+$ ls -la
+$ grep -rn "hook" requests/ --include=*.py
+$ sed -n 135,160p requests/models.py && echo ------- && sed -n 455,485p requests/models.py
+$ git log --oneline | head -5; echo -----; head -30 HISTORY.rst; echo -----; python --version 2>&1; python3 --version 2>&1; echo -----; ls tests; echo -----; grep -rn "hook" docs --include=*.rst | head -30
+$ echo "=== existing hook tests ==="; grep -n "hook" tests/*.py; echo; echo "=== sessions.py request() ==="; sed -n 120,260p requests/sessions.py; echo; echo "=== which requests gets imported ==="; python -c "import requests; print(requests.__file__, requests.__version__)"; (cd /tmp && python -c "import requests; print('from /tmp:', requests.__file__)" 2>&1 | tail -1); echo; echo "=== Makefile test target ==="; grep -n -A3 "^test" Makefile</parameter>
+</invoke>
+$ echo "=== existing hook tests ==="; grep -n "hook" tests/*.py; echo; echo "=== sessions.py request() ==="; sed -n 120,260p requests/sessions.py; echo; echo "=== which requests gets imported ==="; python -c "import requests; print(requests.__file__, requests.__version__)"; (cd /tmp && python -c "import requests; print('from /tmp:', requests.__file__)" 2>&1 | tail -1); echo; echo "=== Makefile test target ==="; grep -n -A3 "^test" Makefile
+$ echo "=== test file header ==="; sed -n 1,50p tests/test_requests.py; echo; echo "=== existing hook tests ==="; sed -n 690,760p tests/test_requests.py; echo; echo "=== Request.__init__ signature ==="; sed -n 50,82p requests/models.py; echo; echo "=== merge_kwargs ==="; grep -rn "def merge_kwargs" -A 40 requests/*.py | head -55; echo; echo "=== from_key_val_list ==="; grep -n "def from_key_val_list" -A 20 requests/utils.py; echo; echo "=== tooling ==="; cat .env; echo; python -m pytest --version 2>&1 | head -2; python -m nose --version 2>&1 | head -2
+$ cat > /tmp/repro_hooks.py <<'EOF'
+import os, sys, json, threading
+sys.path.insert(0, os.getcwd())
+import requests
+from requests.hooks import dispatch_hook, HOOKS
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+print('requests', requests.__version__, 'from', requests.__file__)
+print('HOOKS =', HOOKS)
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({'headers': dict(self.headers.items())}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+
+srv = HTTPServer(('127.0.0.1', 0), H)
+t = threading.Thread(target=srv.serve_forever)
+t.daemon = True
+t.start()
+base = 'http://127.0.0.1:%d/' % srv.server_address[1]
+
+calls = []
+def h1(r):
+    calls.append('h1')
+    return r
+def h2(r):
+    calls.append('h2')
+    return r
+
+def attempt(label, fn):
+    del calls[:]
+    try:
+        fn()
+        print('%-48s OK    calls=%s' % (label, calls))
+    except Exception as e:
+        print('%-48s ERROR %s: %s' % (label, type(e).__name__, e))
+
+print('\n-- construction only (no network) --')
+r = requests.models.Request(base, hooks={'response': [h1, h2], 'pre_send': h1})
+print('Request(hooks={response: [h1, h2], pre_send: h1}).hooks:')
+for k in HOOKS:
+    print('   ', k, r.hooks[k])
+attempt('dispatch_hook(response) on those hooks', lambda: dispatch_hook('response', r.hooks, 'data'))
+
+print('\n-- end to end against local server --')
+attempt('get(hooks={response: h1})', lambda: requests.get(base, hooks={'response': h1}))
+attempt('get(hooks={response: [h1, h2]})', lambda: requests.get(base, hooks={'response': [h1, h2]}))
+attempt('get(hooks={args: [h1, h2]})', lambda: requests.get(base, hooks={'args': [h1, h2]}))
+s = requests.session(hooks={'response': [h1, h2]})
+attempt('session(hooks={response: [h1, h2]}).get()', lambda: s.get(base))
+EOF
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy NO_PROXY=127.0.0.1,localhost PYTHONPATH="$PWD" python /tmp/repro_hooks.py
+echo "----- git state -----"
+git status --short
+echo "--- .gitignore ---"
+cat .gitignore
+echo "--- tracked build/egg-info files? ---"
+git ls-files build requests.egg-info | head -5
+true
+$ python - <<'PYEOF'
+import io
+
+path = 'requests/models.py'
+src = io.open(path, encoding='utf-8', newline='').read()
+nl = '\r\n' if '\r\n' in src else '\n'
+
+old = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        self.hooks[event].append(hook)
+'''.replace('\n', nl)
+
+new = '''    def register_hook(self, event, hook):
+        """Properly register a hook.
+
+        ``hook`` may be a single callable, or an iterable (e.g. a list) of
+        callables, in which case each of them is registered, in order.
+        Anything that is not callable is ignored.
+        """
+
+        if hasattr(hook, '__call__'):
+            self.hooks[event].append(hook)
+        elif hasattr(hook, '__iter__'):
+            self.hooks[event].extend(h for h in hook if hasattr(h, '__call__'))
+'''.replace('\n', nl)
+
+assert src.count(old) == 1, 'expected exactly one match, got %d' % src.count(old)
+io.open(path, 'w', encoding='utf-8', newline='').write(src.replace(old, new))
+print('patched %s (line ending: %r)' % (path, nl))
+PYEOF
+echo "=================== git diff ==================="
+git diff
+echo "=================== re-running repro ==================="
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy NO_PROXY=127.0.0.1,localhost PYTHONPATH="$PWD" python /tmp/repro_hooks.py
+$ echo "=== test classes / hook-related tests ==="; grep -n "^class \|^if __name__\|def test_.*hook" tests/test_requests.py
+echo; echo "=== tail of test file ==="; tail -25 tests/test_requests.py
+echo; echo "=== docs: hooks section ==="; sed -n 160,235p docs/user/advanced.rst
+echo; echo "=== other users of register_hook / hooks= (excluding build/) ==="; grep -rn "register_hook\|hooks=" --include=*.py --include=*.rst . 2>/dev/null | grep -v "^./build/" | grep -v "^./.git/"
+echo; echo "=== Request() with no args ==="; PYTHONPATH="$PWD" python -W ignore -c "import requests; print(requests.models.Request().hooks)"
+echo; echo "=== network / proxies ==="; env | grep -i proxy || echo "(no proxy env vars)"
+python -W ignore - <<'EOF'
+import socket
+try:
+    socket.create_connection(('httpbin.org', 80), 3)
+    print('httpbin.org: reachable')
+except Exception as e:
+    print('httpbin.org: NOT reachable (%s: %s)' % (type(e).__name__, e))
+EOF
+$ echo "=== requests/__init__.py imports ==="; grep -n "import" requests/__init__.py
+echo; echo "=== hooks.py ==="; cat requests/hooks.py
+echo; echo "=== TestSetup / TestBaseMixin ==="; sed -n 36,66p tests/test_requests.py
+echo; echo "=== baseline: existing hook tests (these use httpbin) ==="
+PYTHONPATH="$PWD" timeout 180 python -m pytest tests/test_requests.py -k "hook" -q -p no:cacheprovider 2>&1 | tail -15
+echo; echo "=== git status ==="; git status --short
+$ echo "=== docs: tail of hooks section ==="; sed -n 225,275p docs/user/advanced.rst
+echo; echo "=== CR counts (0 means LF-only) ==="; for f in tests/test_requests.py docs/user/advanced.rst requests/models.py; do printf '%s: ' "$f"; grep -c $'\r' "$f"; done
+echo; echo "=== anchor uniqueness ==="; grep -n "def test_session_persistent_cookies" tests/test_requests.py
+echo; echo "=== session vs request hook merging (no network, nothing is sent) ==="
+PYTHONPATH="$PWD" python -W ignore - <<'EOF'
+import requests
+def a(r): return r
+def b(r): return r
+def c(r): return r
+def show(r):
+    return dict((k, [f.__name__ for f in v]) for k, v in r.hooks.items() if v)
+s = requests.session(hooks={'response': [a, b], 'pre_send': c})
+print('session only      :', show(s.get('http://example.invalid/', return_response=False)))
+print('request overrides :', show(s.get('http://example.invalid/', return_response=False, hooks={'response': c})))
+print('request None      :', show(s.get('http://example.invalid/', return_response=False, hooks={'response': None})))
+print('request adds event:', show(s.get('http://example.invalid/', return_response=False, hooks={'post_request': [c, a]})))
+EOF
+$ python - <<'PYEOF'
+import io
+
+def patch(path, old, new):
+    src = io.open(path, encoding='utf-8', newline='').read()
+    assert '\r' not in src, '%s has CRLF line endings' % path
+    n = src.count(old)
+    assert n == 1, '%s: expected exactly one match, got %d' % (path, n)
+    io.open(path, 'w', encoding='utf-8', newline='').write(src.replace(old, new))
+    print('patched', path)
+
+# ---------------------------------------------------------------- tests
+patch('tests/test_requests.py',
+      'from requests.exceptions import InvalidURL\n',
+      'from requests.exceptions import InvalidURL\n'
+      'from requests.hooks import dispatch_hook\n')
+
+anchor = '    def test_session_persistent_cookies(self):\n'
+
+tests_block = '''    def test_hooks_lists_are_flattened(self):
+        """Test that a list of hooks for an event is registered as
+        individual hooks, not as a single (nested) list."""
+
+        calls = []
+
+        def hook_a(data):
+            calls.append('a')
+
+        def hook_b(data):
+            calls.append('b')
+
+        r = requests.Request('http://example.invalid/', hooks={
+            'response': [hook_a, hook_b],
+            'pre_send': (hook_b, hook_a),
+            'post_request': hook_a,
+        })
+
+        self.assertEqual(r.hooks['response'], [hook_a, hook_b])
+        self.assertEqual(r.hooks['pre_send'], [hook_b, hook_a])
+        self.assertEqual(r.hooks['post_request'], [hook_a])
+        self.assertEqual(r.hooks['pre_request'], [])
+
+        # They can be dispatched (this used to fail with "TypeError: 'list'
+        # object is not callable").
+        dispatch_hook('response', r.hooks, None)
+        self.assertEqual(calls, ['a', 'b'])
+
+        # The request has a list of its own, not the one it was given.
+        hooks = [hook_a]
+        r = requests.Request('http://example.invalid/',
+                             hooks={'response': hooks})
+        hooks.append(hook_b)
+        self.assertEqual(r.hooks['response'], [hook_a])
+
+    def test_register_hook_accepts_lists(self):
+        """Test that register_hook takes a callable or an iterable of
+        callables, and that each of them can be deregistered again."""
+
+        def hook_a(data):
+            return data
+
+        def hook_b(data):
+            return data
+
+        r = requests.Request('http://example.invalid/')
+        r.register_hook('response', hook_a)
+        r.register_hook('response', [hook_b, hook_a])
+        r.register_hook('response', (hook_b,))
+        self.assertEqual(r.hooks['response'],
+                         [hook_a, hook_b, hook_a, hook_b])
+
+        # Anything that can't be called is left out.
+        r = requests.Request('http://example.invalid/')
+        r.register_hook('response', [hook_a, None, hook_b])
+        self.assertEqual(r.hooks['response'], [hook_a, hook_b])
+
+        self.assertTrue(r.deregister_hook('response', hook_a))
+        self.assertEqual(r.hooks['response'], [hook_b])
+        self.assertFalse(r.deregister_hook('response', hook_a))
+
+    def test_session_hooks_lists(self):
+        """Test that lists of hooks given to a session end up as individual
+        hooks on its requests, and are not shared between them."""
+
+        def hook_a(data):
+            return data
+
+        def hook_b(data):
+            return data
+
+        def hook_c(data):
+            return data
+
+        s = requests.session(hooks={'response': [hook_a, hook_b]})
+
+        r1 = s.get('http://example.invalid/', return_response=False)
+        self.assertEqual(r1.hooks['response'], [hook_a, hook_b])
+
+        # Changing the hooks of one request leaves the session's alone.
+        r1.register_hook('response', hook_c)
+        r2 = s.get('http://example.invalid/', return_response=False)
+        self.assertEqual(r1.hooks['response'], [hook_a, hook_b, hook_c])
+        self.assertEqual(r2.hooks['response'], [hook_a, hook_b])
+        self.assertEqual(s.hooks['response'], [hook_a, hook_b])
+
+        # A list given for a single request works next to the session's.
+        r3 = s.get('http://example.invalid/', return_response=False,
+                   hooks={'pre_send': [hook_c, hook_a]})
+        self.assertEqual(r3.hooks['pre_send'], [hook_c, hook_a])
+        self.assertEqual(r3.hooks['response'], [hook_a, hook_b])
+
+    def test_multiple_response_hooks(self):
+        """Test that all the hooks in a list are called, in order, for
+        events other than ``args``, for requests and for sessions."""
+
+        calls = []
+
+        def hook_a(response):
+            calls.append('a')
+
+        def hook_b(response):
+            calls.append('b')
+
+        s = requests.session(hooks={'response': [hook_a, hook_b]})
+
+        for service in SERVICES:
+            url = service('get')
+
+            del calls[:]
+            get(url, hooks={'response': [hook_a, hook_b]})
+            self.assertEqual(calls, ['a', 'b'])
+
+            del calls[:]
+            s.get(url)
+            self.assertEqual(calls, ['a', 'b'])
+
+'''
+patch('tests/test_requests.py', anchor, tests_block + anchor)
+
+# ----------------------------------------------------------------- docs
+doc_anchor = '\n\nCustom Authentication\n---------------------\n'
+doc_block = '''
+To register several callbacks for the same event, pass a list of functions
+instead of a single function. They are called in the order given, and if one
+of them returns a value, that value is what the next one receives::
+
+    hooks = dict(args=[print_url, hack_headers])
+
+Lists of callbacks work for the ``hooks`` of a session as well.
+'''
+patch('docs/user/advanced.rst', doc_anchor, doc_block + doc_anchor)
+PYEOF
+echo "=================== git diff --stat ==================="
+git diff --stat
+echo "=================== docs diff ==================="
+git diff docs
+echo "=================== hook tests ==================="
+PYTHONPATH="$PWD" timeout 300 python -m pytest tests/test_requests.py -k "hook" -v -p no:cacheprovider 2>&1 | grep -v "^$" | tail -20
+echo "=================== git status ==================="
+git status --short
+$ rm -rf /tmp/repo_base && cp -r . /tmp/repo_base && cd /tmp/repo_base \
+&& git checkout -q -- requests/models.py \
+&& echo "=== copy's git status (models.py must NOT be listed) ===" && git status --short \
+&& echo && echo "=== which requests is imported in the copy ===" \
+&& PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" python -W ignore -c "import requests; print(requests.__file__)" \
+&& echo && echo "=== hook tests WITHOUT the fix (expect 4 new tests to fail) ===" \
+&& (PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" timeout 300 python -W ignore -m pytest tests/test_requests.py -k hook -q -p no:cacheprovider --tb=line -rf 2>&1 | tail -30)
+echo
+echo "=== real working tree is untouched (fix still present) ==="
+cd /testbed 2>/dev/null || cd -
+git -C /testbed diff --stat
+$ cd /testbed
+run() {
+  ( cd "$1" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$1" timeout 300 python -W ignore -m pytest tests/test_*.py -q -p no:cacheprovider --tb=no -rfE 2>&1 )
+}
+rm -rf /tmp/repo_base && cp -r /testbed /tmp/repo_base && git -C /tmp/repo_base checkout -q -- .
+echo "=== pristine copy: git status (must be clean apart from build/) ==="; git -C /tmp/repo_base status --short
+run /tmp/repo_base > /tmp/out_base.txt; echo "baseline exit: $?"
+run /testbed > /tmp/out_fix.txt; echo "with-fix exit: $?"
+for n in base fix; do
+  grep -E "^(FAILED|ERROR) " /tmp/out_$n.txt | sed -E 's/ - .*//' | sort > /tmp/ids_$n.txt
+  echo "--- $n: summary ---"; tail -1 /tmp/out_$n.txt
+  echo "--- $n: failing/erroring test ids ($(wc -l < /tmp/ids_$n.txt)) ---"; cat /tmp/ids_$n.txt
+done
+echo "=== newly failing with the fix (should be empty) ==="; comm -13 /tmp/ids_base.txt /tmp/ids_fix.txt
+echo "=== failing at baseline but not with the fix ==="; comm -23 /tmp/ids_base.txt /tmp/ids_fix.txt
+echo "=== real repo git status ==="; git -C /testbed status --short
+$ echo "=== lingering pytest/python processes ==="; ps aux | grep -E "[p]ytest|[r]epo_base" | head
+echo; echo "=== output files so far ==="; ls -la /tmp/out_*.txt /tmp/ids_*.txt 2>&1
+for f in /tmp/out_base.txt /tmp/out_fix.txt; do echo "--- tail of $f ---"; tail -5 "$f" 2>&1; done
+echo; echo "=== pytest-timeout available? ==="; python -m pip list 2>/dev/null | grep -i -E "timeout|xdist" || echo "(neither pytest-timeout nor xdist installed)"
+echo; echo "=== real repo git status ==="; git -C /testbed status --short
+echo; echo "=== test files and test counts ==="; for f in /testbed/tests/test_*.py; do printf '%s: ' "$(basename $f)"; grep -c "    def test_" "$f"; done
+$ cd /testbed
+echo "=== stop leftovers of the timed-out run ==="
+if ps -p 141 -o args= 2>/dev/null | grep -q '/tmp/repo_base'; then kill 141 && echo "killed parent shell 141"; else echo "parent shell 141 already gone"; fi
+pkill -f 'pytest tests/test_[c]ookies' && echo "killed leftover pytest processes" || echo "no leftover pytest processes"
+sleep 1
+pgrep -af 'pytest tests/test_[c]ookies' || echo "(none left)"
+
+echo; echo "=== fresh pristine copy of HEAD ==="
+rm -rf /tmp/base_tree /tmp/out_base.txt /tmp/out_fix.txt /tmp/exit_base /tmp/exit_fix /tmp/ids_base.txt /tmp/ids_fix.txt
+cp -r /testbed /tmp/base_tree && git -C /tmp/base_tree checkout -q -- .
+echo "status of copy (only build/ expected):"; git -C /tmp/base_tree status --short
+echo "register_hook in copy (expect the old one-liner):"; grep -n -A3 "def register_hook" /tmp/base_tree/requests/models.py
+
+echo; echo "=== launch both full suites in the background ==="
+launch() {
+  setsid nohup bash -c 'cd "$1" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$1" timeout 900 python -W ignore -m pytest tests/test_*.py -v -p no:cacheprovider --tb=no -rfE > "/tmp/out_$2.txt" 2>&1; echo $? > "/tmp/exit_$2"' _ "$1" "$2" > /dev/null 2>&1 < /dev/null &
+}
+launch /tmp/base_tree base
+launch /testbed fix
+sleep 20
+for n in base fix; do
+  echo "--- $n: $(grep -c -E ' (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt) tests finished so far ---"
+  tail -2 /tmp/out_$n.txt | cut -c1-160
+done
+$ sleep 45
+for n in base fix; do
+  echo "--- $n: $(grep -c -E ' (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt) tests finished so far; exit file: $(cat /tmp/exit_$n 2>/dev/null || echo 'not yet') ---"
+  tail -2 /tmp/out_$n.txt | cut -c1-160
+done
+echo; pgrep -af 'pytest tests/test_[c]ookies' | cut -c1-120 || echo "(no pytest running)"
+$ cd /testbed
+echo "=== tests in the last two files (file order) ==="
+grep -n "    def test_" tests/test_requests_ext.py tests/test_requests_https.py
+echo; echo "=== the test both runs are stuck on ==="
+grep -n "def test_ssl_hostname_not_ok" -B2 -A12 tests/test_requests_ext.py
+
+echo; echo "=== stop the stuck runs (keep their partial output) ==="
+pkill -f 'pytest tests/test_[c]ookies' && echo "killed" || echo "nothing to kill"
+sleep 2
+mv /tmp/out_base.txt /tmp/out_base_first_pass.txt; mv /tmp/out_fix.txt /tmp/out_fix_first_pass.txt
+rm -f /tmp/exit_base /tmp/exit_fix
+pgrep -af 'pytest tests/test_[c]ookies' || echo "(none left)"
+
+echo; echo "=== relaunch both with only that test deselected ==="
+launch() {
+  setsid nohup bash -c 'cd "$1" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$1" timeout 600 python -W ignore -m pytest tests/test_*.py -v -p no:cacheprovider --tb=no -rfE --deselect tests/test_requests_ext.py::RequestsTestSuite::test_ssl_hostname_not_ok > "/tmp/out_$2.txt" 2>&1; echo $? > "/tmp/exit_$2"' _ "$1" "$2" > /dev/null 2>&1 < /dev/null &
+}
+launch /tmp/base_tree base
+launch /testbed fix
+sleep 30
+for n in base fix; do
+  echo "--- $n: $(grep -c -E ' (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt) tests finished; exit file: $(cat /tmp/exit_$n 2>/dev/null || echo 'not yet') ---"
+  tail -2 /tmp/out_$n.txt | cut -c1-160
+done
+$ cd /testbed
+echo "=== early comparison of the tests both runs have finished so far ==="
+for n in base fix; do
+  grep -E '^tests/.* (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt | sed -E 's/ +\[ *[0-9]+%\]$//' | sort > /tmp/res_early_$n.txt
+done
+echo "finished: base=$(wc -l < /tmp/res_early_base.txt) fix=$(wc -l < /tmp/res_early_fix.txt)"
+echo "--- only in base (expect none) ---"; comm -23 /tmp/res_early_base.txt /tmp/res_early_fix.txt
+echo "--- only in fix (expect the 4 new tests, all PASSED) ---"; comm -13 /tmp/res_early_base.txt /tmp/res_early_fix.txt
+echo "--- FAILED in base: $(grep -c ' FAILED$' /tmp/res_early_base.txt), FAILED in fix: $(grep -c ' FAILED$' /tmp/res_early_fix.txt) ---"
+
+echo; echo "=== stop the runs stuck on test_ssl_hostname_session_not_ok ==="
+pkill -f 'pytest tests/test_[c]ookies' && echo "killed" || echo "nothing to kill"
+sleep 3
+pgrep -af 'pytest tests/test_[c]ookies' || echo "(none left)"
+mv /tmp/out_base.txt /tmp/out_base_second_pass.txt; mv /tmp/out_fix.txt /tmp/out_fix_second_pass.txt
+rm -f /tmp/exit_base /tmp/exit_fix
+
+echo; echo "=== per-test timeout plugin (lives in /tmp, outside the repo) ==="
+mkdir -p /tmp/plug
+cat > /tmp/plug/tmo_plugin.py <<'EOF'
+import signal
+import pytest
+
+LIMIT = 15
+
+
+class PerTestTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise PerTestTimeout('test took longer than %d seconds' % LIMIT)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    # Fire after LIMIT seconds, then every 5 seconds in case code under test swallows the exception.
+    signal.setitimer(signal.ITIMER_REAL, LIMIT, 5)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+EOF
+PYTHONPATH=/tmp/plug python -c "import tmo_plugin; print('plugin imports fine, LIMIT =', tmo_plugin.LIMIT)"
+
+echo; echo "=== relaunch both full suites with the per-test timeout ==="
+launch() {
+  setsid nohup bash -c 'cd "$1" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$1:/tmp/plug" timeout 600 python -W ignore -m pytest tests/test_*.py -v -p tmo_plugin -p no:cacheprovider --tb=no -rfE > "/tmp/out_$2.txt" 2>&1; echo $? > "/tmp/exit_$2"' _ "$1" "$2" > /dev/null 2>&1 < /dev/null &
+}
+launch /tmp/base_tree base
+launch /testbed fix
+sleep 40
+for n in base fix; do
+  echo "--- $n: $(grep -c -E ' (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt) tests finished; exit file: $(cat /tmp/exit_$n 2>/dev/null || echo 'not yet') ---"
+  tail -2 /tmp/out_$n.txt | cut -c1-160
+done
+$ cd /testbed
+echo "=== exit codes (1 = some tests failed): base=$(cat /tmp/exit_base 2>/dev/null) fix=$(cat /tmp/exit_fix 2>/dev/null) ==="
+pgrep -af 'pytest tests/test_[c]ookies' || echo "(no pytest still running)"
+for n in base fix; do
+  grep -E '^tests/.* (PASSED|FAILED|ERROR|SKIPPED)' /tmp/out_$n.txt | sed -E 's/ +\[ *[0-9]+%\]$//' | LC_ALL=C sort > /tmp/res_$n.txt
+  echo "$n: $(wc -l < /tmp/res_$n.txt) results, $(grep -c ' PASSED$' /tmp/res_$n.txt) passed, $(grep -c ' FAILED$' /tmp/res_$n.txt) failed"
+done
+echo; echo "=== in both trees, result differs: id  base  fix ==="
+LC_ALL=C join -j1 /tmp/res_base.txt /tmp/res_fix.txt | awk '$2 != $3' | sed 's#^tests/##'
+echo; echo "=== only in fix tree (expect my 4 new tests) ==="
+LC_ALL=C join -v2 -j1 /tmp/res_base.txt /tmp/res_fix.txt | sed 's#^tests/##'
+echo; echo "=== only in base tree (expect none) ==="
+LC_ALL=C join -v1 -j1 /tmp/res_base.txt /tmp/res_fix.txt | sed 's#^tests/##'
+echo; echo "=== how does httpbin.org resolve here? ==="
+getent hosts httpbin.org || echo "(does not resolve)"
+grep -i httpbin /etc/hosts || echo "(no httpbin entry in /etc/hosts)"
+env | grep -i httpbin || echo "(HTTPBIN_URL not set in the environment)"
+echo; echo "=== what answers on httpbin.org? (2 probes) ==="
+for i in 1 2; do
+  echo "--- probe $i ---"
+  curl -sS -m 8 -i http://httpbin.org/headers 2>&1 | head -14
+done

@@ -1,0 +1,113 @@
+diff --git a/doc/whatsnew/2/2.14/full.rst b/doc/whatsnew/2/2.14/full.rst
+index 77d8bf9d..67bd3796 100755
+--- a/doc/whatsnew/2/2.14/full.rst
++++ b/doc/whatsnew/2/2.14/full.rst
+@@ -5,6 +5,13 @@ What's New in Pylint 2.14.4?
+ ----------------------------
+ Release date: TBA
+ 
++* Fixed an issue where ``ignore-paths`` patterns were not applied to some files or
++  directories discovered by ``--recursive=y``, e.g. when scanning ``.`` with
++  ``--ignore-paths=^path/to/dir``, or on Windows. Paths are now normalized before
++  being matched.
++
++  Closes #6964
++
+ * Fixed regression that didn't allow quoted ``init-hooks`` in option files.
+ 
+   Closes #7006
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..289e1afc 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -52,6 +52,7 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
++    element = os.path.normpath(element)
+     basename = os.path.basename(element)
+     return (
+         basename in ignore_list
+diff --git a/tests/lint/unittest_expand_modules.py b/tests/lint/unittest_expand_modules.py
+index 15f72d0c..558e890c 100755
+--- a/tests/lint/unittest_expand_modules.py
++++ b/tests/lint/unittest_expand_modules.py
+@@ -4,13 +4,19 @@
+ 
+ from __future__ import annotations
+ 
++import os
+ import re
+ from pathlib import Path
+ 
+ import pytest
+ 
+ from pylint.checkers import BaseChecker
+-from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules
++from pylint.config.argument import _regexp_paths_csv_transfomer
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+ from pylint.testutils import CheckerTestCase, set_config
+ from pylint.typing import MessageDefinitionTuple
+ 
+@@ -26,6 +32,20 @@ def test__is_in_ignore_list_re_match() -> None:
+     assert _is_in_ignore_list_re("src/tests/whatever.xml", patterns)
+ 
+ 
++def test__is_ignored_file_normalizes_path() -> None:
++    """Paths are normalized before being matched against ignore-paths.
++
++    Recursive runs build paths with os.walk() and os.path.join(), giving e.g.
++    './src/gen/about.py', or on Windows the mixed-separator 'src/gen\\about.py'.
++    """
++    ignore_paths = _regexp_paths_csv_transfomer("^src/gen/.*$")
++    ignored = (os.path.join(".", "src", "gen", "about.py"), f"src/gen{os.sep}about.py")
++    for path in ignored:
++        assert _is_ignored_file(path, [], [], ignore_paths)
++    not_ignored = os.path.join(".", "src", "about.py")
++    assert not _is_ignored_file(not_ignored, [], [], ignore_paths)
++
++
+ TEST_DIRECTORY = Path(__file__).parent.parent
+ INIT_PATH = str(TEST_DIRECTORY / "lint/__init__.py")
+ EXPAND_MODULES = str(TEST_DIRECTORY / "lint/unittest_expand_modules.py")
+diff --git a/tests/test_self.py b/tests/test_self.py
+index c18a04ae..d583bc8c 100755
+--- a/tests/test_self.py
++++ b/tests/test_self.py
+@@ -1314,6 +1314,32 @@ class TestRunTC:
+             code=0,
+         )
+ 
++    def test_ignore_path_recursive_current_dir(self) -> None:
++        """Tests that paths are normalized before checking if they are ignored.
++
++        A recursive run over '.' yields paths such as
++        './ignored_subdirectory/failing.py', which must still match an anchored
++        ``ignore-paths`` pattern.
++        """
++        with _test_sys_path():
++            # pytest is including directory HERE/regrtest_data to sys.path which causes
++            # astroid to believe that directory is a package.
++            sys.path = [
++                path
++                for path in sys.path
++                if not os.path.basename(path) == "regrtest_data"
++            ]
++            with _test_cwd():
++                os.chdir(join(HERE, "regrtest_data", "directory"))
++                self._runtest(
++                    [
++                        ".",
++                        "--recursive=y",
++                        "--ignore-paths=^ignored_subdirectory/.*",
++                    ],
++                    code=0,
++                )
++
+     def test_recursive_current_dir(self):
+         with _test_sys_path():
+             # pytest is including directory HERE/regrtest_data to sys.path which causes

@@ -1,0 +1,124 @@
+$ ls -la && git log --oneline -3 && git status
+$ grep -n "recursive\|_discover_files\|ignore_paths\|_ignore_paths\|ignore_patterns\|black_list" pylint/lint/pylinter.py pylint/lint/expand_modules.py pylint/lint/base_options.py pylint/lint/utils.py pylint/lint/run.py pylint/lint/parallel.py 2>/dev/null
+$ sed -n 570,660p pylint/lint/pylinter.py
+$ cat pylint/lint/expand_modules.py && grep -n "_is_ignored_file\|_is_in_ignore_list_re\|^from\|^import" pylint/lint/pylinter.py | head -80
+$ REPO=$(pwd); export PYTHONPATH=$REPO; rm -rf /tmp/repro; mkdir -p /tmp/repro/src/gen; cd /tmp/repro; printf 'import os\n' > src/ok.py; printf 'import os\n' > src/gen/bad.py; python -m pylint --version; for target in "src/" "src" "./src" "."; do echo "=== pylint --recursive=y $target ==="; python -m pylint --recursive=y --disable=all --enable=unused-import --ignore-paths='^src/gen/.*$' $target; done
+$ grep -rn "ignore_paths\|ignore-paths\|_regexp_paths_csv\|_is_ignored_file\|_is_in_ignore_list_re" pylint tests --include=*.py | grep -v "^tests/functional"; echo ---; ls tests/regrtest_data/directory 2>/dev/null; echo ---; ls doc/whatsnew | head -30
+$ sed -n 105,125p pylint/config/argument.py; echo "--- pylinter 765-790"; sed -n 765,790p pylint/lint/pylinter.py; echo "--- pylinter 1005-1020"; sed -n 1005,1020p pylint/lint/pylinter.py; echo "--- regrtest_data/directory"; find tests/regrtest_data/directory -type f | sort; echo "--- test_self 1285-1330"; sed -n 1285,1330p tests/test_self.py; echo "--- whatsnew"; ls doc/whatsnew/2 doc/whatsnew/2/*
+$ REPO=$(pwd)
+echo "=== 1. Windows simulation on UNFIXED code (ntpath stands in for Windows os.path) ==="
+PYTHONPATH=$REPO python - <<'EOF'
+import ntpath, os
+from pylint.config.argument import _regexp_paths_csv_transfomer
+from pylint.lint import expand_modules as em
+
+pats = _regexp_paths_csv_transfomer("^src/gen/.*$")
+print("compiled pattern:", [p.pattern for p in pats])
+real_path = os.path
+os.path = ntpath
+try:
+    for el in ("src/gen\\about.py", "src\\gen\\about.py", "src/gen/about.py", ".\\src\\gen\\about.py", "src/ok.py"):
+        print(f"{el!r:26} ignored={em._is_ignored_file(el, [], [], pats)}")
+finally:
+    os.path = real_path
+EOF
+
+echo; echo "=== 2. changelog conventions ==="
+sed -n 1,40p doc/whatsnew/2/2.15/index.rst
+ls doc/whatsnew/fragments 2>&1 | head -5
+git log -8 --format='--- %h %s' --name-only -- doc/whatsnew | head -40
+grep -rIl "towncrier" . --include=*.toml --include=*.cfg --include=*.ini --include=*.yaml --include=*.rst 2>/dev/null | head
+
+echo; echo "=== 3. test_self helpers/imports ==="
+grep -n "def _test_cwd\|def _test_sys_path\|^from\|^import" tests/test_self.py | head -60
+sed -n 1316,1350p tests/test_self.py
+echo "--- failing.py"; cat tests/regrtest_data/directory/ignored_subdirectory/failing.py
+
+echo; echo "=== 4. unittest_expand_modules head ==="
+sed -n 1,40p tests/lint/unittest_expand_modules.py
+$ REPO=$(pwd)
+python - <<'EOF'
+import pathlib
+p = pathlib.Path("pylint/lint/expand_modules.py")
+s = p.read_text()
+old = """    ignore_list_paths_re: list[Pattern[str]],
+) -> bool:
+    basename = os.path.basename(element)
+"""
+new = """    ignore_list_paths_re: list[Pattern[str]],
+) -> bool:
+    # Normalize the path so that ``ignore-paths`` patterns match no matter how the
+    # path was spelled by the user or assembled by ``os.walk``/``os.path.join``,
+    # e.g. with a leading ``./`` or, on Windows, with mixed forward/back slashes.
+    element = os.path.normpath(element)
+    basename = os.path.basename(element)
+"""
+assert s.count(old) == 1, s.count(old)
+p.write_text(s.replace(old, new))
+EOF
+git diff
+
+echo; echo "=== Linux CLI repro after fix ==="
+export PYTHONPATH=$REPO
+rm -rf /tmp/repro; mkdir -p /tmp/repro/src/gen
+printf 'import os\n' > /tmp/repro/src/ok.py
+printf 'import os\n' > /tmp/repro/src/gen/bad.py
+cd /tmp/repro
+for target in "src/" "src" "./src" "./src/" "." "src//" "./src/../src"; do
+  out=$(python -m pylint --recursive=y --disable=all --enable=unused-import --ignore-paths='^src/gen/.*$' $target 2>&1)
+  printf '%-14s gen/bad.py: %-12s ok.py: %s\n' "$target" \
+    "$(grep -q 'gen/bad.py' <<<"$out" && echo 'NOT IGNORED' || echo 'ignored')" \
+    "$(grep -q 'src/ok.py' <<<"$out" && echo 'linted' || echo 'MISSING')"
+done
+
+echo; echo "=== Windows simulation after fix (ntpath stands in for Windows os.path) ==="
+python - <<'EOF'
+import ntpath, os
+from pylint.config.argument import _regexp_paths_csv_transfomer
+from pylint.lint import expand_modules as em
+
+pats = _regexp_paths_csv_transfomer("^src/gen/.*$")
+real_path = os.path
+os.path = ntpath
+try:
+    for el in ("src/gen\\about.py", "src\\gen\\about.py", "src/gen/about.py", ".\\src\\gen\\about.py", "src/ok.py", "src/generated/x.py"):
+        print(f"{el!r:28} ignored={em._is_ignored_file(el, [], [], pats)}")
+finally:
+    os.path = real_path
+EOF
+$ echo "=== changelog: rest of doc/whatsnew/2/2.15/index.rst ==="; sed -n 40,200p doc/whatsnew/2/2.15/index.rst
+echo; echo "=== tests/test_self.py: helpers (lines 42-125) ==="; sed -n 42,125p tests/test_self.py
+echo; echo "=== tests/test_self.py: _runtest ==="; grep -n "def _runtest" -A 28 tests/test_self.py
+echo; echo "=== tests/lint/unittest_lint.py: recursive ignore tests ==="; grep -n "ignore_parameter" tests/lint/unittest_lint.py | head -3; sed -n 866,905p tests/lint/unittest_lint.py
+echo; echo "=== tooling / CI ==="; python -m pytest --version 2>&1 | head -1; python -c "import xdist; print('xdist', xdist.__version__)" 2>&1 | tail -1; grep -n -i "windows" .github/workflows/*.y*ml | head -5
+$ REPO=$(pwd)
+echo "=== baseline copy of HEAD (working tree untouched) ==="
+rm -rf /tmp/baseline && mkdir -p /tmp/baseline && git archive HEAD pylint | tar -x -C /tmp/baseline
+PYTHONPATH=/tmp/baseline python -c "import pylint.lint.expand_modules as m; print('baseline uses:', m.__file__)"
+PYTHONPATH=$REPO python -c "import pylint.lint.expand_modules as m; print('patched  uses:', m.__file__)"
+
+rm -rf /tmp/repro2 && mkdir -p /tmp/repro2/venv/lib /tmp/repro2/pkg/build /tmp/repro2/src/gen && cd /tmp/repro2
+for f in top.py venv/lib/x.py pkg/build/y.py src/gen/z.py; do printf 'import os\n' > $f; done
+run() { # $1 = PYTHONPATH to use, rest = pylint args; prints the files that were linted
+  local pp=$1; shift
+  PYTHONPATH=$pp python -m pylint --recursive=y --disable=all --enable=unused-import "$@" 2>&1 \
+    | grep W0611 | sed -E 's/:[0-9]+:[0-9]+:.*//' | sort -u | tr '\n' ' '; echo
+}
+PATS='.*/venv/.*,.*/build/.*,^src/gen/.*$'
+echo; echo "=== files LINTED with --ignore-paths='$PATS' (ideal: only top.py) ==="
+echo -n "baseline (HEAD),   target '.' : "; run /tmp/baseline --ignore-paths="$PATS" .
+echo -n "current patch,     target '.' : "; run $REPO --ignore-paths="$PATS" .
+echo -n "baseline (HEAD),   target 'venv' only pattern '.*/venv/.*' : "; run /tmp/baseline --ignore-paths='.*/venv/.*' venv
+echo -n "current patch,     target 'venv' only pattern '.*/venv/.*' : "; run $REPO --ignore-paths='.*/venv/.*' venv
+cd $REPO
+
+echo; echo "=== docs / repo config mentioning ignore-paths ==="
+grep -rn "ignore-paths\|ignore_paths" doc --include=*.rst --include=*.txt | head -12
+grep -n "ignore-paths" pylintrc setup.cfg tox.ini .pre-commit-config.yaml 2>/dev/null
+
+echo; echo "=== tests/lint/unittest_lint.py scaffolding ==="
+sed -n 1,20p tests/lint/unittest_lint.py | grep -n "import" ; grep -n "^from\|^import" tests/lint/unittest_lint.py | sed -n 1,60p | grep -i "run\|testutils\|os\|pytest\|chdir\|Path"
+grep -n "REGRTEST_DATA_DIR =\|def tempdir\|def fake_path\|chdir\|tmp_path" tests/lint/unittest_lint.py | head -12
+sed -n 905,925p tests/lint/unittest_lint.py
+echo; nproc
+stopped: no command in 3 consecutive replies

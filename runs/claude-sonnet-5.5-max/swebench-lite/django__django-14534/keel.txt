@@ -1,0 +1,174 @@
+$ grep -n "class BoundWidget" -A 40 django/forms/boundfield.py
+$ grep -n "def create_option" -A 22 django/forms/widgets.py; grep -n "def id_for_label" -B2 -A 10 django/forms/widgets.py | sed -n 1,80p</parameter>
+$ grep -n "def create_option" -A 22 django/forms/widgets.py; grep -n "def id_for_label" -B2 -A 10 django/forms/widgets.py | sed -n 1,80p
+$ sed -i "s/return 'id_%s_%s' % (self.data\['name'\], self.data\['index'\])/return self.data['attrs'].get('id')/" django/forms/boundfield.py && git diff && echo ---- && grep -rn "id_for_label" tests/forms_tests tests/model_forms tests/admin_widgets tests/template_tests docs 2>/dev/null | grep -v "\.po:" | head -60
+$ PY=$(command -v python || command -v python3); $PY - <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+
+class F(forms.Form):
+    f = forms.MultipleChoiceField(choices=[('a', 'A'), ('b', 'B')], widget=forms.CheckboxSelectMultiple)
+
+class G(forms.Form):
+    f = forms.MultipleChoiceField(choices=[('a', 'A'), ('b', 'B')],
+                                  widget=forms.CheckboxSelectMultiple(attrs={'id': 'custom'}))
+
+class R(forms.Form):
+    f = forms.ChoiceField(choices=[('a', 'A'), ('b', 'B')], widget=forms.RadioSelect)
+
+for auto_id in ('id_%s', 'prefix_%s', False):
+    print('Checkbox auto_id=%r ->' % (auto_id,), [w.id_for_label for w in F(auto_id=auto_id)['f'].subwidgets])
+    print('Radio    auto_id=%r ->' % (auto_id,), [w.id_for_label for w in R(auto_id=auto_id)['f'].subwidgets])
+print('Checkbox custom widget id ->', [w.id_for_label for w in G()['f'].subwidgets])
+EOF
+echo "=== running tests ==="
+$PY tests/runtests.py forms_tests model_forms admin_widgets --parallel 1 2>&1 | tail -15
+$ sed -n 675,735p tests/forms_tests/tests/test_forms.py; echo ----; grep -rn "id_for_label" django --include=*.py --include=*.html | grep -v "/locale/"
+$ sed -n 1,30p tests/forms_tests/tests/test_forms.py; echo ----; sed -n 3184,3206p tests/forms_tests/tests/test_forms.py
+$ python - <<'EOF'
+path = 'tests/forms_tests/tests/test_forms.py'
+with open(path) as f:
+    src = f.read()
+
+# 1. Plain <select> options have no id attribute, so there is no ID for a label.
+old = """        fields = list(BeatleForm(auto_id=False)['name'])
+        self.assertEqual(len(fields), 4)
+
+        self.assertEqual(fields[0].id_for_label, 'id_name_0')
+        self.assertEqual(fields[0].choice_label, 'John')
+        self.assertHTMLEqual(fields[0].tag(), '<option value="john">John</option>')
+"""
+new = old.replace(
+    "self.assertEqual(fields[0].id_for_label, 'id_name_0')",
+    "self.assertIsNone(fields[0].id_for_label)",
+)
+assert src.count(old) == 1, src.count(old)
+src = src.replace(old, new)
+
+# 2. Regression tests for BoundWidget.id_for_label.
+anchor = "    def test_boundfield_widget_type(self):\n"
+assert src.count(anchor) == 1, src.count(anchor)
+tests = '''    def test_boundfield_subwidget_id_for_label(self):
+        """
+        If auto_id is provided when initializing the form, the generated ID in
+        subwidgets must reflect that prefix.
+        """
+        class SomeForm(Form):
+            field = MultipleChoiceField(
+                required=False,
+                widget=CheckboxSelectMultiple,
+                choices=[('a', 'A'), ('b', 'B')],
+            )
+
+        subwidgets = SomeForm(auto_id='prefix_%s')['field'].subwidgets
+        self.assertEqual(subwidgets[0].id_for_label, 'prefix_field_0')
+        self.assertEqual(subwidgets[1].id_for_label, 'prefix_field_1')
+        # The ID used for the label is the one rendered on the <input>.
+        self.assertHTMLEqual(
+            subwidgets[0].tag(),
+            '<input type="checkbox" name="field" value="a" id="prefix_field_0">',
+        )
+        self.assertHTMLEqual(
+            subwidgets[1].tag(),
+            '<input type="checkbox" name="field" value="b" id="prefix_field_1">',
+        )
+
+    def test_boundfield_subwidget_id_for_label_override_by_attrs(self):
+        """
+        If an id is provided in `Widget.attrs`, it overrides the generated ID
+        in subwidgets as well.
+        """
+        class SomeForm(Form):
+            field = MultipleChoiceField(
+                widget=CheckboxSelectMultiple(attrs={'id': 'myCustomID'}),
+                choices=[('a', 'A'), ('b', 'B')],
+            )
+
+        subwidgets = SomeForm()['field'].subwidgets
+        self.assertEqual(subwidgets[0].id_for_label, 'myCustomID_0')
+        self.assertEqual(subwidgets[1].id_for_label, 'myCustomID_1')
+
+    def test_boundfield_subwidget_id_for_label_no_auto_id(self):
+        """
+        Subwidgets have no ID for their labels if the form doesn't generate IDs.
+        """
+        class SomeForm(Form):
+            field = MultipleChoiceField(
+                widget=CheckboxSelectMultiple,
+                choices=[('a', 'A'), ('b', 'B')],
+            )
+
+        subwidgets = SomeForm(auto_id=False)['field'].subwidgets
+        self.assertIsNone(subwidgets[0].id_for_label)
+        self.assertIsNone(subwidgets[1].id_for_label)
+
+'''
+src = src.replace(anchor, tests + anchor)
+
+with open(path, 'w') as f:
+    f.write(src)
+EOF
+git diff --stat; echo ----; git diff tests/; echo ----; grep -n "^class " tests/forms_tests/tests/test_forms.py
+$ PY=$(command -v python || command -v python3); echo "=== new/changed tests ==="; $PY tests/runtests.py forms_tests.tests.test_forms.FormsTestCase.test_boundfield_subwidget_id_for_label forms_tests.tests.test_forms.FormsTestCase.test_boundfield_subwidget_id_for_label_override_by_attrs forms_tests.tests.test_forms.FormsTestCase.test_boundfield_subwidget_id_for_label_no_auto_id forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_select forms_tests.tests.test_forms.FormsTestCase.test_form_with_iterable_boundfield_id --parallel 1 -v 2 2>&1 | grep -E "^(test_|Ran|OK|FAILED|ERROR|FAIL)" ; echo; echo "=== broader suites ==="; $PY tests/runtests.py forms_tests model_forms admin_widgets admin_views auth_tests template_tests model_formsets model_formsets_regress inline_formsets generic_inline_admin i18n view_tests --parallel 4 2>&1 | tail -15
+$ PY=$(command -v python || command -v python3); $PY tests/runtests.py forms_tests model_forms admin_widgets admin_views auth_tests template_tests model_formsets model_formsets_regress inline_formsets generic_inline_admin i18n view_tests --parallel 4 2>&1 | grep -vE "^(Destroying|Creating|Cloning)" | awk '/^(ERROR|FAIL):/{p=1} p' | head -80
+$ PY=$(command -v python || command -v python3)
+echo "stashes before: $(git stash list | wc -l); running as uid=$(id -u)"
+if git stash; then
+  echo "=== pristine code (my changes stashed) ==="
+  git diff --stat | wc -l
+  $PY tests/runtests.py i18n.tests.WatchForTranslationChangesTests.test_i18n_app_dirs template_tests.test_loaders.FileSystemLoaderTests.test_permissions_error --parallel 1 2>&1 | grep -vE "^(Destroying|Creating|Cloning)" | grep -E "^(ERROR|FAIL|Ran|OK|FAILED|ModuleNotFound|AssertionError)"
+  git stash pop
+fi
+echo "=== state after restore ==="
+git status --short
+echo "stashes after: $(git stash list | wc -l)"
+$ PY=$(command -v python || command -v python3)
+echo "=== id_for_label / subwidgets users outside forms_tests ==="
+grep -rn "id_for_label\|\.subwidgets" tests django --include=*.py --include=*.html | grep -v "^tests/forms_tests/" | grep -v "/locale/"
+echo
+echo "=== docs describing subwidget ids ==="
+grep -n "id_for_label" -B3 -A3 docs/ref/forms/widgets.txt | sed -n 1,60p
+echo
+echo "=== flake8 on changed files ==="
+if $PY -m flake8 --version >/dev/null 2>&1; then
+  $PY -m flake8 django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "flake8: clean"
+else
+  echo "flake8 not installed; checking max line length (119) manually"
+  git diff -U0 | grep '^+' | grep -v '^+++' | awk '{ if (length($0)-1 > 119) print "TOO LONG: " $0 }'
+  echo "line-length check done"
+fi
+echo
+git status --short
+$ PY=$(command -v python || command -v python3)
+git diff django/
+echo "--- mode/create/delete changes (expect none):"; git diff --summary
+echo "--- final test run:"
+$PY tests/runtests.py forms_tests model_forms admin_widgets --parallel 1 2>&1 | grep -vE "^(Destroying|Creating|Cloning)" | tail -5
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`BoundWidget.id_for_label` now returns the id that `ChoiceWidget.create_option` already computed, so a custom `auto_id` is respected for `CheckboxSelectMultiple` and `RadioSelect` subwidgets.
+
+**The fix** is in `django/forms/boundfield.py`:
+```python
+# before
+return 'id_%s_%s' % (self.data['name'], self.data['index'])
+# after
+return self.data['attrs'].get('id')
+```
+I used `.get('id')` rather than `['id']` because the id can be absent, for example with `auto_id=False`. In that case `id_for_label` returns `None`, which matches the `Widget.id_for_label` contract of returning `None` when no ID is available.
+
+**Behaviour now**
+- `auto_id='prefix_%s'` gives `prefix_f_0`, `prefix_f_1`.
+- A widget-level `attrs={'id': 'custom'}` gives `custom_0`, `custom_1`.
+- `auto_id=False` gives `None`.
+
+**Tests** are in `tests/forms_tests/tests/test_forms.py`:
+- I changed `test_iterable_boundfield_select` to expect `None`. Plain `<select>` options have no `id` attribute, so the old `'id_name_0'` pointed at nothing in the rendered HTML.
+- I added three regression tests: a custom `auto_id` prefix on `CheckboxSelectMultiple` (also checking it matches the rendered `<input id>`), a widget-level `id` override, and `auto_id=False`.
+
+**Verification**
+- `forms_tests`, `model_forms` and `admin_widgets` pass (959 tests, OK).
+- A broader run (admin views, auth, templates, formsets, i18n and others) had two failures, `i18n...test_i18n_app_dirs` and `template_tests...test_permissions_error`. I stashed my changes and both fail on the untouched code too. One is a `sys.path` issue and the other is caused by running as root, so they are unrelated to this change.
+- No code, templates or docs outside `forms_tests` relied on the old id format.

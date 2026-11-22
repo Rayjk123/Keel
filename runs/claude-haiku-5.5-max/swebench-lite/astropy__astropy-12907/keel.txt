@@ -1,0 +1,75 @@
+$ pwd && ls -la && git -C . status 2>/dev/null | head -5; find . -name "separable.py" -path "*modeling*" -not -path "*/node_modules/*" 2>/dev/null
+$ cd /testbed && cat -n astropy/modeling/separable.py
+$ cd /testbed && python -c "import pathlib; p = pathlib.Path('astropy/modeling/separable.py'); s = p.read_text(); old = 'cright[-right.shape[0]:, -right.shape[1]:] = 1'; assert s.count(old) == 1, s.count(old); p.write_text(s.replace(old, 'cright[-right.shape[0]:, -right.shape[1]:] = right'))" && git diff && python -c "from astropy.modeling import models as m; from astropy.modeling.separable import separability_matrix as s; cm = m.Linear1D(10) & m.Linear1D(5); print(s(m.Pix2Sky_TAN() & cm)); print(s(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))); print(s(cm & m.Pix2Sky_TAN())); print(s(m.Rotation2D(2) & (m.Shift(1) & m.Shift(2))))"
+$ cd /testbed && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -15; python -m pytest astropy/modeling -q -p no:cacheprovider 2>&1 | tail -25
+$ cd /testbed && cp astropy/modeling/separable.py /tmp/separable_fixed.py && git checkout -- astropy/modeling/separable.py && python -m pytest astropy/modeling -q -p no:cacheprovider -rfE 2>&1 | grep -E '^(FAILED|ERROR) ' | sed 's/ - .*//' | sort > /tmp/base_fail.txt; cp /tmp/separable_fixed.py astropy/modeling/separable.py && python -m pytest astropy/modeling -q -p no:cacheprovider -rfE 2>&1 | grep -E '^(FAILED|ERROR) ' | sed 's/ - .*//' | sort > /tmp/fix_fail.txt; echo "baseline=$(wc -l < /tmp/base_fail.txt) fixed=$(wc -l < /tmp/fix_fail.txt)"; diff /tmp/base_fail.txt /tmp/fix_fail.txt && echo IDENTICAL_FAILURE_SETS; awk -F'::' '{print $1}' /tmp/fix_fail.txt | sort | uniq -c; git status --short; git diff --stat
+$ cd /testbed && python - <<'PY'
+from pathlib import Path
+
+path = Path('astropy/modeling/tests/test_separable.py')
+text = path.read_text()
+if not text.endswith('\n'):
+    text += '\n'
+text += '''
+
+def test_separability_nested_compound_models():
+    """
+    Regression test: a nested ``&`` compound model must keep the
+    separability of its inner components instead of being treated as
+    fully non-separable.
+    """
+    import numpy as np
+    from astropy.modeling import models as m
+    from astropy.modeling.separable import separability_matrix
+
+    cm = m.Linear1D(10) & m.Linear1D(5)
+    expected = np.array([[True, True, False, False],
+                         [True, True, False, False],
+                         [False, False, True, False],
+                         [False, False, False, True]])
+    assert np.array_equal(separability_matrix(m.Pix2Sky_TAN() & cm), expected)
+    assert np.array_equal(
+        separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)),
+        expected)
+    assert np.array_equal(
+        separability_matrix(m.Rotation2D(2) & (m.Shift(1) & m.Shift(2))),
+        expected)
+
+    expected_right = np.array([[True, False, False, False],
+                               [False, True, False, False],
+                               [False, False, True, True],
+                               [False, False, True, True]])
+    assert np.array_equal(separability_matrix(cm & m.Pix2Sky_TAN()),
+                          expected_right)
+'''
+path.write_text(text)
+PY
+cp astropy/modeling/separable.py /tmp/separable_fixed.py && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -3; git show HEAD:astropy/modeling/separable.py > astropy/modeling/separable.py && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider -k nested 2>&1 | tail -3; cp /tmp/separable_fixed.py astropy/modeling/separable.py && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -3; git status --short; git diff -U0 -- astropy/modeling/separable.py | grep '^[-+] '
+$ cd /testbed && git diff -- astropy/modeling/tests/test_separable.py && python - <<'PY'
+import numpy as np
+from astropy.modeling.separable import _coord_matrix
+
+class Stub:
+    separable = True
+    n_inputs = 2
+    n_outputs = 2
+
+print("right-side coord_matrix for a 2-in/2-out separable stub, noutp=4:")
+print(_coord_matrix(Stub(), 'right', 4).astype(int).tolist())
+print("expected: [[0, 0], [0, 0], [1, 0], [0, 1]]")
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The nested-compound bug is fixed and verified, so I'm closing out.
+
+**Root cause:** In `_cstack` (`astropy/modeling/separable.py`), when the right operand of `&` is already a coordinate matrix, as with `cm` in `Pix2Sky_TAN() & cm`, the code filled that block with `1`s. That made every output depend on every input and discarded the nested model's real separability. The left-operand branch already copied the actual values.
+
+**Changes:**
+- `astropy/modeling/separable.py`: `cright[-right.shape[0]:, -right.shape[1]:] = 1` now reads `= right`.
+- `astropy/modeling/tests/test_separable.py`: added `test_separability_nested_compound_models`. It covers the issue's nested case, the flat equivalent, a `Rotation2D & (Shift & Shift)` case, and `cm & Pix2Sky_TAN()`.
+
+**Verification:**
+- `test_separable.py` passes 12/12 with the fix. The new test fails against HEAD's `separable.py`.
+- The issue's examples now give the expected matrices.
+- The full `astropy/modeling` run shows the same 62 failing or erroring tests with and without the change, so nothing new broke. Those failures look environmental (the run printed a numpy binary-incompatibility warning). I did not investigate them further.
+
+**Found but not changed:** `_coord_matrix` calls `np.roll(mat, shift)` without `axis=0`, which rolls the flattened array. For a separable simple model with two or more inputs on the right of `&`, the outputs land in the wrong rows. For example, a 2-in/2-out separable stub with `noutp=4` produces `[[0,0],[1,0],[0,1],[0,0]]` instead of `[[0,0],[0,0],[1,0],[0,1]]`. The issue's examples don't reach this path, so I left it for a separate fix. The likely correction is `np.roll(mat, noutp - model.n_outputs, axis=0)`.

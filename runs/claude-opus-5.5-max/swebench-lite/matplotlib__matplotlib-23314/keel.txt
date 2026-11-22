@@ -1,0 +1,172 @@
+$ ls -la && git log --oneline -3
+$ cd lib/mpl_toolkits/mplot3d && grep -n "def draw" axes3d.py && sed -n '/^    def draw(self, renderer):/,/^    def get_axis_position/p' axes3d.py
+$ cd lib/matplotlib/axes && grep -n "def draw(self, renderer)" _base.py && sed -n '/^    def draw(self, renderer):/,/+12p' _base.py && echo ---- && sed -n 380,392p ../../mpl_toolkits/mplot3d/axes3d.py
+$ cd lib/matplotlib/axes && sed -n 3015,3035p _base.py && echo ---- && sed -n 380,392p ../../mpl_toolkits/mplot3d/axes3d.py
+$ mkdir -p /tmp/repro && cat > /tmp/repro/repro.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def nonwhite(img):
+    return int(np.sum(np.any(img[..., :3] != 255, axis=-1)))
+
+# 1) A single invisible 3D axes: the rendered figure should be blank.
+fig = plt.figure()
+ax = fig.add_subplot(projection='3d')
+ax.scatter(1, 1, 1)
+ax.set_visible(False)
+fig.canvas.draw()
+print("single invisible 3d axes -> non-white pixels:",
+      nonwhite(np.asarray(fig.canvas.buffer_rgba())))
+
+# 2) The reporter's example: the region of ax1 should be blank.
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1, 1, 1)
+ax2.scatter(1, 1, 1, c='r')
+ax1.set_visible(False)
+fig.canvas.draw()
+img = np.asarray(fig.canvas.buffer_rgba())
+H = img.shape[0]
+x0, y0, x1, y1 = ax1.bbox.extents.astype(int)
+region = img[H - y1:H - y0, x0:x1]  # image rows are flipped vs display coords
+print("reporter example, ax1 region -> non-white pixels:", nonwhite(region))
+EOF
+cd /tmp/repro && python repro.py && python -c "import matplotlib; print(matplotlib.__file__, matplotlib.__version__)"
+$ cd /testbed && python - << 'EOF'
+p = 'lib/mpl_toolkits/mplot3d/axes3d.py'
+s = open(p).read()
+old = """    @martist.allow_rasterization
+    def draw(self, renderer):
+        self._unstale_viewLim()
+"""
+new = """    @martist.allow_rasterization
+    def draw(self, renderer):
+        if not self.get_visible():
+            return
+        self._unstale_viewLim()
+"""
+assert s.count(old) == 1, s.count(old)
+open(p, 'w').write(s.replace(old, new))
+EOF
+git diff && cd /tmp/repro && python repro.py
+$ cat > /tmp/repro/check.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import io, traceback
+
+def nonwhite_in(fig, ax):
+    img = np.asarray(fig.canvas.buffer_rgba())
+    H = img.shape[0]
+    x0, y0, x1, y1 = ax.bbox.extents.astype(int)
+    return int(np.sum(np.any(img[H - y1:H - y0, x0:x1, :3] != 255, axis=-1)))
+
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1, 1, 1); ax2.scatter(1, 1, 1, c='r')
+ax1.set_visible(False)
+fig.canvas.draw()
+print("ax1 hidden:  ax1 px =", nonwhite_in(fig, ax1), " ax2 px =", nonwhite_in(fig, ax2))
+ax1.set_visible(True)
+fig.canvas.draw()
+print("ax1 shown:   ax1 px =", nonwhite_in(fig, ax1), " ax2 px =", nonwhite_in(fig, ax2))
+
+def attempt(name, f):
+    try:
+        print(f"{name}: OK ->", f())
+    except Exception:
+        print(f"{name}: FAILED"); traceback.print_exc()
+
+def make(layout=None):
+    fig, (a1, a2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'}, layout=layout)
+    a1.set_visible(False)
+    return fig, a1
+
+fig, a1 = make()
+attempt("ax.get_tightbbox() on invisible 3d axes",
+        lambda: a1.get_tightbbox(fig.canvas.get_renderer()))
+fig, a1 = make("constrained")
+attempt("constrained layout draw", lambda: fig.canvas.draw())
+fig, a1 = make("tight")
+attempt("tight layout draw", lambda: fig.canvas.draw())
+fig, a1 = make()
+attempt("savefig bbox_inches='tight'",
+        lambda: fig.savefig(io.BytesIO(), format="png", bbox_inches="tight"))
+EOF
+cd /tmp/repro && python check.py 2>&1 | grep -v "^\s*$"
+$ cd /testbed && git stash -q && (cd /tmp/repro && python check.py 2>&1 | grep -E "OK|FAILED|px =") ; git stash pop -q && git diff --stat && echo ---- && grep -n "def get_tightbbox" lib/mpl_toolkits/mplot3d/axes3d.py && sed -n 3100,3120p lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd /testbed && python - << 'EOF'
+p = 'lib/mpl_toolkits/mplot3d/axes3d.py'
+s = open(p).read()
+old = """                      bbox_extra_artists=None, *, for_layout_only=False):
+        ret = super().get_tightbbox(renderer,
+"""
+new = """                      bbox_extra_artists=None, *, for_layout_only=False):
+        if not self.get_visible():
+            return None
+        ret = super().get_tightbbox(renderer,
+"""
+assert s.count(old) == 1, s.count(old)
+open(p, 'w').write(s.replace(old, new))
+EOF
+git diff && cd /tmp/repro && python check.py 2>&1 | grep -v "^\s*$"
+$ cd /testbed/lib/mpl_toolkits && grep -n "self\.M\b\|axes\.M\b" mplot3d/*.py | head -40 && echo ---- && grep -n "^from\|^import\|check_figures_equal" tests/test_mplot3d.py | head -30 && grep -n "def inaxes" -A4 ../matplotlib/backend_bases.py
+$ cd /testbed/lib/mpl_toolkits && sed -n 244,250p mplot3d/axes3d.py && echo ---- && grep -n "def _button_press\|def _button_release\|def _on_move\|def format_coord\|inaxes\|button_pressed =" mplot3d/axes3d.py && echo ---- && grep -n "def draw_without_rendering" ../matplotlib/figure.py && echo ---- && tail -25 tests/test_mplot3d.py
+$ cd /testbed && python - << 'EOF'
+p = 'lib/mpl_toolkits/tests/test_mplot3d.py'
+s = open(p).read()
+tests = '''
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes(fig_test, fig_ref):
+    ax = fig_test.subplots(subplot_kw=dict(projection='3d'))
+    ax.set_visible(False)
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes_with_visible_sibling(fig_test, fig_ref):
+    # Hiding one 3D Axes must not affect the drawing of the others.
+    ax1, ax2 = fig_test.subplots(1, 2, subplot_kw=dict(projection='3d'))
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    ax1.set_visible(False)
+
+    ax_ref = fig_ref.add_subplot(1, 2, 2, projection='3d')
+    ax_ref.scatter(1, 1, 1, c='r')
+
+
+def test_invisible_axes_layout():
+    # Like 2D Axes, an invisible 3D Axes has no tight bbox; this used to
+    # raise an AttributeError, e.g. when using constrained layout.
+    fig = plt.figure(layout='constrained')
+    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    fig.add_subplot(1, 2, 2, projection='3d')
+    ax1.set_visible(False)
+    fig.draw_without_rendering()
+    assert ax1.get_tightbbox(fig.canvas.get_renderer()) is None
+'''
+open(p, 'w').write(s.rstrip('\n') + '\n' + tests)
+EOF
+echo "=== WITHOUT source fix (expect 3 failures) ===" && git stash push -q lib/mpl_toolkits/mplot3d/axes3d.py && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k invisible_axes -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed"; git stash pop -q && echo "=== WITH source fix ===" && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k invisible_axes -q -p no:cacheprovider 2>&1 | tail -3 && git diff --stat
+$ cd /testbed && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py lib/matplotlib/tests/test_constrainedlayout.py lib/matplotlib/tests/test_tightlayout.py -q -p no:cacheprovider 2>&1 | tail -4 && echo ---- && python -m flake8 lib/mpl_toolkits/mplot3d/axes3d.py lib/mpl_toolkits/tests/test_mplot3d.py && echo "flake8 clean" ; echo ---- && git status --short
+$ cd /testbed && ls -d result_images 2>/dev/null && git check-ignore -q result_images && echo "removing ignored test output: result_images/" ; rm -rf result_images /tmp/repro && ls -A | tr '\n' ' ' && echo && git status --short && git diff
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fixed the bug: an axes with `projection='3d'` now disappears when you call `set_visible(False)`, and the other subplots are unchanged. I also fixed a related crash that showed up while testing.
+
+**Cause:** the 3D axes' `draw` method (in `lib/mpl_toolkits/mplot3d/axes3d.py`) drew the background, panes and axis lines first. Only then did it hand off to the general axes code, which is where visibility is checked. So for a hidden 3D axes only the data was skipped, and the box and grid were still drawn.
+
+**Changes in `axes3d.py`:**
+1. **The reported bug:** `Axes3D.draw` now stops right away if the axes is invisible, the same check normal 2D axes make. In your example, `ax1`'s area went from about 31,500 drawn pixels to 0.
+2. **A related crash:** `Axes3D.get_tightbbox` raised `AttributeError` for an invisible 3D axes. As a result, any figure using constrained layout crashed after `set_visible(False)`, and this already happened before my change. It now returns `None`, as 2D axes do. This goes beyond your report, but it has the same cause and is a 2-line fix that you can drop if you prefer.
+
+**Tests:** I added three regression tests to `lib/mpl_toolkits/tests/test_mplot3d.py`:
+- A lone invisible 3D axes renders as a blank figure.
+- In your example, hiding `ax1` gives the same image as a figure with only `ax2`.
+- Constrained layout doesn't crash with an invisible 3D axes.
+
+All three fail without the fix and pass with it. The mplot3d, constrained-layout and tight-layout test suites pass (193 passed, 10 skipped), and flake8 reports no problems. I did not run the full matplotlib test suite.
+
+**One side effect:** a hidden 3D axes no longer updates its projection matrix (`M`) while it is hidden. Nothing outside drawing relies on it, and showing the axes again recomputes it, which I checked.
+
+I also deleted the test output folder and scratch files I created, so only the two files above have changed.

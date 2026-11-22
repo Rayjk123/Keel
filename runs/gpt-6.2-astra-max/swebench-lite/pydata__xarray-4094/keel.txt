@@ -1,0 +1,93 @@
+$ pwd && ls -la && rg -n 'to_unstacked_dataset|to_stacked_array'
+$ git status --short && git grep -n -e to_unstacked_dataset -e to_stacked_array
+$ sed -n '1840,2000p' xarray/core/dataarray.py && sed -n '3320,3540p' xarray/core/dataset.py && sed -n '2935,3085p' xarray/tests/test_dataset.py && sed -n '2100,2155p' xarray/tests/test_dataarray.py
+$ sed -n '1901,1988p' xarray/core/dataarray.py && sed -n '3370,3488p' xarray/core/dataset.py
+$ git grep -nE 'def (sel|squeeze|remap_label_indexers|convert_label_indexer|isel)\\?\(' -- xarray/core && python -V && python -c 'import xarray, pandas, numpy; print(xarray.__file__, pandas.__version__, numpy.__version__)'
+$ python - <<'PY'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr + 3})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+for drop in [False, True]:
+    print(f'\nsel(drop={drop})')
+    print(stacked.sel(variable='a', drop=drop))
+    print('after squeeze:')
+    print(stacked.sel(variable='a', drop=drop).squeeze(drop=True))
+print('\noriginal unstack:')
+print(stacked.to_unstacked_dataset('y'))
+PY
+$ sed -n '87,269p' xarray/core/indexing.py && sed -n '1897,2150p' xarray/core/dataset.py && sed -n '308,405p' xarray/core/common.py && head -155 doc/whats-new.rst
+$ sed -n '108,218p' xarray/core/indexing.py && sed -n '1938,2002p;2105,2125p' xarray/core/dataset.py
+$ git grep -n -A15 -B5 'def create_test_stacked_array' && sed -n '3465,3510p' xarray/tests/test_units.py && sed -n '336,389p' xarray/core/common.py && head -112 xarray/tests/test_dataset.py
+$ python - <<'PY'
+import xarray as xr
+ds = xr.Dataset({"a": (("x", "y"), [[0, 1, 2]]), "b": ("x", [3])}, coords={"x": [10], "y": [0, 1, 2]})
+stacked = ds.to_stacked_array("features", ["x"])
+print(stacked)
+for k in ds:
+    var = stacked.sel(variable=k, drop=True)
+    print(k, var)
+PY
+$ git grep -n -A60 'def _to_dataset_split' xarray/core/dataarray.py && sed -n '142,190p' doc/reshaping.rst && git log -3 --oneline
+$ python - <<'PY'
+from pathlib import Path
+path = Path("xarray/tests/test_dataset.py")
+text = path.read_text()
+anchor = "    def test_to_stacked_array_to_unstacked_dataset_different_dimension(self):\n"
+test = '''    @pytest.mark.parametrize("size", [3, 1])
+    def test_to_unstacked_dataset_only_sample_dims(self, size):
+        x = np.arange(size)
+        data = xr.Dataset({"a": ("x", x), "b": ("x", x + 1)}, coords={"x": x})
+        stacked = data.to_stacked_array("features", sample_dims=["x"])
+        assert_identical(data, stacked.to_unstacked_dataset("features"))
+
+'''
+assert text.count(anchor) == 1
+path.write_text(text.replace(anchor, test + anchor))
+PY
+python -m pytest -q xarray/tests/test_dataset.py -k test_to_unstacked_dataset_only_sample_dims --tb=short
+$ git grep -A33 -n '^def get_squeeze_dims' xarray/core/common.py && sed -n '1018,1069p' xarray/core/dataarray.py
+$ python - <<'PY'
+from pathlib import Path
+path = Path("xarray/core/dataarray.py")
+text = path.read_text()
+old = """        # pull variables out of datarray
+        data_dict = {}
+        for k in variables:
+            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
+"""
+new = """        sample_dims = set(self.dims) - {dim}
+        data_dict = {}
+        for k in variables:
+            # Drop the stacked coordinate if the variable label is the entire key.
+            subset = self.sel({variable_dim: k}, drop=True)
+            squeeze_dims = [
+                d for d, n in subset.sizes.items() if n == 1 and d not in sample_dims
+            ]
+            data_dict[k] = subset.squeeze(squeeze_dims, drop=True)
+"""
+assert text.count(old) == 1
+path.write_text(text.replace(old, new))
+PY
+python -m pytest -q xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -k 'to_stacked_array or to_unstacked_dataset' --disable-warnings --tb=short
+$ git diff --check && git diff --stat && git diff && python -m pytest -q xarray/tests/test_dataarray.py xarray/tests/test_dataset.py -k stack --disable-warnings --tb=short
+$ git grep -inE 'whats-new|what.s new|release note' -- CONTRIBUTING.md 'doc/*contribut*' '.github/*' || true; git status --short
+$ python - <<'PY'
+from pathlib import Path
+path = Path("doc/whats-new.rst")
+text = path.read_text()
+anchor = "Bug fixes\n~~~~~~~~~\n"
+note = """- Fix :py:meth:`DataArray.to_unstacked_dataset` when the stacked index contains
+  only variable names, and preserve length-one sample dimensions when unstacking.
+"""
+assert anchor in text
+path.write_text(text.replace(anchor, anchor + note, 1))
+PY
+git diff --check && git diff --stat
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Fixed `to_unstacked_dataset` for variables that share only sample dimensions. Unstacking now drops the selected variable label instead of retaining it as a conflicting scalar coordinate, and preserves sample dimensions of length one.
+
+Added regression tests for both one and three samples. All 20 stack/unstack tests passed.

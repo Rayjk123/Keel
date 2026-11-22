@@ -1,0 +1,202 @@
+$ pwd && ls -la && ls -la /app 2>/dev/null
+$ cd /app && head -n 30 graphene.dat && echo "..." && tail -n 10 graphene.dat && echo && wc -l graphene.dat && file graphene.dat
+$ cd /app && which python3 python pip pip3; python3 -c "import numpy, scipy; print(numpy.__version__, scipy.__version__)" 2>&1; python3 -c "import matplotlib; print(matplotlib.__version__)" 2>&1; awk 'NR%100==1' graphene.dat
+$ cd /app && pip install numpy scipy 2>&1 | tail -n 3 && python3 -c "import numpy, scipy; print(numpy.__version__, scipy.__version__)"
+$ cd /app && python3 -c "import numpy; print('numpy', numpy.__version__)" 2>&1 | tail -n 1; python3 -c "import scipy; print('scipy', scipy.__version__)" 2>&1 | tail -n 1; python3 --version; pip list 2>/dev/null | head -n 40
+$ cd /app && (nohup timeout 900 pip install --progress-bar off numpy scipy > /tmp/pip.log 2>&1 &) ; python3 - <<'EOF'
+xs=[];ys=[];bad=0
+for line in open('graphene.dat'):
+    line=line.strip()
+    if not line: continue
+    p=line.split('\t')
+    if len(p)!=2: bad+=1; continue
+    xs.append(float(p[0].replace(',','.'))); ys.append(float(p[1].replace(',','.')))
+print("n=",len(xs),"bad=",bad,"xrange",min(xs),max(xs),"yrange",min(ys),max(ys))
+s=[1e7/x for x in xs]
+print("s range", min(s), max(s))
+for i in [0,1,100,500,1000,1500,2000,2500,3000,3500,3562]:
+    print(i, round(xs[i],4), "s=%.3f"%s[i], "dx=%.4f"%(xs[i]-xs[i+1]), "ds=%.4f"%(s[i+1]-s[i]), ys[i])
+EOF
+$ cd /app && echo "--- pip log ---" && tail -n 5 /tmp/pip.log 2>/dev/null; python3 -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)" 2>&1 | tail -n 1; echo "--- analysis ---"; python3 - <<'EOF'
+xs=[];ys=[]
+for line in open('graphene.dat'):
+    p=line.strip().split('\t')
+    if len(p)!=2: continue
+    xs.append(float(p[0].replace(',','.'))); ys.append(float(p[1].replace(',','.')))
+d=sorted((1e7/x,y) for x,y in zip(xs,ys))
+s=[a for a,b in d]; y=[b for a,b in d]
+imax=max(range(len(y)),key=lambda i:y[i])
+print("global max at s=%.2f y=%.1f"%(s[imax],y[imax]))
+# smoothed local maxima with prominence-ish criterion
+n=len(y); w=7
+sm=[sum(y[max(0,i-w):i+w+1])/len(y[max(0,i-w):i+w+1]) for i in range(n)]
+W=40
+peaks=[]
+for i in range(n):
+    lo=max(0,i-W); hi=min(n,i+W+1)
+    if sm[i]==max(sm[lo:hi]):
+        base=min(min(sm[lo:i+1]),min(sm[i:hi]))
+        peaks.append((sm[i]-base,s[i],sm[i]))
+peaks.sort(reverse=True)
+print("top local maxima (prominence, s, smoothed y):")
+for p in peaks[:15]: print("  prom=%9.1f  s=%8.2f  y=%9.1f"%p)
+EOF
+$ cd /app && python3 - <<'EOF'
+import numpy as np
+raw=np.loadtxt('graphene.dat',converters=lambda v: float(v.replace(',','.')) if isinstance(v,str) else float(v.decode().replace(',','.')))
+x=1e7/raw[:,0]; y=raw[:,1]
+o=np.argsort(x); x=x[o]; y=y[o]
+def show(lo,hi,step):
+    print(f"--- {lo}-{hi} (bin {step}) ---")
+    for a in np.arange(lo,hi,step):
+        m=(x>=a)&(x<a+step)
+        if m.sum(): print(f"{a:7.0f} n={m.sum():2d} mean={y[m].mean():9.1f} min={y[m].min():9.1f} max={y[m].max():9.1f}")
+show(1300,1800,10)
+show(2400,2950,10)
+EOF
+$ cd /app && cat > /tmp/explore_fit.py <<'EOF'
+import numpy as np
+from scipy.optimize import curve_fit
+
+def load(fn):
+    xs, ys = [], []
+    for line in open(fn):
+        p = line.strip().replace(',', '.').split()
+        if len(p) == 2:
+            xs.append(float(p[0])); ys.append(float(p[1]))
+    x = 1e7 / np.array(xs); y = np.array(ys)   # -> Raman shift (cm^-1)
+    o = np.argsort(x)
+    return x[o], y[o]
+
+def lor(x, x0, g, A, c):
+    return A * g**2 / ((x - x0)**2 + g**2) + c
+
+def lorlin(x, x0, g, A, c, m):
+    return A * g**2 / ((x - x0)**2 + g**2) + c + m * (x - x0)
+
+x, y = load('graphene.dat')
+for name, c0, wins in [('G', 1580, [30, 50, 75, 100, 150, 200]),
+                       ('2D', 2670, [50, 75, 100, 150, 200, 250])]:
+    print(f"===== {name} =====")
+    for w in wins:
+        m = (x > c0 - w) & (x < c0 + w)
+        xf, yf = x[m], y[m]
+        p0 = [xf[np.argmax(yf)], 10, yf.max() - yf.min(), yf.min()]
+        p, cov = curve_fit(lor, xf, yf, p0=p0, maxfev=20000)
+        e = np.sqrt(np.diag(cov)); r = yf - lor(xf, *p)
+        p2, cov2 = curve_fit(lorlin, xf, yf, p0=list(p) + [0], maxfev=20000)
+        print(f"w=±{w:3d} n={m.sum():3d} | const: x0={p[0]:8.3f}±{e[0]:.3f} g={abs(p[1]):6.3f}±{e[1]:.3f} "
+              f"A={p[2]:8.1f}±{e[2]:.0f} c={p[3]:7.1f}±{e[3]:.0f} rms={r.std():6.1f} | "
+              f"lin: x0={p2[0]:8.3f} g={abs(p2[1]):6.3f} A={p2[2]:8.1f} c={p2[3]:7.1f} m={p2[4]:6.2f}")
+EOF
+python3 /tmp/explore_fit.py
+$ cd /app && cat > /tmp/explore2.py <<'EOF'
+import numpy as np
+from scipy.optimize import curve_fit
+exec(open('/tmp/explore_fit.py').read().split("x, y = load")[0])  # reuse load/lor
+x, y = load('graphene.dat')
+# noise estimate from point-to-point differences in peak-free regions
+for lo,hi in [(1650,1800),(2750,2950),(1400,1540)]:
+    m=(x>lo)&(x<hi); print(f"noise {lo}-{hi}: sigma~{np.std(np.diff(y[m]))/np.sqrt(2):.1f}")
+def fit(lo,hi):
+    m=(x>lo)&(x<hi); xf,yf=x[m],y[m]
+    p,cov=curve_fit(lor,xf,yf,p0=[xf[np.argmax(yf)],10,yf.max()-yf.min(),yf.min()],maxfev=20000)
+    p[1]=abs(p[1]); r=yf-lor(xf,*p); return p,np.sqrt(np.diag(cov)),r.std(),m.sum()
+print("--- G windows ---")
+for lo,hi in [(1500,1700),(1450,1700),(1500,1650),(1520,1640),(1530,1630),(1540,1620),(1550,1610),(1400,1750),(1450,1750)]:
+    p,e,r,n=fit(lo,hi); print(f"[{lo},{hi}] n={n:3d} x0={p[0]:.3f} g={p[1]:.3f} A={p[2]:.1f} c={p[3]:.1f} rms={r:.1f}")
+print("--- 2D windows ---")
+for lo,hi in [(2500,2900),(2500,2850),(2550,2800),(2600,2800),(2600,2750),(2620,2720),(2550,2850),(2500,2800),(2580,2760)]:
+    p,e,r,n=fit(lo,hi); print(f"[{lo},{hi}] n={n:3d} x0={p[0]:.3f} g={p[1]:.3f} A={p[2]:.1f} c={p[3]:.1f} rms={r:.1f}")
+EOF
+python3 /tmp/explore2.py
+$ cd /app && cat > /app/fit_raman.py <<'EOF'
+#!/usr/bin/env python3
+"""Fit the graphene G and 2D Raman bands with a Lorentzian + constant offset.
+
+Input : /app/graphene.dat  (2 tab-separated columns, German decimal commas)
+        Column 1 is stored as 1e7/(Raman shift); shift = 1e7/x puts the Si
+        phonon at ~521 cm^-1, G at ~1580 cm^-1 and 2D at ~2670 cm^-1.
+Model : f(x) = amplitude * gamma^2 / ((x - x0)^2 + gamma^2) + offset
+        x0 = centre [cm^-1], gamma = HWHM [cm^-1],
+        amplitude = peak height above offset [counts], offset = baseline [counts]
+"""
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+DATA, OUT = "/app/graphene.dat", "/app/results.json"
+WINDOWS = {"G": (1500.0, 1700.0), "2D": (2500.0, 2900.0)}
+
+def load(fn):
+    xs, ys = [], []
+    with open(fn) as f:
+        for line in f:
+            p = line.strip().replace(",", ".").split()
+            if len(p) == 2:
+                xs.append(float(p[0])); ys.append(float(p[1]))
+    shift = 1e7 / np.asarray(xs); y = np.asarray(ys)
+    o = np.argsort(shift)
+    return shift[o], y[o]
+
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude * gamma**2 / ((x - x0)**2 + gamma**2) + offset
+
+def fit_peak(x, y, lo, hi):
+    m = (x > lo) & (x < hi)
+    xf, yf = x[m], y[m]
+    i = np.argmax(yf)
+    off0 = np.median(np.concatenate([yf[:5], yf[-5:]]))
+    p0 = [xf[i], 10.0, yf[i] - off0, off0]
+    popt, pcov = curve_fit(lorentzian, xf, yf, p0=p0, maxfev=20000)
+    popt[1] = abs(popt[1])
+    return popt, np.sqrt(np.diag(pcov)), xf, yf, yf - lorentzian(xf, *popt)
+
+if __name__ == "__main__":
+    x, y = load(DATA)
+    results = {}
+    for name, (lo, hi) in WINDOWS.items():
+        popt, perr, xf, yf, r = fit_peak(x, y, lo, hi)
+        x0, g, A, c = map(float, popt)
+        results[name] = {"x0": x0, "gamma": g, "amplitude": A, "offset": c}
+        print(f"== {name}: window [{lo:.0f}, {hi:.0f}] cm^-1, {len(xf)} points ==")
+        for k, v, e in zip(["x0", "gamma", "amplitude", "offset"], popt, perr):
+            print(f"   {k:9s} = {v:11.4f} +/- {e:.4f}")
+        print(f"   FWHM = {2*g:.3f} cm^-1, area = {np.pi*A*g:.1f}, residual rms = {r.std():.1f}")
+        print("   binned residuals (20 cm^-1):",
+              " ".join(f"{b:.0f}:{r[(xf>=b)&(xf<b+20)].mean():+.0f}"
+                       for b in np.arange(lo, hi, 20) if ((xf>=b)&(xf<b+20)).any()))
+    print(f"I(2D)/I(G) = {results['2D']['amplitude']/results['G']['amplitude']:.3f}")
+    with open(OUT, "w") as f:
+        json.dump(results, f, indent=2)
+    print("wrote", OUT)
+EOF
+python3 /app/fit_raman.py && echo "-----" && cat /app/results.json && python3 -c "import json; d=json.load(open('/app/results.json')); assert set(d)=={'G','2D'} and all(set(d[k])=={'x0','gamma','amplitude','offset'} for k in d); print('JSON format OK')"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fitted both peaks and wrote the results to `/app/results.json`.
+
+**Results** (Raman shift in cm⁻¹):
+
+| Peak | x0 | gamma | amplitude | offset |
+|---|---|---|---|---|
+| G | 1580.30 ± 0.22 | 9.06 ± 0.36 | 8383 ± 206 | 5561 ± 52 |
+| 2D | 2670.08 ± 0.19 | 17.52 ± 0.31 | 12314 ± 135 | 1239 ± 33 |
+
+The peak positions are reliable, but the offsets (the 2D one especially) depend on the fit window I chose.
+
+**How I got there**
+- **Reading the file:** the two columns use decimal commas.
+- **Converting the x-axis:** the first column is not a Raman shift, so I converted it with shift = 10⁷/x. That puts the known lines where they belong: silicon near 521, G at 1580, 2D at 2670 and 2D′ near 3243 cm⁻¹. Without the conversion the peaks would sit at about 6328 and 3745, which has no physical meaning.
+- **Model:** each peak is a Lorentzian plus a constant, `amplitude·gamma² / ((x−x0)² + gamma²) + offset`. Gamma is the half-width at half-maximum, so the full widths are about 18.1 cm⁻¹ (G) and 35.0 cm⁻¹ (2D). Amplitude is the peak height above the offset.
+- **Fit windows:** 1500–1700 cm⁻¹ for G and 2500–2900 cm⁻¹ for 2D. Each window has background on both sides and leaves out nearby bands.
+
+**How stable the numbers are across windows**
+- **Positions:** x0 moved by less than about 0.1 cm⁻¹.
+- **Widths and heights:** gamma and amplitude varied by a few percent, apart from the very narrowest 2D window.
+- **Offsets:** these vary most, because the true background slopes downward and a constant can only average it. For 2D, the offset ranged from about 920 to 1470 across sensible windows. The leftover error shows that slope as a gentle tilt.
+
+**About the sample**
+- There is essentially no D peak (~1350 cm⁻¹), which suggests few defects.
+- The 2D peak fits well as a single narrow line, and its height is about 1.47 times the G peak. Together these are typical of single-layer graphene.
+
+I also saved the fitting script as `/app/fit_raman.py` so the result can be reproduced.

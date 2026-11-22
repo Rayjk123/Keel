@@ -1,0 +1,118 @@
+$ ls -la && git -C . log --oneline -3 2>/dev/null; git -C . status 2>/dev/null | head -20
+$ cd . && grep -rn "def __eq__\|def __ne__" sympy/core/*.py | head -60; echo "--- sympify(other) uses ---"; grep -rn "sympify(other)" sympy/core/*.py | head -60; echo "--- sympify.py defs ---"; grep -n "^def \|strict" sympy/core/sympify.py | head -60
+$ cd . && sed -n '118,150p' sympy/core/expr.py && echo '--- sympify.py 270-420 ---' && sed -n '270,420p' sympy/core/sympify.py
+$ PY=$(command -v python3 || command -v python); echo "python: $PY"; $PY - <<'PYEOF'
+import sympy
+from sympy import Symbol
+print("sympy", sympy.__version__, "loaded from", sympy.__file__)
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+checks = [
+    ("Symbol('x') == C()", lambda: Symbol('x') == C()),
+    ("Symbol('x') != D()", lambda: Symbol('x') != D()),
+    ("Symbol('x') == 'x'", lambda: Symbol('x') == 'x'),
+]
+for label, f in checks:
+    try:
+        print(label, '->', f())
+    except Exception as e:
+        print(label, '-> raised', type(e).__name__, '-', e)
+PYEOF
+echo "exit=$?"; echo '--- expr.py sympify references ---'; grep -n "sympify" sympy/core/expr.py | head -5; echo '--- basic.py __eq__/__ne__ ---'; sed -n '299,350p' sympy/core/basic.py
+$ cd /testbed && PY=$(command -v python3 || command -v python) && echo "python: $PY" && $PY - <<'PYEOF'
+p = 'sympy/core/expr.py'
+src = open(p).read()
+old = ("    def __eq__(self, other):\n"
+       "        try:\n"
+       "            other = sympify(other)\n")
+new = old.replace("other = sympify(other)", "other = _sympify(other)")
+assert src.count(old) == 1, ("expected exactly one match, got", src.count(old))
+open(p, 'w').write(src.replace(old, new))
+print("patched Expr.__eq__ in sympy/core/expr.py to use _sympify")
+PYEOF
+echo '--- git diff ---'
+git -C /testbed diff -- sympy/core/expr.py
+echo '--- repro after fix ---'
+$PY - <<'PYEOF'
+import sympy
+from sympy import Symbol, Integer, sympify
+print("sympy loaded from", sympy.__file__)
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+cases = [
+    ("Symbol('x') == C()", lambda: Symbol('x') == C(), False),
+    ("Symbol('x') != C()", lambda: Symbol('x') != C(), True),
+    ("Symbol('x') == D()", lambda: Symbol('x') == D(), False),
+    ("Symbol('x') != D()", lambda: Symbol('x') != D(), True),
+    ("Symbol('x') == 'x'", lambda: Symbol('x') == 'x', False),
+    ("Symbol('x') == Symbol('x')", lambda: Symbol('x') == Symbol('x'), True),
+    ("Symbol('x') == 1", lambda: Symbol('x') == 1, False),
+    ("Integer(1) == 1", lambda: Integer(1) == 1, True),
+    ("sympify('x') == Symbol('x')", lambda: sympify('x') == Symbol('x'), True),
+    ("sympify('x + 1') == Symbol('x') + 1", lambda: sympify('x + 1') == Symbol('x') + 1, True),
+]
+ok = True
+for label, f, expected in cases:
+    try:
+        got = f()
+    except Exception as e:
+        got = "raised %s: %s" % (type(e).__name__, e)
+    good = got is expected
+    ok = ok and good
+    print("OK  " if good else "BAD ", label, '->', got)
+print("ALL AS EXPECTED" if ok else "MISMATCH PRESENT")
+PYEOF
+$ cd /testbed && PY=$(command -v python3 || command -v python) && echo "== non-test __eq__ bodies still calling non-strict sympify ==" && (grep -rn -A8 "def __eq__" sympy --include=*.py | grep -v "/tests/" | grep -E "[^_a-zA-Z]sympify\(" | head -40); echo "== targeted regression run ==" && $PY -m pytest -q -rf --tb=short -p no:cacheprovider sympy/core/tests/test_expr.py sympy/core/tests/test_basic.py sympy/core/tests/test_sympify.py sympy/core/tests/test_numbers.py sympy/core/tests/test_symbol.py sympy/core/tests/test_arit.py sympy/core/tests/test_relational.py sympy/parsing/tests/test_sympy_parser.py 2>&1 | tail -n 80; echo "pytest exit=${PIPESTATUS[0]}"
+$ cd /testbed && PY=/opt/miniconda3/envs/testbed/bin/python3 && $PY - <<'PYEOF'
+import ast, os
+hits = set()
+for root, dirs, files in os.walk('sympy'):
+    if 'tests' in root.split(os.sep):
+        continue
+    for fn in files:
+        if not fn.endswith('.py'):
+            continue
+        path = os.path.join(root, fn)
+        with open(path, encoding='utf-8') as fh:
+            src = fh.read()
+        try:
+            tree = ast.parse(src, path)
+        except SyntaxError as e:
+            print('PARSE FAIL', path, e)
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in ('__eq__', '__ne__'):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        f = sub.func
+                        name = f.id if isinstance(f, ast.Name) else getattr(f, 'attr', None)
+                        if name in ('sympify', 'S'):
+                            hits.add((path, node.lineno, node.name, name, sub.lineno))
+print('non-test __eq__/__ne__ bodies calling non-strict sympify()/S():')
+for h in sorted(hits):
+    print('  %s:%d %s() -> %s() at line %d' % (h[0], h[1], h[2], h[3], h[4]))
+print('count:', len(hits))
+PYEOF
+echo '--- sympy/matrices/dense.py lines 1-70 ---'
+sed -n '1,70p' sympy/matrices/dense.py
+echo '--- sympify_converter registrations in sympy/matrices ---'
+grep -rn "sympify_converter" sympy/matrices | head -20
+echo '--- expr.py 728-742 (other non-strict sympify call, not __eq__) ---'
+sed -n '728,742p' sympy/core/expr.py
+echo '--- sympy test runner available? ---'
+ls -la bin/test && head -n 3 bin/test
+stopped: no command in 3 consecutive replies

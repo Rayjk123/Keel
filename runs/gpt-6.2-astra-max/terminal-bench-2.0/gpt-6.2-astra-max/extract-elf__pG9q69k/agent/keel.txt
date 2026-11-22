@@ -1,0 +1,177 @@
+$ pwd && ls -la && file a.out && readelf -h -l -S -W a.out
+$ cat hi.c; for tool in node python3 readelf objdump od xxd nm strings; do command -v "$tool" || true; done; od -Ax -tx1 -N 128 a.out; if command -v readelf >/dev/null; then readelf -W -h -l -S -s -r a.out; fi
+$ cat hi.c; readelf -hW /app/a.out; node -e 'const b=require("fs").readFileSync("/app/a.out"); for(const n of [1784774249,1718378344,b.readUInt32LE(0),b.readUInt32BE(0),b.readUInt32LE(4)]) console.log(n, n.toString(16)); console.log(b.subarray(0,16))'; ls -la /app
+$ readelf -Wd /app/a.out && node <<'NODE'
+const b=require('fs').readFileSync('/app/a.out');
+for (const [off,va,filesz,memsz] of [[0,0,0x628,0x628],[0x1000,0x1000,0x175,0x175],[0x2000,0x2000,0xf4,0xf4],[0x2db8,0x3db8,0x258,0x260]]) {
+ let high=0,zero=0,lebe=0;
+ for(let j=0;j+4<=memsz;j+=4) {
+   const v=(j>=filesz?0:b.readUInt32LE(off+j)); if(v>0x7fffffff)++high;if(!v)++zero;if(j>=filesz||v===b.readUInt32BE(off+j))++lebe;
+ }
+ console.log({va:'0x'+va.toString(16),words:Math.floor(memsz/4),high,zero,endianInvariant:lebe});
+}
+NODE
+$ objdump -s -j .rodata -j .init_array -j .fini_array -j .got -j .data /app/a.out; readelf -rW /app/a.out; command -v python3 || true; node --version
+$ cat > /app/extract.js <<'EOF'
+'use strict';
+
+const fs = require('node:fs');
+
+function extract(bytes) {
+  if (bytes.length < 16 || bytes.toString('hex', 0, 4) !== '7f454c46')
+    throw new Error('not an ELF file');
+  const is64 = bytes[4] === 2;
+  const little = bytes[5] === 1;
+  if ((!is64 && bytes[4] !== 1) || (!little && bytes[5] !== 2))
+    throw new Error('unknown ELF class or byte order');
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16 = at => view.getUint16(at, little);
+  const u32 = at => view.getUint32(at, little);
+  const ptrSize = is64 ? 8 : 4;
+  const ptr = at => is64 ? view.getBigUint64(at, little) : BigInt(u32(at));
+  function size(value) {
+    const n = Number(value);
+    if (!Number.isSafeInteger(n) || n < 0) throw new Error('invalid ELF size');
+    return n;
+  }
+  function checkRange(offset, length) {
+    if (length > bytes.length - offset) throw new Error('truncated ELF file');
+  }
+
+  const type = u16(16);
+  if (type !== 2 && type !== 3) throw new Error('expected an executable or shared object');
+  const phoff = size(ptr(is64 ? 32 : 28));
+  const phent = u16(is64 ? 54 : 42);
+  const phnum = u16(is64 ? 56 : 44);
+  if (phent < (is64 ? 56 : 32)) throw new Error('invalid program header size');
+  checkRange(phoff, phent * phnum);
+
+  const loads = [];
+  const dynamic = [];
+  for (let i = 0; i < phnum; i++) {
+    const h = phoff + i * phent;
+    const kind = u32(h);
+    if (kind !== 1 && kind !== 2) continue; // PT_LOAD, PT_DYNAMIC
+    const seg = {
+      off: size(ptr(h + (is64 ? 8 : 4))),
+      va: ptr(h + (is64 ? 16 : 8)),
+      filesz: size(ptr(h + (is64 ? 32 : 16))),
+      memsz: size(ptr(h + (is64 ? 40 : 20))),
+    };
+    checkRange(seg.off, seg.filesz);
+    if (seg.filesz > seg.memsz) throw new Error('invalid segment sizes');
+    (kind === 1 ? loads : dynamic).push(seg);
+  }
+  if (!loads.length) throw new Error('no loadable segments');
+
+  // A zero-based PIE has no single runtime address. Give it a reproducible
+  // base as in the example; retain absolute addresses in linked images.
+  const bias = type === 3 && loads.some(s => s.va < 0x1000n) ? 0x400000n : 0n;
+  const omit = new Set();
+  function omitBytes(va, length) {
+    const end = va + BigInt(length);
+    for (let a = va & ~3n; a < end; a += 4n) omit.add(a);
+  }
+  function fileOffset(va, length) {
+    for (const s of loads) {
+      const d = va - s.va;
+      if (d >= 0n && d + BigInt(length) <= BigInt(s.filesz)) return s.off + Number(d);
+    }
+    throw new Error('dynamic table points outside file-backed memory');
+  }
+
+  // Dynamic tags whose payloads are sizes, indexes, counts or flags. Other
+  // payloads can be pointers fixed up by the runtime linker.
+  const scalarTags = new Set([1, 2, 8, 9, 10, 11, 14, 15, 16, 18, 19, 20, 22, 24,
+    27, 28, 29, 30, 33, 35, 37, 0x6ffffff9, 0x6ffffffa, 0x6ffffffb, 0x6ffffffd,
+    0x6fffffff]);
+  for (const s of dynamic) {
+    const tags = new Map();
+    for (let i = 0; i + 2 * ptrSize <= s.filesz; i += 2 * ptrSize) {
+      const tag = Number(ptr(s.off + i));
+      if (tag === 0) break;
+      tags.set(tag, ptr(s.off + i + ptrSize));
+      if (!scalarTags.has(tag)) omitBytes(s.va + BigInt(i + ptrSize), ptrSize);
+    }
+
+    // The reserved PLT GOT entries can be initialized by the loader even
+    // without an explicit relocation.
+    if (tags.get(3)) omitBytes(tags.get(3), 3 * ptrSize);
+
+    function omitRelocations(addrTag, sizeTag, entryTag, hasAddend) {
+      const addr = tags.get(addrTag);
+      const length = size(tags.get(sizeTag) || 0n);
+      if (addr === undefined || !length) return;
+      const minEntry = (hasAddend ? 3 : 2) * ptrSize;
+      const entry = size(tags.get(entryTag) || minEntry);
+      if (entry < minEntry || length % entry !== 0) throw new Error('invalid relocation table');
+      const off = fileOffset(addr, length);
+      for (let i = 0; i < length; i += entry) omitBytes(ptr(off + i), ptrSize);
+    }
+    omitRelocations(7, 8, 9, true);       // DT_RELA
+    omitRelocations(17, 18, 19, false);   // DT_REL
+    const pltRela = tags.get(20) === 7n;  // DT_PLTREL
+    omitRelocations(23, 2, pltRela ? 9 : 19, pltRela); // DT_JMPREL
+  }
+
+  const result = Object.create(null);
+  for (const s of loads) {
+    const first = Number((-s.va) & 3n); // first aligned word in the segment
+    for (let i = first; i + 4 <= s.memsz; i += 4) {
+      const va = s.va + BigInt(i);
+      if (omit.has(va)) continue;
+      let value = 0;
+      if (i + 4 <= s.filesz) {
+        value = u32(s.off + i);
+      } else {
+        // Bytes from p_filesz to p_memsz (including .bss) load as zero.
+        for (let j = 0; j < 4 && i + j < s.filesz; j++)
+          value += bytes[s.off + i + j] * 256 ** (little ? j : 3 - j);
+      }
+      if (value <= 0x7fffffff) result[(bias + va).toString()] = value;
+    }
+  }
+  return result;
+}
+
+try {
+  if (process.argv.length !== 3) throw new Error('usage: node extract.js <ELF file>');
+  const words = extract(fs.readFileSync(process.argv[2]));
+  process.stdout.write(JSON.stringify(words) + '\n');
+} catch (err) {
+  console.error(`extract.js: ${err.message}`);
+  process.exitCode = 1;
+}
+EOF
+cd /app && node --check extract.js && node extract.js /app/a.out | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let m=JSON.parse(s);console.log("words:",Object.keys(m).length,"header:",m[0x400000],"rodata:",m[0x402004],"bss:",m[0x404010]);})'
+$ cd /app && tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && node extract.js /app/a.out > "$tmp" && python3 - "$tmp" <<'PY'
+import json, pathlib, subprocess, sys
+
+data = pathlib.Path('/app/a.out').read_bytes()
+headers = subprocess.check_output(['readelf', '-lW', '/app/a.out'], text=True)
+base = 0x400000
+expected = {}
+for line in headers.splitlines():
+    cols = line.split()
+    if cols[:1] != ['LOAD']:
+        continue
+    off, va, _, filesz, memsz = (int(n, 16) for n in cols[1:6])
+    image = data[off:off+filesz] + bytes(memsz-filesz)
+    for i in range((-va) % 4, memsz-3, 4):
+        expected[str(base+va+i)] = int.from_bytes(image[i:i+4], 'little')
+actual = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert all(type(v) == int and k in expected and expected[k] == v for k,v in actual.items())
+assert len(actual) >= 0.75 * len(expected)
+assert actual[str(base+0x2004)] == int.from_bytes(b'Hell', 'little')
+assert actual[str(base+0x4010)] == 0
+for line in subprocess.check_output(['readelf', '-rW', '/app/a.out'], text=True).splitlines():
+    if ' R_X86_64_' in line:
+        va = int(line.split()[0], 16)
+        assert all(str(base+va+d) not in actual for d in (0, 4))
+print(f'{len(actual)}/{len(expected)} aligned words ({len(actual)/len(expected):.1%}); every emitted word matches.')
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Created `/app/extract.js`. Run it with `node extract.js /app/a.out > out.json`. It uses `0x400000` as the base for this position-independent binary and outputs decimal address keys with integer values.
+
+I verified all 602 emitted values against the ELF image. That covers **86% of its 700 aligned 32-bit words**; the extractor omits loader-dependent and signedness-ambiguous values.

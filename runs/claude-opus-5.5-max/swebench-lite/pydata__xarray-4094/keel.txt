@@ -1,0 +1,140 @@
+$ ls -la && git log --oneline -3
+$ grep -n "to_unstacked_dataset\|to_stacked_array" -r xarray/ --include=*.py | head -50
+$ sed -n 1895,1975p xarray/core/dataarray.py
+$ cd /tmp && python -c "
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[('x', [0, 1, 2])],
+ )
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+print('---')
+print(stacked.indexes['y'])
+print('---')
+sel = stacked.sel({'variable': 'a'})
+print(sel)
+print('---')
+print(sel.squeeze(drop=True))
+print('---')
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+"
+$ sed -n 3000,3065p xarray/tests/test_dataset.py
+$ cd /testbed && python - <<'EOF'
+import re
+path = "xarray/core/dataarray.py"
+src = open(path).read()
+old = "            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)\n"
+new = "            data_dict[k] = self.sel({variable_dim: k}, drop=True).squeeze(drop=True)\n"
+assert src.count(old) == 1, src.count(old)
+src = src.replace(old, new)
+open(path, "w").write(src)
+EOF
+git diff</br>
+$ cd /testbed && git diff && grep -n "data_dict\[k\]" xarray/core/dataarray.py
+$ cd /tmp && python -c "
+import numpy as np
+import xarray as xr
+from xarray.testing import assert_identical
+
+# MCVE from the issue
+arr = xr.DataArray(np.arange(3), coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+assert_identical(unstacked, data)
+print('MCVE roundtrip OK')
+
+# single sample (x becomes a scalar coord, which must be kept)
+u0 = stacked.isel(x=0).to_unstacked_dataset('y')
+assert_identical(u0, data.isel(x=0))
+print('single-sample roundtrip OK')
+
+# custom variable_dim name, selected by level name
+s2 = data.to_stacked_array('y', sample_dims=['x'], variable_dim='var')
+assert_identical(s2.to_unstacked_dataset('y', level='var'), data)
+print('custom variable_dim OK')
+
+# multi-level case with mixed dimensionality (docstring example)
+arr2 = xr.DataArray(np.arange(6).reshape(2, 3), coords=[('x', ['a', 'b']), ('y', [0, 1, 2])])
+data2 = xr.Dataset({'a': arr2, 'b': arr2.isel(y=0)})
+s3 = data2.to_stacked_array('z', ['y'])
+assert_identical(s3.to_unstacked_dataset(dim='z'), data2)
+print('multi-level mixed-dims roundtrip OK')
+"
+$ cd /tmp && python -c "
+import numpy as np
+import xarray as xr
+from xarray.testing import assert_identical
+
+# multi-level case with mixed dimensionality (valid sample dim 'x')
+arr2 = xr.DataArray(np.arange(6).reshape(2, 3), coords=[('x', ['a', 'b']), ('y', [0, 1, 2])])
+data2 = xr.Dataset({'a': arr2, 'b': arr2.isel(y=0)})
+s3 = data2.to_stacked_array('z', ['x'])
+print(s3.indexes['z'])
+assert_identical(s3.to_unstacked_dataset(dim='z'), data2)
+print('multi-level mixed-dims roundtrip OK')
+
+# 0-d variables, no sample dims -> also a single-level MultiIndex
+d0 = xr.Dataset({'a': 1, 'b': 2})
+s0 = d0.to_stacked_array('y', sample_dims=[])
+assert_identical(s0.to_unstacked_dataset('y'), d0)
+print('0-d variables roundtrip OK')
+"; echo '=== pytest ==='; cd /testbed && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -k "stack" 2>&1 | tail -8
+$ cd /testbed && python - <<'EOF'
+path = "xarray/tests/test_dataset.py"
+src = open(path).read()
+anchor = '''        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+    def test_update(self):
+'''
+replacement = '''        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+    def test_to_stacked_array_to_unstacked_dataset_single_dim(self):
+        # regression test for GH4049: when all variables only have the sample
+        # dims, the stacked index is a single-level MultiIndex
+        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+        data = xr.Dataset({"a": arr, "b": arr})
+        stacked = data.to_stacked_array("y", sample_dims=["x"])
+        unstacked = stacked.to_unstacked_dataset("y")
+        assert_identical(unstacked, data)
+
+        # test on just one sample
+        unstacked0 = stacked.isel(x=0).to_unstacked_dataset("y")
+        assert_identical(unstacked0, data.isel(x=0))
+
+    def test_update(self):
+'''
+assert src.count(anchor) == 1, src.count(anchor)
+src = src.replace(anchor, replacement)
+open(path, "w").write(src)
+EOF
+git diff --stat && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py -k "to_stacked_array or to_unstacked" 2>&1 | tail -3
+$ cd /testbed && git diff xarray/core/dataarray.py > /tmp/fix.patch && git checkout -- xarray/core/dataarray.py && echo "=== without fix ===" && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py -k "single_dim" 2>&1 | tail -3; git apply /tmp/fix.patch && echo "=== fix restored ===" && git diff --stat && echo "=== full suites with fix ===" && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py xarray/tests/test_dataarray.py 2>&1 | tail -3
+$ cd /testbed && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py xarray/tests/test_dataarray.py 2>&1 | grep -E "^FAILED" | awk '{print $2}' > /tmp/failed.txt; echo "=== failures with fix ($(wc -l < /tmp/failed.txt)) ==="; cat /tmp/failed.txt; git diff xarray/core/dataarray.py > /tmp/fix.patch && test -s /tmp/fix.patch && git checkout -- xarray/core/dataarray.py && echo "=== same tests WITHOUT fix ===" && xargs -r -a /tmp/failed.txt python -m pytest -q -p no:cacheprovider 2>&1 | tail -8; git apply /tmp/fix.patch; echo "=== fix restored? ==="; git diff --stat
+$ cd /testbed && git status --short && git diff && python -m pytest -q -p no:cacheprovider xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -k "stack" 2>&1 | tail -2
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is done: `to_unstacked_dataset` now roundtrips for single-dim variables, and the issue's example works. The change is one line, plus a new regression test.
+
+**Cause:** When every variable has only the sample dims (as in the issue's example), `to_stacked_array` builds a single-level MultiIndex. On that kind of index, `self.sel({variable_dim: k})` matches the whole key, so the stacked dimension turns into a scalar coordinate (`y = ('a',)`, `y = ('b',)`). `squeeze(drop=True)` only removes size-1 dimensions, so those differing scalar coordinates survived and clashed when merged into the `Dataset`, giving the `MergeError`.
+
+**Fix** (`xarray/core/dataarray.py`): pass `drop=True` to `sel`, so the coordinate that becomes scalar from that selection is dropped.
+- With a multi-level index the selection keeps the dimension, so behaviour there is unchanged.
+- Other scalar coordinates, such as `x` after `isel(x=0)`, are kept because that selection doesn't touch them.
+
+**Test:** I added `test_to_stacked_array_to_unstacked_dataset_single_dim` to `xarray/tests/test_dataset.py`. It covers the issue's example and the single-sample case, and I checked that it fails without the fix and passes with it.
+
+**Verification:**
+- The roundtrip also works with a custom `variable_dim` selected by level name, with 0-d variables, and with mixed-dimensionality variables on a multi-level index.
+- All 59 stack-related tests pass, including the new one.
+- Running all of `test_dataset.py` and `test_dataarray.py` gives 1679 passed and 5 failed. The 5 failures are categorical and pandas-MultiIndex tests, and they fail the same way with my fix removed. They look like an environment problem, but I didn't confirm the cause.
+
+**Not changed:** The example in the `to_unstacked_dataset` docstring raises an error as written. It calls `to_stacked_array("z", ["y"])`, but `b` has no `y` dimension; it should be `["x"]`. This is a separate, existing docs error, so I left it out of this fix.

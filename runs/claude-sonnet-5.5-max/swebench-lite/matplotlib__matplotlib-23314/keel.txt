@@ -1,0 +1,314 @@
+$ ls -la
+$ grep -n "def draw\|get_visible\|set_visible\|_get_draw_artists\|def get_tightbbox" lib/mpl_toolkits/mplot3d/axes3d.py
+$ sed -n 380,470p lib/mpl_toolkits/mplot3d/axes3d.py
+$ grep -n "def draw" lib/matplotlib/axes/_base.py && sed -n '/    def draw(self, renderer):/,/self.stale = False/p' lib/matplotlib/axes/_base.py
+$ cd /tmp && cat > repro.py << 'EOF'
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+print("matplotlib from:", matplotlib.__file__)
+
+def render(fig):
+    fig.canvas.draw()
+    return np.asarray(fig.canvas.buffer_rgba()).copy()
+
+# Figure with a single invisible 3D axes
+fig_test = plt.figure()
+ax = fig_test.add_subplot(projection="3d")
+ax.scatter(1, 1, 1)
+ax.set_visible(False)
+test = render(fig_test)
+
+# Reference: totally empty figure
+fig_ref = plt.figure()
+ref = render(fig_ref)
+
+print("invisible 3D axes renders same as empty figure:", np.array_equal(test, ref))
+print("number of differing pixels:", int((test != ref).any(axis=-1).sum()))
+
+# Same check with a 2D axes for comparison
+fig2 = plt.figure()
+ax2 = fig2.add_subplot()
+ax2.scatter(1, 1)
+ax2.set_visible(False)
+print("invisible 2D axes renders same as empty figure:", np.array_equal(render(fig2), ref))
+EOF
+cd - >/dev/null && python /tmp/repro.py</parameter>
+</invoke>
+$ cat > /tmp/repro.py << 'EOF'
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+print("matplotlib from:", matplotlib.__file__)
+
+def render(fig):
+    fig.canvas.draw()
+    return np.asarray(fig.canvas.buffer_rgba()).copy()
+
+# Figure with a single invisible 3D axes
+fig_test = plt.figure()
+ax = fig_test.add_subplot(projection="3d")
+ax.scatter(1, 1, 1)
+ax.set_visible(False)
+test = render(fig_test)
+
+# Reference: totally empty figure
+fig_ref = plt.figure()
+ref = render(fig_ref)
+
+print("invisible 3D axes renders same as empty figure:", np.array_equal(test, ref))
+print("number of differing pixels:", int((test != ref).any(axis=-1).sum()))
+
+# Same check with a 2D axes for comparison
+fig2 = plt.figure()
+ax2 = fig2.add_subplot()
+ax2.scatter(1, 1)
+ax2.set_visible(False)
+print("invisible 2D axes renders same as empty figure:", np.array_equal(render(fig2), ref))
+EOF
+python /tmp/repro.py
+$ python - << 'EOF'
+p = "lib/mpl_toolkits/mplot3d/axes3d.py"
+s = open(p).read()
+old = """    @martist.allow_rasterization
+    def draw(self, renderer):
+        self._unstale_viewLim()
+"""
+new = """    @martist.allow_rasterization
+    def draw(self, renderer):
+        if not self.get_visible():
+            return
+        self._unstale_viewLim()
+"""
+assert s.count(old) == 1, s.count(old)
+open(p, "w").write(s.replace(old, new))
+EOF
+git diff
+$ python /tmp/repro.py
+$ grep -n "^import\|^from\|check_figures_equal" lib/mpl_toolkits/mplot3d/tests/test_axes3d.py | head -40; echo ----; tail -30 lib/mpl_toolkits/mplot3d/tests/test_axes3d.py
+$ find . -path ./build -prune -o -path ./.git -prune -o -name "test_axes3d.py" -print; echo ----; find . -path ./build -prune -o -path ./.git -prune -o -type d -name "tests" -print | grep -i mplot3d
+$ find . -path ./build -prune -o -path ./.git -prune -o -path ./.eggs -prune -o \( -iname "*3d*" -o -iname "*mplot*" \) -print | grep -i test; echo ----; ls lib/mpl_toolkits; echo ----; ls lib/mpl_toolkits/mplot3d; echo ----; ls lib/mpl_toolkits/axes_grid1 2>/dev/null | head -30
+$ grep -n "^import\|^from\|check_figures_equal" lib/mpl_toolkits/tests/test_mplot3d.py | head -40; echo ----; tail -30 lib/mpl_toolkits/tests/test_mplot3d.py
+$ sed -n 1515,1560p lib/mpl_toolkits/tests/test_mplot3d.py
+$ python - << 'EOF'
+p = "lib/mpl_toolkits/tests/test_mplot3d.py"
+s = open(p).read()
+if not s.endswith("\n"):
+    s += "\n"
+s += '''
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes(fig_test, fig_ref):
+    # An invisible 3D Axes must not draw anything (background patch, panes,
+    # axis lines or artists), i.e. the figure should look like an empty one.
+    ax = fig_test.add_subplot(projection='3d')
+    ax.scatter(1, 1, 1)
+    ax.set_visible(False)
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes_among_visible(fig_test, fig_ref):
+    # Hiding one of several 3D Axes must only hide that one.
+    ax1, ax2 = fig_test.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    ax1.set_visible(False)
+
+    ax_ref = fig_ref.add_subplot(1, 2, 2, projection='3d')
+    ax_ref.scatter(1, 1, 1, c='r')
+'''
+open(p, "w").write(s)
+EOF
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k "invisible" -v 2>&1 | tail -20
+$ git diff lib/mpl_toolkits/mplot3d/axes3d.py > /tmp/fix.patch && cat /tmp/fix.patch | head -20
+git stash push -q -- lib/mpl_toolkits/mplot3d/axes3d.py
+echo "=== WITHOUT FIX ==="
+git diff --stat -- lib/mpl_toolkits/mplot3d/axes3d.py
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k "invisible" -v 2>&1 | grep -E "PASSED|FAILED|ERROR|passed|failed"
+git stash pop -q
+echo "=== FIX RESTORED ==="
+git diff --stat
+$ python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -q 2>&1 | tail -15; echo "=== GIT STATUS ==="; git status --short
+$ echo "=== ignored/untracked artifacts ==="; git status --short --ignored | grep -v "__pycache__\|^!! build\|^!! .eggs\|\.pyc" | head -20
+echo; echo "=== result_images ==="; ls -la --time=birth result_images 2>/dev/null | head -5
+echo; echo "=== Axes3D.get_tightbbox ==="; sed -n '/    def get_tightbbox/,/return mtransforms.Bbox.union/p' lib/mpl_toolkits/mplot3d/axes3d.py
+echo; echo "=== 2D Axes.get_tightbbox visibility handling ==="; grep -n "def get_tightbbox" lib/matplotlib/axes/_base.py; sed -n '/    def get_tightbbox/,/bb = \[\]/p' lib/matplotlib/axes/_base.py | grep -n "get_visible" </parameter>
+$ cat > /tmp/tight.py << 'EOF'
+import io
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+def attempt(name, func):
+    try:
+        print(f"{name}: OK ({func()})")
+    except Exception as e:
+        print(f"{name}: RAISED {type(e).__name__}: {e}")
+
+def direct(proj):
+    fig = plt.figure()
+    ax = fig.add_subplot(projection=proj)
+    ax.set_visible(False)
+    fig.canvas.draw()
+    return ax.get_tightbbox(fig.canvas.get_renderer())
+
+def constrained(proj):
+    fig = plt.figure(layout="constrained")
+    ax1, ax2 = fig.subplots(1, 2, subplot_kw={"projection": proj})
+    ax1.set_visible(False)
+    fig.canvas.draw()
+    return "drawn"
+
+def tight_save(proj):
+    fig = plt.figure()
+    ax1, ax2 = fig.subplots(1, 2, subplot_kw={"projection": proj})
+    ax1.set_visible(False)
+    fig.savefig(io.BytesIO(), format="png", bbox_inches="tight")
+    return "saved"
+
+def tl(proj):
+    fig = plt.figure()
+    ax1, ax2 = fig.subplots(1, 2, subplot_kw={"projection": proj})
+    ax1.set_visible(False)
+    fig.tight_layout()
+    fig.canvas.draw()
+    return "drawn"
+
+for label, fn in [("direct get_tightbbox", direct),
+                  ("constrained layout", constrained),
+                  ("savefig bbox_inches=tight", tight_save),
+                  ("tight_layout", tl)]:
+    for proj, pname in [(None, "2D"), ("3d", "3D")]:
+        attempt(f"{label}, {pname}", lambda: fn(proj))
+EOF
+python /tmp/tight.py
+$ python - << 'EOF'
+import traceback
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+fig = plt.figure(layout="constrained")
+ax1, ax2 = fig.subplots(1, 2, subplot_kw={"projection": "3d"})
+ax1.set_visible(False)
+try:
+    fig.canvas.draw()
+except Exception:
+    traceback.print_exc()
+EOF
+echo
+echo "=== 2D get_tightbbox: where it returns None ==="
+sed -n '/    def get_tightbbox/,/return mtransforms.Bbox.union/p' lib/matplotlib/axes/_base.py | grep -n -B2 -A2 "get_visible\|return None"
+echo
+echo "=== Figure.get_tightbbox: visibility checks ==="
+grep -n "get_visible" lib/matplotlib/figure.py | head
+$ python - << 'EOF'
+p = "lib/mpl_toolkits/mplot3d/axes3d.py"
+s = open(p).read()
+old = """                                    for_layout_only=for_layout_only)
+        batch = [ret]
+"""
+new = """                                    for_layout_only=for_layout_only)
+        if ret is None:
+            # Like for 2D Axes, an invisible Axes has no tight bbox.
+            return None
+        batch = [ret]
+"""
+assert s.count(old) == 1, s.count(old)
+open(p, "w").write(s.replace(old, new))
+EOF
+git diff lib/mpl_toolkits/mplot3d/axes3d.py
+echo "=== rerun tightbbox/layout checks ==="
+python /tmp/tight.py
+$ python - << 'EOF'
+p = "lib/mpl_toolkits/tests/test_mplot3d.py"
+s = open(p).read()
+if not s.endswith("\n"):
+    s += "\n"
+s += '''
+
+def test_invisible_axes_layout():
+    # Layout engines query the tight bbox of every Axes; for an invisible Axes
+    # that is None (as for 2D Axes), which must not make the layout fail.
+    fig = plt.figure(layout='constrained')
+    ax1, ax2 = fig.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.set_visible(False)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    assert ax1.get_tightbbox(renderer) is None
+    assert ax2.get_tightbbox(renderer) is not None
+'''
+open(p, "w").write(s)
+EOF
+echo "=== WITH FULL FIX ==="
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k invisible -p no:cacheprovider -q 2>&1 | tail -4
+
+cp lib/mpl_toolkits/mplot3d/axes3d.py /tmp/axes3d.py.fixed
+python - << 'EOF'
+p = "lib/mpl_toolkits/mplot3d/axes3d.py"
+s = open(p).read()
+blk = """        if ret is None:
+            # Like for 2D Axes, an invisible Axes has no tight bbox.
+            return None
+"""
+assert s.count(blk) == 1, s.count(blk)
+open(p, "w").write(s.replace(blk, ""))
+EOF
+echo "=== WITHOUT get_tightbbox FIX (draw fix kept) ==="
+python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k invisible -p no:cacheprovider -v 2>&1 | grep -E "PASSED|FAILED|passed|failed"
+cp /tmp/axes3d.py.fixed lib/mpl_toolkits/mplot3d/axes3d.py
+echo "=== RESTORED ==="
+cmp lib/mpl_toolkits/mplot3d/axes3d.py /tmp/axes3d.py.fixed && echo "axes3d.py identical to fixed version"
+git diff --stat
+$ files=$( { grep -rlE "projection=.3d.|Axes3D|mplot3d|'3d'|\"3d\"" lib/matplotlib/tests lib/mpl_toolkits/tests --include=*.py; ls lib/matplotlib/tests/test_constrainedlayout.py lib/matplotlib/tests/test_tightlayout.py lib/matplotlib/tests/test_figure.py; } | sort -u )
+echo "=== test files ==="; echo "$files"
+echo "=== running ==="
+python -m pytest $files -p no:cacheprovider -q -n 4 -rf 2>&1 | tail -25
+$ git diff > /tmp/all_changes.patch; wc -l /tmp/all_changes.patch
+echo "stash list before:"; git stash list
+git stash push -q
+echo "=== BASELINE (no changes of mine): diff stat should be empty ==="; git diff --stat
+python -m pytest lib/matplotlib/tests/test_pyplot.py::test_pylab_integration -p no:cacheprovider -q 2>&1 | grep -E "passed|failed" | tail -3
+echo "=== why it fails (direct run of the subprocess command) ==="
+python -c "from IPython import start_ipython; start_ipython()" --pylab -c "import matplotlib.pyplot as plt;assert plt._REPL_DISPLAYHOOK == plt._ReplDisplayHook.IPYTHON" 2>&1 | tail -6
+git stash pop -q
+echo "=== RESTORED ==="; git diff --stat
+git diff > /tmp/all_changes_after.patch; cmp /tmp/all_changes.patch /tmp/all_changes_after.patch && echo "changes identical to backup"
+echo "stash list after:"; git stash list
+$ rm -rf result_images .pytest_cache
+echo "=== git status (ignored entries, minus build artifacts) ==="
+git status --short --ignored | grep -v "__pycache__\|^!! build\|^!! .eggs\|\.pyc\|\.so$\|egg-info\|LICENSE_QHULL\|_version.py"
+echo
+echo "=== flake8 on changed files ==="
+if python -m flake8 --version >/dev/null 2>&1; then
+    python -m flake8 lib/mpl_toolkits/mplot3d/axes3d.py lib/mpl_toolkits/tests/test_mplot3d.py 2>&1 | head -10
+    echo "(flake8 exit: done)"
+else
+    echo "flake8 not installed; falling back to a line-length check"
+fi
+echo "=== added lines longer than 79 chars (expect none) ==="
+git diff -U0 | grep '^+' | grep -v '^+++' | awk 'length($0) > 80'
+echo "=== final diff ==="
+git diff
+rm -f /tmp/repro.py /tmp/tight.py /tmp/fix.patch /tmp/all_changes.patch /tmp/all_changes_after.patch /tmp/axes3d.py.fixed
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`set_visible(False)` now hides a 3D axes completely, and hiding a 3D subplot no longer crashes constrained layout.
+
+**Root cause:** `Axes3D.draw` overrides `_AxesBase.draw` and draws the background patch, panes and axis lines itself before calling `super().draw()`. The only visibility check was in the parent's `draw`, so those parts were drawn even for an invisible axes. In my reproduction, an invisible 3D axes left 82,279 pixels different from an empty figure, while the 2D case matched exactly.
+
+**Changes** (in `lib/mpl_toolkits/mplot3d/axes3d.py`):
+1. **`Axes3D.draw`:** it now returns early when `not self.get_visible()`, as the 2D version does. This is the fix for the reported bug.
+2. **`Axes3D.get_tightbbox`:** it now returns `None` for an invisible axes, as the 2D version does. This goes beyond the reported bug. Without it, once the axes can be hidden, `ax.get_tightbbox()` raised `AttributeError: 'NoneType' object has no attribute 'xmin'`. The same crash hit any constrained-layout figure with a hidden 3D subplot.
+
+**Tests:** I added three tests to `lib/mpl_toolkits/tests/test_mplot3d.py`:
+- `test_invisible_axes`: an invisible 3D axes renders the same as an empty figure.
+- `test_invisible_axes_among_visible`: the scenario from the issue, where hiding one of two 3D subplots leaves the other unchanged.
+- `test_invisible_axes_layout`: constrained layout works with a hidden 3D axes, and a visible one still gets a real bbox.
+
+I checked that each test fails without its corresponding fix and passes with it.
+
+**Verification:** The whole 3D test file passes, and so does a wider run covering the constrained-layout, tight-layout, figure and other 3D-related test files (434 passed). One test, `test_pyplot.py::test_pylab_integration`, fails, but it fails identically on the untouched baseline because of an IPython subprocess issue in this environment. flake8 reported nothing on the changed files. I removed the `result_images/` and `.pytest_cache/` directories my runs created.

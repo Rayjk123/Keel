@@ -1,0 +1,233 @@
+$ ls -la && git log --oneline -3 && grep -rn "collect-only\|collectonly\|collect_only" --include=*.py src | head -50
+$ sed -n 90,135p src/_pytest/main.py && echo ------- && grep -rnE "addoption\(|\"-[a-zA-Z]\"|'-[a-zA-Z]'" src/_pytest/*.py | grep -E "\"-[a-zA-Z]\"|'-[a-zA-Z]'" | head -60
+$ git status --short; echo "------- docs mentioning option"; grep -rn "collect-only\|collectonly" doc/ --include=*.rst | head -40; echo "------- changelog dir"; ls changelog | tail -12; echo "------- sample feature entry"; for f in $(ls changelog | grep feature | tail -2); do echo "== $f"; cat changelog/$f; done; echo "------- parser name handling"; grep -n "_set_opt_strings\|def names\|_long_opts\|_short_opts\|allow_abbrev\|DropShorterLongHelpFormatter" src/_pytest/config/argparsing.py | head -30</parameter>
+$ git status --short; echo "------- docs mentioning option"; grep -rn "collect-only\|collectonly" doc/ --include=*.rst | head -40; echo "------- changelog dir"; ls changelog | tail -12; echo "------- sample feature entries"; for f in $(ls changelog | grep feature | tail -2); do echo "== $f"; cat changelog/$f; done; echo "------- parser name handling"; grep -n "lowercase shortoptions\|_set_opt_strings\|def names\|_long_opts\|_short_opts\|allow_abbrev\|DropShorterLongHelpFormatter" src/_pytest/config/argparsing.py | head -30
+$ sed -n 300,335p src/_pytest/config/argparsing.py; echo "------- _parse_optional / formatter region"; sed -n 372,452p src/_pytest/config/argparsing.py; echo "------- existing uses of --co"; grep -rnE -- "--co\b" src testing doc changelog | head -20; echo "------- TestCollectonly tests"; grep -n "class TestCollectonly" -A 25 testing/test_terminal.py; echo "------- python"; python --version; python -c "import pytest; print(pytest.__version__, pytest.__file__)"
+$ python - <<'EOF'
+import io
+
+def patch(path, old, new):
+    with io.open(path, encoding="utf-8") as f:
+        src = f.read()
+    assert src.count(old) == 1, (path, src.count(old))
+    with io.open(path, "w", encoding="utf-8") as f:
+        f.write(src.replace(old, new))
+
+patch(
+    "src/_pytest/main.py",
+    '        "--collectonly",\n        "--collect-only",\n        action="store_true",\n',
+    '        "--collectonly",\n        "--collect-only",\n        "--co",\n        action="store_true",\n',
+)
+
+anchor = '''        result = testdir.runpytest("--collect-only")
+        result.stdout.fnmatch_lines(
+            ["<Module test_collectonly_basic.py>", "  <Function test_func>"]
+        )
+'''
+addition = '''
+    @pytest.mark.parametrize("option", ["--collectonly", "--collect-only", "--co"])
+    def test_collectonly_option_aliases(self, testdir, option):
+        testdir.makepyfile(
+            """
+            def test_func():
+                assert 0
+        """
+        )
+        result = testdir.runpytest(option)
+        result.stdout.fnmatch_lines(
+            ["<Module test_collectonly_option_aliases.py>", "  <Function test_func>"]
+        )
+        # The tests are only collected, never executed.
+        assert result.ret == 0
+'''
+patch("testing/test_terminal.py", anchor, anchor + addition)
+EOF
+printf '%s\n' 'Add ``--co`` as a shorter alias for ``--collect-only``.' > changelog/6116.feature.rst
+git status --short && git diff
+echo "------- running the new/related tests"
+python -m pytest testing/test_terminal.py -q -k "Collectonly" -p no:cacheprovider 2>&1 | tail -15
+$ REPO=$(pwd)
+mkdir -p /tmp/co_demo && cat > /tmp/co_demo/test_demo.py <<'EOF'
+def test_a():
+    assert 0
+
+
+class TestX:
+    def test_b(self):
+        assert 0
+EOF
+cd /tmp/co_demo
+python -c "import pytest; print('pytest imported from', pytest.__file__)"
+echo "------- help output"; python -m pytest --help -p no:cacheprovider | grep -n -B1 -A1 -- "--co\b"
+echo "------- --co"; python -m pytest --co -p no:cacheprovider; echo "exit=$?"
+echo "------- --co -q"; python -m pytest --co -q -p no:cacheprovider; echo "exit=$?"
+echo "------- neighbouring --co* options still parse"; python -m pytest --color=no --confcutdir=/tmp/co_demo --continue-on-collection-errors -q -p no:cacheprovider 2>&1 | tail -4
+echo "------- abbreviations still rejected"; python -m pytest --coll -p no:cacheprovider 2>&1 | tail -3
+cd "$REPO"
+echo "------- formatting / lint (if available)"
+python -m black --version 2>&1 | head -1
+python -m black --check --diff src/_pytest/main.py testing/test_terminal.py 2>&1 | tail -15
+python -m flake8 src/_pytest/main.py testing/test_terminal.py 2>&1 | tail -10
+echo "------- broader regression run"
+timeout 900 python -m pytest testing/test_terminal.py testing/test_collection.py testing/test_helpconfig.py testing/test_parseopt.py testing/test_config.py testing/test_conftest.py testing/acceptance_test.py -q -rf -p no:cacheprovider 2>&1 | tail -25
+echo "------- working tree"
+git status --short
+$ REPO=$(pwd)
+git diff > /tmp/co_change.patch
+cp changelog/6116.feature.rst /tmp/6116.feature.rst.bak
+ls -la /tmp/co_change.patch /tmp/6116.feature.rst.bak
+
+echo "------- abbreviation '--coll' (full message)"
+(cd /tmp/co_demo && python -m pytest --coll -p no:cacheprovider 2>&1 | head -5)
+
+run_tests() {
+  timeout 900 python -m pytest testing/test_terminal.py testing/test_collection.py testing/test_helpconfig.py testing/test_parseopt.py testing/test_config.py testing/test_conftest.py testing/acceptance_test.py -q -rfE -p no:cacheprovider 2>&1
+}
+
+echo "=== WITH CHANGE ==="
+run_tests > /tmp/with_change.log
+tail -1 /tmp/with_change.log
+grep -E '^(FAILED|ERROR) ' /tmp/with_change.log | awk '{print $1" "$2}' | sort -u > /tmp/with_change.fail
+wc -l < /tmp/with_change.fail
+
+echo "=== BASELINE (my change stashed) ==="
+if git stash push -u -m co-change >/dev/null; then
+  git status --short | sed 's/^/  tree: /'; echo "  (tree clean above means stash worked)"
+  run_tests > /tmp/baseline.log
+  tail -1 /tmp/baseline.log
+  grep -E '^(FAILED|ERROR) ' /tmp/baseline.log | awk '{print $1" "$2}' | sort -u > /tmp/baseline.fail
+  wc -l < /tmp/baseline.fail
+  git stash pop >/dev/null && echo "stash popped OK"
+else
+  echo "STASH FAILED - skipping baseline"
+fi
+echo "stash entries left: $(git stash list | wc -l)"
+
+echo "=== DIFF of failing test ids (< baseline only, > with-change only) ==="
+diff /tmp/baseline.fail /tmp/with_change.fail && echo "IDENTICAL failure sets"
+
+echo "=== most common failure causes at baseline ==="
+grep -E '^E  ' /tmp/baseline.log | sed 's/[0-9]\{3,\}/N/g' | sort | uniq -c | sort -rn | head -8
+
+echo "=== tree after restore ==="
+git status --short
+git diff --stat
+$ echo "------- TestCollectonly in baseline failures"; grep "TestCollectonly" /tmp/baseline.fail || echo "(none)"
+echo "------- baseline failures per file"; awk '{print $2}' /tmp/baseline.fail | sed 's/::.*//' | sort | uniq -c
+n=$(grep -nF "TestCollectonly.test_collectonly_option_aliases[--co] " /tmp/with_change.log | head -1 | cut -d: -f1)
+echo "------- failure section of new test [--co] (log line: ${n:-not found})"
+[ -n "$n" ] && sed -n "${n},$((n+80))p" /tmp/with_change.log
+echo "------- test_terminal.py alone, with my change"
+python -m pytest testing/test_terminal.py -q -rfE -p no:cacheprovider 2>&1 | tail -15
+$ echo "------- does this pytest honour PYTEST_DISABLE_PLUGIN_AUTOLOAD?"
+grep -n "PYTEST_DISABLE_PLUGIN_AUTOLOAD" src/_pytest/config/__init__.py || echo "(not found)"
+
+echo "------- root cause check: does importing pkg_resources put setuptools/_vendor on sys.path?"
+python -W ignore - <<'EOF'
+import sys
+print("before:", [p for p in sys.path if p.endswith("_vendor")])
+import pkg_resources
+print("after: ", [p for p in sys.path if p.endswith("_vendor")])
+EOF
+
+echo "------- test files that mention collect-only / --help / --co (plus the ones used earlier)"
+FILES=$( { grep -rlE "collect-only|collectonly|collect_only|--help|--co\b" testing --include=*.py --exclude-dir=example_scripts --exclude=conftest.py; echo testing/test_config.py; echo testing/test_conftest.py; echo testing/test_parseopt.py; echo testing/test_helpconfig.py; echo testing/acceptance_test.py; } | sort -u )
+echo "$FILES" | tr '\n' ' '; echo
+echo "count: $(echo "$FILES" | wc -l)"
+
+run_tests() {
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 timeout 900 python -m pytest $FILES -q -rfE -p no:cacheprovider 2>&1
+}
+
+echo "=== WITH CHANGE (plugin autoload disabled) ==="
+run_tests > /tmp/with_change2.log
+tail -1 /tmp/with_change2.log
+grep -E '^(FAILED|ERROR) ' /tmp/with_change2.log | awk '{print $1" "$2}' | sort -u > /tmp/with_change2.fail
+echo "failing ids: $(wc -l < /tmp/with_change2.fail)"
+
+echo "=== BASELINE (my change stashed, plugin autoload disabled) ==="
+if git stash push -u -m co-change >/dev/null; then
+  run_tests > /tmp/baseline2.log
+  tail -1 /tmp/baseline2.log
+  grep -E '^(FAILED|ERROR) ' /tmp/baseline2.log | awk '{print $1" "$2}' | sort -u > /tmp/baseline2.fail
+  echo "failing ids: $(wc -l < /tmp/baseline2.fail)"
+  git stash pop >/dev/null && echo "stash popped OK"
+else
+  echo "STASH FAILED - skipping baseline"
+fi
+echo "stash entries left: $(git stash list | wc -l)"
+
+echo "=== DIFF of failing ids (< baseline only, > with-change only) ==="
+diff /tmp/baseline2.fail /tmp/with_change2.fail && echo "IDENTICAL failure sets"
+
+echo "=== failures remaining with my change (first 25) ==="
+head -25 /tmp/with_change2.fail
+
+echo "=== tree after restore ==="
+git status --short
+$ echo "------- why did the previous run abort? (collection error details)"
+grep -n -A25 "ERROR collecting" /tmp/with_change2.log | head -45
+echo "------- last lines of the previous run"
+tail -4 /tmp/with_change2.log
+
+FILES="testing/acceptance_test.py testing/deprecated_test.py testing/logging/test_reporting.py testing/python/collect.py testing/python/fixtures.py testing/python/integration.py testing/python/metafunc.py testing/test_assertion.py testing/test_collection.py testing/test_config.py testing/test_conftest.py testing/test_helpconfig.py testing/test_parseopt.py testing/test_pluginmanager.py testing/test_session.py testing/test_terminal.py"
+
+run_tests() {
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 timeout 800 python -m pytest $FILES -q -rfE --continue-on-collection-errors -p no:cacheprovider 2>&1
+}
+
+echo "=== WITH CHANGE (autoload disabled, continue past collection errors) ==="
+run_tests > /tmp/with_change3.log
+tail -1 /tmp/with_change3.log
+grep -E '^(FAILED|ERROR) ' /tmp/with_change3.log | awk '{print $1" "$2}' | sort -u > /tmp/with_change3.fail
+echo "failing ids: $(wc -l < /tmp/with_change3.fail)"
+
+echo "=== BASELINE (my change stashed) ==="
+if git stash push -u -m co-change >/dev/null; then
+  run_tests > /tmp/baseline3.log
+  tail -1 /tmp/baseline3.log
+  grep -E '^(FAILED|ERROR) ' /tmp/baseline3.log | awk '{print $1" "$2}' | sort -u > /tmp/baseline3.fail
+  echo "failing ids: $(wc -l < /tmp/baseline3.fail)"
+  git stash pop >/dev/null && echo "stash popped OK"
+else
+  echo "STASH FAILED - skipping baseline"
+fi
+echo "stash entries left: $(git stash list | wc -l)"
+
+echo "=== DIFF of failing ids (< baseline only, > with-change only) ==="
+diff /tmp/baseline3.fail /tmp/with_change3.fail && echo "IDENTICAL failure sets"
+
+echo "=== failures remaining with my change (first 30) ==="
+head -30 /tmp/with_change3.fail
+
+echo "=== new alias tests, autoload disabled ==="
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest testing/test_terminal.py -v -k option_aliases -p no:cacheprovider 2>&1 | tail -8
+
+echo "=== tree ==="
+git status --short
+$ echo "------- changelog entry"; cat changelog/6116.feature.rst
+echo "------- changelog filename convention in pre-commit config"; grep -n -B3 -A3 "changelog" .pre-commit-config.yaml
+echo "------- final diff"; git diff; echo "------- status"; git status --short
+echo "------- final test run (plugin autoload disabled to sidestep the env's typeguard problem)"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest testing/test_terminal.py testing/test_helpconfig.py testing/test_parseopt.py -q -rf -p no:cacheprovider 2>&1 | tail -6
+echo "------- real CLI check of the final tree"
+mkdir -p /tmp/co_final && printf 'def test_a():\n    assert 0\n' > /tmp/co_final/test_x.py
+(cd /tmp/co_final && python -m pytest --co -q -p no:cacheprovider; echo "exit=$?")
+echo "------- cleanup of my temp files outside the repo"
+rm -rf /tmp/co_final /tmp/co_demo /tmp/co_change.patch /tmp/6116.feature.rst.bak /tmp/with_change*.log /tmp/with_change*.fail /tmp/baseline*.log /tmp/baseline*.fail
+echo "stash entries left: $(git stash list | wc -l)"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I added `--co` as a short alias for `--collect-only`, and it works from the real command line.
+
+- **The change:** in `src/_pytest/main.py` the collect option is now registered as `--collectonly`, `--collect-only`, `--co`. `--help` shows it as `--collect-only, --co`.
+- **Why `--co` and not one letter:** the issue leaves the character open, and lowercase single letters are reserved for pytest core, so I didn't pick one. `--co` is safe because the parser uses `allow_abbrev=False` and checks exact option names first. `--color`, `--confcutdir` and `--continue-on-collection-errors` still parse, and an abbreviation like `--coll` is still rejected.
+- **Test:** `testing/test_terminal.py` has a new parametrized test, `test_collectonly_option_aliases`, covering all three spellings. Its test body is `assert 0`, so it also shows nothing is executed during collection.
+- **Changelog:** I added `changelog/6116.feature.rst`. It follows the `####.feature.rst` naming rule, but I chose the number myself, so rename it if the real issue or PR number differs.
+
+**Testing:**
+- **Environment problem:** many tests fail here regardless of my change. An autoloaded `typeguard` plugin crashes this older pytest in `addini`. That inflated the first broad runs (331 baseline failures, plus my 3 new tests failing in that broad run).
+- **Controlled comparison:** I disabled plugin autoload (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`) and used `--continue-on-collection-errors`, then ran about 960 tests with and without my change. The set of failing tests was identical in both runs, and the only difference was 3 more passes from the new tests.
+- **Failures left in that comparison:** the 26 failures and 1 collection error already occur without my change. The collection error is `testing/python/metafunc.py` failing to import `hypothesis`.
+- **Final targeted run:** `test_terminal.py`, `test_helpconfig.py` and `test_parseopt.py` had one failure, `test_parseopt.py::test_argcomplete`. It also fails without my change (a setuptools `DeprecationWarning`).
+
+`black` and `flake8` aren't installed here, so I couldn't run them. I kept the new lines within the file's existing style and under 88 columns.

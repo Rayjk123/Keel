@@ -1,0 +1,154 @@
+$ pwd && ls -la && ls -la /app
+$ cd /app && file graphene.dat && wc -l graphene.dat && head -c 2500 graphene.dat && printf '\n--- end ---\n' && tail -c 800 graphene.dat
+$ cd /app && python - <<'PY'
+from pathlib import Path
+b = Path("graphene.dat").read_bytes()
+print("size:", len(b), "newlines:", b.count(b"\n"))
+print("start:", repr(b[:2500]))
+print("end:", repr(b[-800:]))
+PY
+$ cd /app && python - <<'PY'
+from pathlib import Path
+from io import StringIO
+import numpy as np
+from scipy.signal import find_peaks
+x,y=np.loadtxt(StringIO(Path("graphene.dat").read_text().replace(",",".")),unpack=True)
+print("rows",len(x),"x limits",min(x),max(x),"y limits",min(y),max(y))
+print("x non-decreasing steps", np.where(np.diff(x)>=0)[0][:100], "total", sum(np.diff(x)>=0))
+print("sample rows (index, x, y)")
+for i in range(0,len(x),100):
+    print(i,round(x[i],2),round(y[i],2))
+p,prop=find_peaks(y,prominence=400,width=1)
+print("strongest peaks (index, x, y, prominence, width in samples):")
+for j in np.argsort(prop["prominences"])[-40:][::-1]:
+    i=p[j]
+    print(i,*(round(z,2) for z in (x[i],y[i],prop["prominences"][j],prop["widths"][j])))
+PY
+$ cd /app && python - <<'PY'
+from pathlib import Path
+import statistics as s
+from collections import Counter
+rows=[tuple(map(float,line.replace(',','.').split())) for line in Path("graphene.dat").read_text().splitlines() if line.strip()]
+print("column counts",Counter(map(len,rows)))
+x,y=zip(*rows); n=len(x)
+print("rows",n,"x limits",min(x),max(x),"y limits",min(y),max(y))
+ups=[i for i in range(n-1) if x[i+1]>=x[i]]
+print("x non-decreasing steps",ups[:100], "total",len(ups))
+print("sample rows (index, x, y)")
+for i in range(0,n,100): print(i,round(x[i],2),round(y[i],2))
+ys=[s.mean(y[max(0,i-2):i+3]) for i in range(n)]
+peaks=[]
+for i in range(1,n-1):
+    if ys[i-1] < ys[i] >= ys[i+1]:
+        l=r=i
+        while l>0 and ys[l-1]<=ys[i]: l-=1
+        while r<n-1 and ys[r+1]<=ys[i]: r+=1
+        pr=ys[i]-max(min(ys[l:i+1]),min(ys[i:r+1]))
+        peaks.append((pr,i))
+print("strongest peaks (index, x, y, prominence after 5-point average)")
+for pr,i in sorted(peaks,reverse=True)[:40]:
+    print(i,round(x[i],3),round(y[i],2),round(pr,2))
+PY
+$ cd /app && python - <<'PY'
+from pathlib import Path
+from statistics import mean
+r=[(1e7/float(a),float(b)) for a,b in (line.replace(',','.').split() for line in Path("graphene.dat").read_text().splitlines())]
+for lo,hi in [(1400,1760),(2460,2880)]:
+    print("10 cm^-1 bins around peak (center, mean intensity)")
+    print([(j+5,round(mean(y for x,y in r if j<=x<j+10))) for j in range(lo,hi,10)])
+    c=1580 if lo==1400 else 2670
+    print("individual points in peak center (shift, intensity)")
+    print([(round(x,2),round(y,1)) for x,y in r if abs(x-c)<26])
+PY
+$ cat > /tmp/ramanfit.py <<'PY'
+from pathlib import Path
+from math import sqrt
+from statistics import fmean
+import json
+
+rows=[(1e7/float(a),float(b)) for a,b in (line.replace(',','.').split() for line in Path("/app/graphene.dat").read_text().splitlines())]
+
+def fit(center, halfwin, slope=False):
+    xy=[(x-center,y) for x,y in rows if abs(x-center)<=halfwin]
+    t,y=zip(*xy)
+    tm,ym=fmean(t),fmean(y)
+    dt=[ti-tm for ti in t]
+    dy=[yi-ym for yi in y]
+    stt=sum(d*d for d in dt)
+    sty=sum(a*b for a,b in zip(dt,dy))
+    # For a trial center and width, obtain the optimal linear coefficients
+    # (height, background and optionally background slope) by least squares.
+    def at(p):
+        c,g=p
+        if g<=0 or abs(c)>halfwin:
+            return float('inf'),None
+        L=[1/(1+((ti-c)/g)**2) for ti in t]
+        lm=fmean(L)
+        dl=[v-lm for v in L]
+        sll=sum(v*v for v in dl)
+        sly=sum(a*b for a,b in zip(dl,dy))
+        slt=sum(a*b for a,b in zip(dl,dt))
+        amp=(sly-slt*sty/stt)/(sll-slt*slt/stt) if slope else sly/sll
+        m=(sty-amp*slt)/stt if slope else 0.
+        b=ym-amp*lm-m*tm  # background at nominal center
+        err=sum((yi-b-m*ti-amp*li)**2 for ti,yi,li in zip(t,y,L))
+        return err, (center+c,g,amp,b+m*c,m)
+    # Refine both nonlinear coordinates; start near the measured peak.
+    c=0.
+    g=10. if center<2000 else 20.
+    step=g/2
+    while step>1e-6:
+        _,c1,g1=min((at((c+i*step,g+j*step))[0],c+i*step,g+j*step) for i in (-1,0,1) for j in (-1,0,1))
+        if (c1,g1)==(c,g): step*=0.5
+        else: c,g=c1,g1
+    sse,p=at((c,g))
+    return list(p)+[sqrt(sse/len(y))]
+if __name__=='__main__':
+    print("center  window   slope?   x0         HWHM       height     offset     bg slope   RMS residual")
+    for c,windows in [(1580,(35,50,70,80,100)),(2670,(60,80,100,125,150))]:
+        for w in windows:
+            for sl in (False,True):
+                p=fit(c,w,sl)
+                print(f"{c}    +/-{w:<4}  {str(sl):<6} "+" ".join(f"{v:10.3f}" for v in p))
+PY
+python /tmp/ramanfit.py
+$ cd /tmp && python - <<'PY'
+from ramanfit import fit, rows
+from statistics import median
+for c,windows in [(1580,(80,100,120)),(2670,(150,180,200,220,250))]:
+    print(f"Peak near {c}: half-window, center, HWHM, height, offset, slope, RMS; observed vs fitted intensities at flanks")
+    for w in windows:
+        x0,g,a,b,m,rms=fit(c,w,slope=True)
+        flank=[]
+        for side in (-1,1):
+            pts=[(x,y) for x,y in rows if w-18 < side*(x-c) <= w]
+            flank.append((round(median(y for x,y in pts)),round(median(b+m*(x-x0)+a/(1+((x-x0)/g)**2) for x,y in pts))))
+        print(w, *(round(v,2) for v in (x0,g,a,b,m,rms)),flank)
+PY
+$ cd /app && PYTHONPATH=/tmp python - <<'PY'
+from ramanfit import fit
+from pathlib import Path
+from math import isfinite
+import json
+keys = ("x0", "gamma", "amplitude", "offset")
+results = {}
+for name, center, half_window in (("G", 1580, 100), ("2D", 2670, 150)):
+    x0, gamma, amplitude, offset, slope, rms = fit(center, half_window, slope=True)
+    assert abs(x0-center)<half_window and gamma>0 and amplitude>0
+    values = (x0, gamma, amplitude, offset)
+    assert all(isfinite(v) for v in values)
+    results[name] = {k: round(v, 5) for k,v in zip(keys, values)}
+path = Path("/app/results.json")
+path.write_text(json.dumps(results, indent=2, allow_nan=False) + "\n")
+assert json.loads(path.read_text()) == results
+print(path.read_text(), end="")
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Fitted the graphene G and 2D peaks and verified that `/app/results.json` contains all four requested parameters for each peak.
+
+| Peak | x0 (cm⁻¹) | gamma (cm⁻¹) | Amplitude | Offset |
+|---|---:|---:|---:|---:|
+| G | 1580.52 | 8.48 | 8317.22 | 5748.35 |
+| 2D | 2670.30 | 17.44 | 12306.61 | 1258.60 |
+
+`gamma` is the Lorentzian half-width at half-maximum. `offset` is the fitted local background at `x0`, and `amplitude` is the peak height above that background.

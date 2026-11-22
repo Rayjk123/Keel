@@ -1,0 +1,213 @@
+$ ls -la && git log --oneline -3
+$ ls -la pylint/lint/ && grep -n "recursive\|_discover_files\|ignore_paths\|ignore-paths\|_is_ignored_file\|_ignore_paths" -r pylint/ | grep -v "\.pyc"
+$ sed -n 570,650p pylint/lint/pylinter.py && echo ------- && cat pylint/lint/expand_modules.py
+$ sed -n 40,100p pylint/lint/base_options.py && echo ------- && grep -n "regexp_paths_csv\|_regexp_paths_csv_transfomer\|_regexp_paths_csv_validator\|GLOBAL_OPTION_PATTERN_LIST\|def _regexp_csv\|def _regex" -r pylint/
+$ sed -n 90,140p pylint/config/argument.py
+$ rm -rf /tmp/repro && mkdir -p /tmp/repro/src/gen && cd /tmp/repro && \
+printf 'import os\n' > src/region_selection.py && \
+printf 'import sys\n' > src/gen/about.py && \
+printf '[tool.pylint.MASTER]\nignore-paths = [\n  # Auto generated\n  "^src/gen/.*$",\n]\n' > pyproject.toml && \
+cat pyproject.toml && \
+for target in "src/" "src" "./src" "."; do echo "=== pylint --recursive=y $target ==="; python -m pylint --recursive=y --disable=all --enable=unused-import "$target" 2>&1 | grep -v '^$'; done
+$ cd /tmp/repro && python -c "
+import ntpath, posixpath
+from pylint.config.argument import _regexp_paths_csv_transfomer
+pats = _regexp_paths_csv_transfomer('^src/gen/.*\$')
+print('compiled:', [p.pattern for p in pats])
+match = lambda s: any(p.match(s) for p in pats)
+# What os.walk('src/') + os.path.join produce on Windows (ntpath) vs Linux './src' (posixpath)
+for label, mod, top in [('windows src/', ntpath, 'src/'), ('linux ./src', posixpath, './src')]:
+    raw = mod.join(mod.join(top, 'gen'), 'about.py')
+    norm = mod.normpath(raw)
+    print(f'{label:13} raw={raw!r:24} match={match(raw)!s:5} | normpath={norm!r:22} match={match(norm)}')
+"
+$ grep -n "recursive" tests/test_self.py | head -40; echo -------; find tests/regrtest_data/directory | sort; echo -------; ls doc/whatsnew/ | head; ls doc/whatsnew/2 2>/dev/null | tail -3
+$ sed -n 1225,1360p tests/test_self.py
+$ sed -n 770,785p pylint/lint/pylinter.py; echo -------; sed -n 1005,1020p pylint/lint/pylinter.py; echo -------; grep -n "_is_ignored_file\|_is_in_ignore_list_re\|normpath\|ignore_paths\|def test" tests/lint/unittest_expand_modules.py | head -30; echo -------; cat pylint/__pkginfo__.py | grep -n "__version__ ="; ls doc/whatsnew/2/; ls doc/whatsnew/2/2.14/ 2>/dev/null; ls doc/whatsnew/2/2.15/ 2>/dev/null
+$ sed -n 1,30p tests/lint/unittest_expand_modules.py; echo -------; grep -n "^from\|^import\|_test_cwd\|_test_sys_path" tests/test_self.py | head -40; echo -------; sed -n 1,40p doc/whatsnew/2/2.14/full.rst
+$ sed -n 28,160p tests/lint/unittest_expand_modules.py; echo -------; cat tests/regrtest_data/directory/ignored_subdirectory/failing.py; echo -------; sed -n 70,92p tests/test_self.py
+$ python - <<'EOF'
+from pathlib import Path
+
+# 1) End-to-end regression test
+p = Path("tests/test_self.py")
+src = p.read_text()
+anchor = "    def test_recursive_current_dir(self):\n"
+assert src.count(anchor) == 1
+new_test = '''    def test_ignore_path_recursive_current_dir(self) -> None:
+        """Tests that paths are normalized before checking if they are ignored.
+
+        A recursive run over '.' yields paths such as
+        './ignored_subdirectory/failing.py', which must still match an anchored
+        ``ignore-paths`` pattern.
+        """
+        with _test_sys_path():
+            # pytest is including directory HERE/regrtest_data to sys.path which causes
+            # astroid to believe that directory is a package.
+            sys.path = [
+                path
+                for path in sys.path
+                if not os.path.basename(path) == "regrtest_data"
+            ]
+            with _test_cwd():
+                os.chdir(join(HERE, "regrtest_data", "directory"))
+                self._runtest(
+                    [
+                        ".",
+                        "--recursive=y",
+                        "--ignore-paths=^ignored_subdirectory/.*",
+                    ],
+                    code=0,
+                )
+
+'''
+p.write_text(src.replace(anchor, new_test + anchor))
+
+# 2) Unit test for _is_ignored_file
+p = Path("tests/lint/unittest_expand_modules.py")
+src = p.read_text()
+old_imports = (
+    "import re\nfrom pathlib import Path\n",
+    "from pylint.checkers import BaseChecker\n"
+    "from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules\n",
+)
+new_imports = (
+    "import os\nimport re\nfrom pathlib import Path\n",
+    "from pylint.checkers import BaseChecker\n"
+    "from pylint.config.argument import _regexp_paths_csv_transfomer\n"
+    "from pylint.lint.expand_modules import (\n"
+    "    _is_ignored_file,\n"
+    "    _is_in_ignore_list_re,\n"
+    "    expand_modules,\n"
+    ")\n",
+)
+for old, new in zip(old_imports, new_imports):
+    assert src.count(old) == 1, old
+    src = src.replace(old, new)
+anchor = '    assert _is_in_ignore_list_re("src/tests/whatever.xml", patterns)\n'
+assert src.count(anchor) == 1
+unit_test = '''
+
+def test__is_ignored_file_normalizes_path() -> None:
+    """Paths are normalized before being matched against ignore-paths.
+
+    Recursive runs build paths with os.walk() and os.path.join(), giving e.g.
+    './src/gen/about.py', or on Windows the mixed-separator 'src/gen\\\\about.py'.
+    """
+    ignore_paths = _regexp_paths_csv_transfomer("^src/gen/.*$")
+    ignored = (os.path.join(".", "src", "gen", "about.py"), f"src/gen{os.sep}about.py")
+    for path in ignored:
+        assert _is_ignored_file(path, [], [], ignore_paths)
+    not_ignored = os.path.join(".", "src", "about.py")
+    assert not _is_ignored_file(not_ignored, [], [], ignore_paths)
+'''
+p.write_text(src.replace(anchor, anchor + unit_test))
+EOF
+git diff --stat && python -m pytest tests/test_self.py tests/lint/unittest_expand_modules.py -q -p no:cacheprovider -k "test_ignore_path_recursive_current_dir or test__is_ignored_file_normalizes_path" 2>&1 | grep -E "PASS|FAIL|Error|assert|passed|failed|W0611|failing" | head -20
+$ python - <<'EOF'
+from pathlib import Path
+
+fix_path = Path("pylint/lint/expand_modules.py")
+fix_src = fix_path.read_text()
+fix_old = '''    ignore_list_paths_re: list[Pattern[str]],
+) -> bool:
+    basename = os.path.basename(element)
+'''
+fix_new = '''    ignore_list_paths_re: list[Pattern[str]],
+) -> bool:
+    element = os.path.normpath(element)
+    basename = os.path.basename(element)
+'''
+
+log_path = Path("doc/whatsnew/2/2.14/full.rst")
+log_src = log_path.read_text()
+log_old = '''What's New in Pylint 2.14.4?
+----------------------------
+Release date: TBA
+
+'''
+log_new = log_old + '''* Fixed an issue where ``ignore-paths`` patterns were not applied to some files or
+  directories discovered by ``--recursive=y``, e.g. when scanning ``.`` with
+  ``--ignore-paths=^path/to/dir``, or on Windows. Paths are now normalized before
+  being matched.
+
+  Closes #6964
+
+'''
+
+assert fix_src.count(fix_old) == 1, "fix anchor not found"
+assert log_src.count(log_old) == 1, "changelog anchor not found"
+fix_path.write_text(fix_src.replace(fix_old, fix_new))
+log_path.write_text(log_src.replace(log_old, log_new))
+print("edits applied")
+EOF
+git diff pylint/ doc/ && python -m pytest tests/test_self.py tests/lint/unittest_expand_modules.py -q -p no:cacheprovider -k "test_ignore_path_recursive_current_dir or test__is_ignored_file_normalizes_path" 2>&1 | tail -3
+$ cd /tmp/repro && python -c "import pylint; print('pylint from:', pylint.__file__)" && \
+for target in "src/" "src" "./src" "."; do echo "=== pylint --recursive=y $target ==="; python -m pylint --recursive=y --disable=all --enable=unused-import "$target" 2>&1 | grep -E "Module|W0611"; done; \
+cd /testbed 2>/dev/null || cd "$OLDPWD"; cd - >/dev/null 2>&1; cd "$(git -C "$OLDPWD" rev-parse --show-toplevel 2>/dev/null || echo "$OLDPWD")" && pwd && \
+python -m pytest tests/test_self.py tests/lint tests/config -q -p no:cacheprovider 2>&1 | tail -5
+$ cd /testbed && python -m pytest tests/test_self.py tests/lint tests/config -q -p no:cacheprovider --tb=line 2>&1 | grep -E "^FAILED|^E |^/testbed.*(Error|assert)" | head -30
+$ cd /testbed && echo "existing stashes: $(git stash list | wc -l)" && git stash && ( echo "--- baseline: my changes stashed ---"; git status --short; python -m pytest "tests/test_self.py::TestCallbackOptions::test_generate_toml_config" "tests/test_self.py::TestCallbackOptions::test_generate_toml_config_disable_symbolic_names" tests/config/pylint_config/test_pylint_config_generate.py -q -p no:cacheprovider --tb=no 2>&1 | tail -7; git stash pop ) && echo "--- restored ---" && git status --short && python -c "import tomlkit; print('tomlkit', tomlkit.__version__)"
+$ rm -rf /tmp/prefix && mkdir -p /tmp/prefix/src/gen /tmp/prefix/src/generated && cd /tmp/prefix && touch src/gen/__init__.py && printf 'import os\n' > src/generated/x.py && python - <<'EOF'
+import os
+from unittest import mock
+from pylint.lint import PyLinter
+
+orig_walk = os.walk
+def sorted_walk(top, *args, **kwargs):
+    # Simulate alphabetical traversal (as on NTFS); topdown=True lets us sort dirs in place.
+    for root, dirs, files in orig_walk(top, *args, **kwargs):
+        dirs.sort()
+        yield root, dirs, files
+
+with mock.patch("os.walk", sorted_walk):
+    print("side check - discovered:", list(PyLinter()._discover_files(["src"])))
+EOF
+cd /testbed && rm -rf /tmp/prefix /tmp/repro
+echo "--- '6964' referenced elsewhere? ---"; grep -rn "6964" --include=*.rst --include=*.py --include=*.txt . | grep -v "^./doc/whatsnew/2/2.14/full.rst" | head -3
+echo "--- formatting ---"; python -m black --check pylint/lint/expand_modules.py tests/lint/unittest_expand_modules.py tests/test_self.py 2>&1 | tail -2; python -m isort --check-only --diff pylint/lint/expand_modules.py tests/lint/unittest_expand_modules.py tests/test_self.py 2>&1 | tail -5
+echo "--- full test suite ---"; XDIST=$(python -c "import xdist" 2>/dev/null && echo "-n auto"); echo "xdist flag: '${XDIST}'"; timeout 1500 python -m pytest tests $XDIST -q -p no:cacheprovider --tb=no 2>&1 | grep -E "^(FAILED|ERROR) |[0-9]+ (passed|failed)" | tail -30
+$ cd /testbed && rm -f /tmp/patched.txt /tmp/baseline.txt && tests=(
+  "tests/test_functional.py::test_functional[recursion_error_3152]"
+  "tests/test_functional.py::test_functional[recursion_error_3159]"
+  "tests/test_functional.py::test_functional[regression_4439]"
+  "tests/config/pylint_config/test_run_pylint_config.py::test_invocation_of_pylint_config"
+  "tests/config/pylint_config/test_pylint_config_generate.py"
+  "tests/pyreverse/test_writer.py"
+  "tests/test_self.py::TestCallbackOptions::test_generate_toml_config"
+  "tests/test_self.py::TestCallbackOptions::test_generate_toml_config_disable_symbolic_names"
+  "tests/primer/test_primer_external.py"
+  "tests/testutils/_primer/test_package_to_lint.py"
+  "tests/testutils/_primer/test_primer.py"
+) && run() { python -m pytest "${tests[@]}" -q -p no:cacheprovider --tb=no --continue-on-collection-errors 2>&1 | grep -E "^(FAILED|ERROR) |[0-9]+ (passed|failed)" | sed -E 's/ - .*//; s/ in [0-9.]+s.*//'; } && \
+echo "=== patched, serial ===" && run | tee /tmp/patched.txt && \
+git stash -q && { echo "=== baseline (my changes stashed), serial ==="; run | tee /tmp/baseline.txt; git stash pop -q; }; \
+echo "=== working tree after restore ==="; git status --short --untracked-files=all; \
+echo "=== baseline vs patched ==="; diff /tmp/baseline.txt /tmp/patched.txt && echo "IDENTICAL"; rm -f /tmp/patched.txt /tmp/baseline.txt; \
+echo "=== primer collection error cause ==="; python -m pytest tests/testutils/_primer/test_primer.py -q -p no:cacheprovider 2>&1 | grep -m3 -E "^E .*Error"
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The serial comparison with and without my changes came out identical, so none of the remaining failures come from my change. Done.
+
+## Summary
+
+**Root cause:** In `--recursive=y` mode, pylint builds file paths with `os.walk` and `os.path.join` and never normalizes them. Running on `.` or `./src` gives paths like `./src/gen/about.py`. On Windows, `src/` gives mixed separators like `src/gen\about.py`, which is your case. Anchored patterns such as `^src/gen/.*$` never match those paths, so the files got linted.
+
+**Fix:** I added one line to `_is_ignored_file` in `pylint/lint/expand_modules.py`. It normalizes the path with `os.path.normpath` before matching. The normalized path is only used for the check, so module names and reported paths are unchanged.
+
+One correction to something I said earlier: not every ignore check goes through `_is_ignored_file`. The loop over a package's sub-files calls the regex check directly. Its paths are built from a path that function has already normalized, so I left it alone.
+
+**Tests and docs:**
+- I added an end-to-end test (`--recursive=y .` with `--ignore-paths=^ignored_subdirectory/.*`) and a unit test for `_is_ignored_file`. Both failed before the fix and pass after it.
+- The Windows mixed-separator case is only really exercised when the unit test runs on Windows.
+- I added a changelog entry for 2.14.4. The issue number #6964 is from memory and isn't mentioned anywhere in the repo, so please check it.
+
+**Results:**
+- All four commands from your setup (`src/`, `src`, `./src`, `.`) now skip `src/gen`.
+- black and isort report no changes needed.
+- Full test suite: 1712 passed, 14 failed and 3 had errors. None of these are caused by my change:
+  - 8 failures and the 3 errors fail the same way with my changes removed. The 3 errors are because the `git` module isn't installed.
+  - The other 6 failures passed when rerun one at a time, with and without my changes, so they only fail when tests run in parallel.
+
+**Notes:**
+- **Small behavior change:** a pattern written to match the `./` prefix, like `^\./src/gen`, would no longer match, because paths are now normalized first.
+- **Separate bug, not fixed:** when pylint finds a package such as `src/gen`, it also skips a sibling folder whose name starts the same way, like `src/generated/`. It does this because it compares plain string prefixes. I reproduced this without any ignore options. It's unrelated to this issue and could be reported separately.

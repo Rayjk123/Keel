@@ -1,0 +1,186 @@
+$ cd . && git log --oneline | head -5 && git status && grep -n "__getitem__\|__len__\|def _iter\|class Pipeline\|class FeatureUnion" sklearn/pipeline.py
+$ sed -n 185,250p sklearn/pipeline.py
+$ python - <<'EOF'
+import re
+path = 'sklearn/pipeline.py'
+with open(path) as f:
+    src = f.read()
+
+anchor = "    def __getitem__(self, ind):\n        \"\"\"Returns a sub-pipeline or a single esimtator in the pipeline\n"
+assert src.count(anchor) == 1, src.count(anchor)
+
+new_method = (
+    "    def __len__(self):\n"
+    "        \"\"\"\n"
+    "        Returns the length of the Pipeline\n"
+    "        \"\"\"\n"
+    "        return len(self.steps)\n"
+    "\n"
+)
+src = src.replace(anchor, new_method + anchor)
+
+with open(path, 'w') as f:
+    f.write(src)
+EOF
+git diff</parameter>
+</invoke>
+$ git status --short && git diff
+$ python - <<'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+print("len(pipe) =", len(pipe))
+sub = pipe[:len(pipe)]
+print("pipe[:len(pipe)] ->", type(sub).__name__, [n for n, _ in sub.steps])
+assert len(pipe) == 2
+assert len(pipe[:1]) == 1
+assert len(pipe[:len(pipe)]) == len(pipe)
+print("OK")
+EOF
+$ grep -n "def test_pipeline_slice\|def test_pipeline_index\|len(pipe)\|pipe\[" sklearn/tests/test_pipeline.py | head -30; echo ---; grep -n -i "pipeline" doc/whats_new/v0.21.rst | head -20
+$ sed -n 525,560p sklearn/tests/test_pipeline.py; echo ---CHANGELOG---; sed -n 400,425p doc/whats_new/v0.21.rst
+$ python - <<'EOF'
+import io
+
+path = 'sklearn/tests/test_pipeline.py'
+with io.open(path, encoding='utf-8') as f:
+    src = f.read()
+
+anchor = "\n\ndef test_set_pipeline_steps():\n"
+assert src.count(anchor) == 1, src.count(anchor)
+
+new_test = '''
+
+def test_pipeline_len():
+    pipe = Pipeline([('transf1', Transf()),
+                     ('transf2', 'passthrough'),
+                     ('clf', FitParamT())])
+    # 'passthrough' steps are still steps of the pipeline
+    assert len(pipe) == 3
+    assert len(pipe) == len(pipe.steps)
+    assert len(pipe[:-1]) == 2
+    assert len(pipe[1:]) == 2
+
+    # slicing up to len(pipe) gives back a pipeline with the same steps
+    pipe2 = pipe[:len(pipe)]
+    assert isinstance(pipe2, Pipeline)
+    assert pipe2.steps == pipe.steps
+'''
+
+src = src.replace(anchor, new_test + anchor)
+with io.open(path, 'w', encoding='utf-8') as f:
+    f.write(src)
+EOF
+git diff sklearn/tests/test_pipeline.py && python -m pytest sklearn/tests/test_pipeline.py -q 2>&1 | tail -15
+$ python - <<'EOF'
+import io
+
+path = 'doc/whats_new/v0.21.rst'
+with io.open(path, encoding='utf-8') as f:
+    src = f.read()
+
+anchor = (
+    "  :issue:`2568` by `Joel Nothman`_.\n"
+    "\n"
+    "- |API| :class:`pipeline.Pipeline` now supports using ``'passthrough'`` as a\n"
+)
+assert src.count(anchor) == 1, src.count(anchor)
+
+replacement = (
+    "  :issue:`2568` by `Joel Nothman`_.\n"
+    "\n"
+    "- |Enhancement| :class:`pipeline.Pipeline` now implements ``__len__`` and\n"
+    "  therefore ``len(pipeline)`` returns the number of steps in the pipeline.\n"
+    "\n"
+    "- |API| :class:`pipeline.Pipeline` now supports using ``'passthrough'`` as a\n"
+)
+src = src.replace(anchor, replacement)
+
+with io.open(path, 'w', encoding='utf-8') as f:
+    f.write(src)
+EOF
+git diff doc/whats_new/v0.21.rst
+$ git diff --stat; echo "--- flake8 ---"; python -m flake8 sklearn/pipeline.py sklearn/tests/test_pipeline.py 2>&1 | head -20; echo "--- doctest ---"; python -m pytest --doctest-modules sklearn/pipeline.py -q 2>&1 | tail -5; echo "--- broader tests ---"; python -m pytest sklearn/tests/test_pipeline.py sklearn/tests/test_metaestimators.py sklearn/model_selection sklearn/compose sklearn/feature_selection $(ls sklearn/ensemble/tests/test_voting*.py 2>/dev/null) -q -p no:cacheprovider 2>&1 | tail -15
+$ echo "--- truthiness-style checks on estimators in library code ---"
+grep -rnE "^\s*(if|elif|while)\s+(not\s+)?(self\.)?(base_)?(estimator|pipeline|pipe|final_estimator|transformer)\s*:" sklearn --include=*.py | grep -v "/tests/" | head -20
+echo "--- bool() / len() behaviour ---"
+python - <<'EOF'
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+
+p = Pipeline([('s', StandardScaler()), ('c', LogisticRegression())])
+print("bool(pipe) =", bool(p), "| len(pipe) =", len(p))
+assert bool(p) and len(p) == 2
+assert len(p[:len(p)]) == 2 and len(p[:0]) == 0 if False else True
+# empty slice yields an (invalid) empty pipeline object; just make sure len works on it
+print("len(pipe[:0]) =", len(p.__class__(p.steps[:0])))
+EOF
+echo "--- line lengths of added lines (>79) ---"
+git diff -U0 | grep '^+' | grep -v '^+++' | awk '{ if (length($0) - 1 > 79) print "LONG: " $0 }'
+echo "(done)"
+$ python - <<'EOF'
+import subprocess
+import types
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+# Load the ORIGINAL (HEAD) Pipeline without touching the working tree.
+src = subprocess.check_output(
+    ['git', 'show', 'HEAD:sklearn/pipeline.py']).decode('utf-8')
+mod = types.ModuleType('sklearn._pristine_pipeline')
+mod.__package__ = 'sklearn'
+exec(compile(src, 'pristine_pipeline.py', 'exec'), mod.__dict__)
+Orig = mod.Pipeline
+
+print("original defines __len__:", '__len__' in vars(Orig))
+print("patched  defines __len__:", '__len__' in vars(Pipeline))
+
+# The traceback seen earlier: building an empty Pipeline
+for label, cls in (("original", Orig), ("patched ", Pipeline)):
+    try:
+        cls([])
+    except ValueError as exc:
+        print("%s Pipeline([]) -> ValueError: %s" % (label, exc))
+
+# Clean sanity checks on the patched code
+steps = [('s', StandardScaler()), ('c', LogisticRegression())]
+p = Pipeline(steps)
+assert len(p) == 2
+assert bool(p) is True
+assert len(p[:len(p)]) == len(p)
+assert p[:len(p)].steps == p.steps
+# iterating over a pipeline is unchanged by adding __len__
+assert [type(e) for e in Orig(steps)] == [type(e) for e in p]
+print("sanity checks OK")
+EOF
+echo "--- pipeline tests ---"
+python -m pytest sklearn/tests/test_pipeline.py -q -p no:cacheprovider 2>&1 | tail -3
+echo "--- working tree ---"
+git status --short
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`len(pipe)` now works, and `pipe[:len(pipe)]` returns a pipeline with all the original steps.
+
+- **Fix:** I added `Pipeline.__len__` in `sklearn/pipeline.py`, just before `__getitem__`. It returns `len(self.steps)`, so a `'passthrough'` step still counts as a step.
+- **Test:** I added `test_pipeline_len` to `sklearn/tests/test_pipeline.py`. It covers a pipeline with a `'passthrough'` step, slices, and `pipe[:len(pipe)]`.
+- **Changelog:** I added an `|Enhancement|` entry under `sklearn.pipeline` in `doc/whats_new/v0.21.rst`, without an `:issue:` or `:user:` reference since I don't know the real PR number or author.
+
+The issue's reproduction now gives `len(pipe) == 2`. The pipeline test module passes (42 tests), and a wider run over pipeline, metaestimators, model_selection, compose, feature_selection and voting passed with 425 passed and 1 skipped. The `pipeline.py` doctests pass. flake8 isn't installed, so I checked the added lines for length over 79 characters by hand and found none.
+
+Two things from the session:
+- **Stray markup:** An early command had stray markup after `git diff` and ended in a shell syntax error. The edit had already been applied before that line, and `git diff` confirmed it.
+- **Empty `Pipeline`:** A throwaway check hit a `ValueError` when building an empty `Pipeline`. The original code at `HEAD` raises the identical error, so it is existing behaviour. It also means `__len__` can't make a valid pipeline falsy.
+
+Only the three intended files are modified.

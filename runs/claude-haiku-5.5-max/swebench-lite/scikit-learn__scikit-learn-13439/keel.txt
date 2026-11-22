@@ -1,0 +1,80 @@
+$ cd . && ls -la && git status 2>/dev/null | head -20; find . -name "pipeline.py" -path "*sklearn*" 2>/dev/null | head -20
+$ cd . && grep -n "__getitem__\|__len__\|^class \|def _iter\|def named_steps\|def _final_estimator" sklearn/pipeline.py; echo "-----"; L=$(grep -n "def __getitem__" sklearn/pipeline.py | head -1 | cut -d: -f1); sed -n "${L},$((L+25))p" sklearn/pipeline.py
+$ cd . && PY=$(command -v python3 || command -v python) && "$PY" - <<'EOF'
+path = 'sklearn/pipeline.py'
+with open(path) as f:
+    src = f.read()
+
+old = '''        try:
+            name, est = self.steps[ind]
+        except TypeError:
+            # Not an int, try get step by name
+            return self.named_steps[ind]
+        return est
+
+'''
+
+new = old + '''    def __len__(self):
+        """Returns the number of steps in the Pipeline"""
+        return len(self.steps)
+
+'''
+
+assert src.count(old) == 1, "anchor not found exactly once"
+src = src.replace(old, new)
+with open(path, 'w') as f:
+    f.write(src)
+print("patched sklearn/pipeline.py")
+EOF
+git diff && echo "-----" && grep -n "^class \|^from \|^import \|def test_pipeline" sklearn/tests/test_pipeline.py | head -80
+$ cd . && PY=$(command -v python3 || command -v python) && "$PY" - <<'EOF'
+path = 'sklearn/tests/test_pipeline.py'
+with open(path) as f:
+    src = f.read()
+
+anchor = 'def test_pipeline_named_steps():'
+new_test = '''def test_pipeline_len():
+    transf = Transf()
+    clf = FitParamT()
+    pipe = Pipeline([('transf', transf), ('clf', clf)])
+    assert len(pipe) == 2
+    assert len(pipe[:1]) == 1
+    assert len(pipe[-1:]) == 1
+    assert len(pipe[:len(pipe)]) == 2
+
+
+'''
+
+assert src.count(anchor) == 1, "anchor not found exactly once"
+src = src.replace(anchor, new_test + anchor)
+with open(path, 'w') as f:
+    f.write(src)
+print("added test_pipeline_len to sklearn/tests/test_pipeline.py")
+EOF
+"$PY" -m pytest sklearn/tests/test_pipeline.py -q 2>&1 | tail -25
+echo "----- reproduction from the issue -----"
+"$PY" -c "
+from sklearn import svm
+from sklearn.datasets import make_classification
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.pipeline import Pipeline
+
+X, y = make_classification(n_informative=5, n_redundant=0, random_state=42)
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+print('len(pipe) =', len(pipe))
+print('pipe[:len(pipe)] =', pipe[:len(pipe)])
+"
+echo "----- diff stat -----"
+git --no-pager diff --stat
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is in place and verified.
+
+**Summary**
+
+- **Root cause:** `Pipeline` in `sklearn/pipeline.py` already supported indexing and slicing through `__getitem__`, but it had no `__len__`. So `len(pipe)` raised `TypeError`.
+- **Change:** Added `Pipeline.__len__`, which returns `len(self.steps)`, directly after `__getitem__`.
+- **Regression test:** Added `test_pipeline_len` to `sklearn/tests/test_pipeline.py`. It checks `len()` on the full pipeline and on slices, including `pipe[:len(pipe)]`.
+- **Verification:** `sklearn/tests/test_pipeline.py` passes (42 passed). The reproduction from the issue now prints `len(pipe) = 2`, and `pipe[:len(pipe)]` returns the full pipeline.
+- **Side effect:** Because `Pipeline` now defines `__len__`, `bool(Pipeline([]))` is `False`. An empty pipeline can't be fitted anyway, so this isn't a practical regression. I only ran the pipeline test module, not the wider suite.

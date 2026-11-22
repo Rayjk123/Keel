@@ -1,0 +1,295 @@
+$ ls -la; wc -l main.tex input.tex synonyms.txt; sed -n '1,180p' main.tex; sed -n '1,70p' synonyms.txt; sed -n '1,25p' input.tex; command -v pdflatex; work=$(mktemp -d); printf '\nBaseline build directory: %s\n' "$work"; pdflatex -interaction=nonstopmode -halt-on-error -file-line-error -output-directory="$work" main.tex >"$work/stdout" 2>&1; status=$?; printf 'Overfull hbox count: '; grep -icF 'Overfull \hbox' "$work/stdout"; grep -n -A4 -B1 -i -E 'overfull|error|output written' "$work/stdout" | head -n 150; exit "$status"
+$ pwd; ls -la; printf '\n--- main.tex ---\n'; cat main.tex; printf '\n--- synonyms.txt ---\n'; nl -ba synonyms.txt; printf '\n--- input.tex line lengths ---\n'; awk '{printf "%d %d %.90s\n", NR,length($0),$0}' input.tex; command -v pdftotext; git status --short
+$ python3 - <<'PY'
+import pathlib, re, subprocess, tempfile
+
+root = pathlib.Path.cwd()
+lines = (root / "input.tex").read_text().splitlines()
+families = [line.split(", ") for line in (root / "synonyms.txt").read_text().splitlines() if line]
+affected = [5, 7, 13, 19]
+trials = []
+for number in affected:
+    text = lines[number - 1]
+    trials.append((number, "", text))
+    for match in re.finditer(r"\b[A-Za-z]+\b", text):
+        word = match[0]
+        for family in families:
+            if word not in family:
+                continue
+            for synonym in family:
+                if synonym != word:
+                    new = text[:match.start()] + synonym + text[match.end():]
+                    label = f"{word} → {synonym} at {match.start()} ({text[max(0, match.start()-15):match.end()+15]})"
+                    trials.append((number, label, new))
+body = "\n".join(
+    f"\\typeout{{SYNONYM-TRIAL {i}}}\n\\setbox0=\\vbox{{{text}\\par}}"
+    for i, (_, _, text) in enumerate(trials)
+)
+source = (root / "main.tex").read_text().replace(r"\input{input.tex}", lambda_unused := "PLACEHOLDER")
+source = source.replace(lambda_unused, body)
+with tempfile.TemporaryDirectory() as work:
+    work = pathlib.Path(work)
+    (work / "trials.tex").write_text(source)
+    build = subprocess.run(["pdflatex", "-draftmode", "-interaction=nonstopmode", "-halt-on-error", "trials.tex"], cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if build.returncode:
+        raise SystemExit(build.stdout[-6000:])
+    log = (work / "trials.log").read_text()
+warnings = {}
+for match in re.finditer(r"^SYNONYM-TRIAL (\d+)$|^Overfull \\hbox \(([\d.]+)pt too wide\)", log, re.M):
+    if match[1] is not None:
+        current = int(match[1])
+        warnings[current] = []
+    else:
+        warnings[current].append(float(match[2]))
+assert len(warnings) == len(trials)
+for number in affected:
+    results = [(label, warnings[i]) for i, (n, label, _) in enumerate(trials) if n == number]
+    print(f"\nParagraph at line {number}, baseline overflow widths: {results[0][1]}")
+    clean = [label for label, widths in results[1:] if not widths]
+    print(f"{len(clean)} of {len(results) - 1} single-word substitutions work")
+    for label in clean:
+        print("  " + label)
+    if not clean:
+        print("  Best partial improvements:")
+        for label, widths in sorted(results[1:], key=lambda x: (len(x[1]), sum(x[1])))[:20]:
+            print(f"  {label}: {widths}")
+PY
+$ set -eu
+work=$(mktemp -d)
+printf 'Trial directory: %s\n' "$work"
+awk -v labels="$work/labels.tsv" '
+  FNR==NR {
+    size[FNR]=split($0, parts, /, */)
+    for (i=1; i<=size[FNR]; i++) {
+      alt[FNR,i]=parts[i]
+      family[parts[i]]=FNR
+    }
+    next
+  }
+  function trial(text, label) {
+    ++id
+    printf "%d\t%d\t%s\n", id, FNR, label > labels
+    printf "\\typeout{SYNONYM-TRIAL %d}\n\\setbox0=\\vbox{%s\\par}\n", id, text
+  }
+  FNR==5 || FNR==7 || FNR==13 || FNR==19 {
+    trial($0, "(baseline)")
+    rest=$0
+    offset=0
+    while (match(rest, /[A-Za-z]+/)) {
+      word=substr(rest,RSTART,RLENGTH)
+      start=offset+RSTART
+      len=RLENGTH
+      advance=RSTART+RLENGTH-1
+      if (word in family) {
+        g=family[word]
+        for (i=1; i<=size[g]; i++) {
+          substitute=alt[g,i]
+          if (substitute!=word)
+            trial(substr($0,1,start-1) substitute substr($0,start+len), sprintf("%s -> %s (column %d)", word, substitute, start))
+        }
+      }
+      offset+=advance
+      rest=substr(rest,advance+1)
+    }
+  }
+' synonyms.txt input.tex > "$work/body.tex"
+awk '$0=="\\input{input.tex}" {print "\\input{body.tex}"; next} {print}' main.tex > "$work/trials.tex"
+(cd "$work" && pdflatex -draftmode -interaction=nonstopmode -halt-on-error -file-line-error trials.tex > build.out) || { tail -n 70 "$work/build.out"; exit 1; }
+awk -F '\t' '
+  FNR==NR {from[$1]=$2; label[$1]=$3; next}
+  /^SYNONYM-TRIAL / {id=substr($0,15)+0; seen[id]=1}
+  /^Overfull \\hbox/ {n[id]++; split($0,width,/[()]/); sum[id]+=width[2]+0}
+  END {
+    for (id=1; id in label; id++) {
+      if (!(id in seen)) exit 1
+      printf "%s\t%d\t%.5f\t%s\n", from[id], n[id], sum[id], label[id]
+    }
+  }
+' "$work/labels.tsv" "$work/trials.log" > "$work/results.tsv"
+for line in 5 7 13 19; do
+  printf '\nParagraph at line %s (columns: warning count, total overflow in pt, replacement)\n' "$line"
+  awk -F '\t' -v line="$line" '$1==line {print}' "$work/results.tsv" | sort -k2,2n -k3,3n | head -n 16
+  awk -F '\t' -v line="$line" '$1==line {if ($2==0) clean++; if ($4=="(baseline)") print "Baseline:", $2, "warning(s),", $3, "pt"} END {print "Clean single-word trials:", clean+0}' "$work/results.tsv"
+done
+$ set -eu
+work=$(mktemp -d)
+printf 'Pair trial directory: %s\n' "$work"
+awk -v labels="$work/labels.tsv" '
+  FNR==NR {
+    size[FNR]=split($0, parts, /, */)
+    for (i=1; i<=size[FNR]; i++) {
+      alt[FNR,i]=parts[i]
+      family[parts[i]]=FNR
+    }
+    next
+  }
+  FNR==7 {
+    rest=$0
+    offset=0
+    while (match(rest, /[A-Za-z]+/)) {
+      word=substr(rest,RSTART,RLENGTH)
+      start=offset+RSTART
+      advance=RSTART+RLENGTH-1
+      if (word in family) {
+        g=family[word]
+        for (k=1; k<=size[g]; k++) {
+          replacement=alt[g,k]
+          if (replacement==word) continue
+          ++n
+          pos[n]=start
+          len[n]=length(word)
+          subword[n]=replacement
+          label[n]=sprintf("%s -> %s (col %d)", word, replacement, start)
+        }
+      }
+      offset+=advance
+      rest=substr(rest,advance+1)
+    }
+    for (i=1; i<=n; i++) {
+      for (j=i+1; j<=n; j++) {
+        if (pos[i]==pos[j]) continue
+        ++id
+        text=substr($0,1,pos[i]-1) subword[i] substr($0,pos[i]+len[i],pos[j]-pos[i]-len[i]) subword[j] substr($0,pos[j]+len[j])
+        printf "%d\t%s\t%s\n", id, label[i], label[j] > labels
+        printf "\\typeout{SYNONYM-TRIAL %d}\n\\setbox0=\\vbox{%s\\par}\n", id, text
+      }
+    }
+  }
+' synonyms.txt input.tex > "$work/body.tex"
+awk '$0=="\\input{input.tex}" {print "\\input{body.tex}"; next} {print}' main.tex > "$work/trials.tex"
+(cd "$work" && pdflatex -draftmode -interaction=nonstopmode -halt-on-error -file-line-error trials.tex > build.out) || { tail -n 70 "$work/build.out"; exit 1; }
+awk -F '\t' '
+  FNR==NR {label[$1]=$2 "\t" $3; next}
+  /^SYNONYM-TRIAL / {id=substr($0,15)+0; seen[id]=1}
+  /^Overfull \\hbox/ {n[id]++; split($0,width,/[()]/); sum[id]+=width[2]+0}
+  END {
+    for (id=1; id in label; id++) {
+      if (!(id in seen)) exit 1
+      printf "%d\t%.5f\t%s\n", n[id], sum[id], label[id]
+    }
+  }
+' "$work/labels.tsv" "$work/trials.log" > "$work/results.tsv"
+printf 'Pairs tested: '; wc -l < "$work/results.tsv"
+awk -F '\t' '$1==0 {if (++clean<=100) print $3 " + " $4} END {print "Clean pairs:", clean+0}' "$work/results.tsv"
+printf '\nClean choices for line 13:\n'
+awk -F '\t' '$1==13 && $2==0 {print $4}' /tmp/tmp.iR9ldJ7g2e/results.tsv
+$ set -eu
+work=$(mktemp -d)
+printf 'Triple trial directory: %s\n' "$work"
+sort -t "$(printf '\t')" -k1,1n -k2,2n /tmp/tmp.CD1sJ9JCzt/results.tsv | awk 'NR<=200' > "$work/pairs.tsv"
+printf '\nClosest pairs:\n'
+head -n 12 "$work/pairs.tsv"
+awk -F '\t' -v labels="$work/labels.tsv" '
+  FILENAME==ARGV[1] {left[++pairs]=$3; right[pairs]=$4; next}
+  FILENAME==ARGV[2] {
+    size[FNR]=split($0, parts, /, */)
+    for (i=1; i<=size[FNR]; i++) {
+      alt[FNR,i]=parts[i]
+      family[parts[i]]=FNR
+    }
+    next
+  }
+  FNR==7 {
+    rest=$0
+    offset=0
+    while (match(rest, /[A-Za-z]+/)) {
+      word=substr(rest,RSTART,RLENGTH)
+      start=offset+RSTART
+      advance=RSTART+RLENGTH-1
+      if (word in family) {
+        g=family[word]
+        for (k=1; k<=size[g]; k++) {
+          replacement=alt[g,k]
+          if (replacement==word) continue
+          ++n
+          pos[n]=start
+          len[n]=length(word)
+          subword[n]=replacement
+          label[n]=sprintf("%s -> %s (col %d)", word, replacement, start)
+          lookup[label[n]]=n
+        }
+      }
+      offset+=advance
+      rest=substr(rest,advance+1)
+    }
+    for (p=1; p<=pairs; p++) {
+      i=lookup[left[p]]
+      j=lookup[right[p]]
+      if (!i || !j || pos[i]>=pos[j]) exit 1
+      for (k=1; k<=n; k++) {
+        if (pos[k]==pos[i] || pos[k]==pos[j]) continue
+        if (k<i) {a=k; b=i; c=j}
+        else if (k>j) {a=i; b=j; c=k}
+        else {a=i; b=k; c=j}
+        if (seen[a,b,c]++) continue
+        text=substr($0,1,pos[a]-1) subword[a] substr($0,pos[a]+len[a],pos[b]-pos[a]-len[a]) subword[b] substr($0,pos[b]+len[b],pos[c]-pos[b]-len[b]) subword[c] substr($0,pos[c]+len[c])
+        ++id
+        printf "%d\t%s\t%s\t%s\n", id, label[a], label[b], label[c] > labels
+        printf "\\typeout{SYNONYM-TRIAL %d}\n\\setbox0=\\vbox{%s\\par}\n", id, text
+      }
+    }
+  }
+' "$work/pairs.tsv" synonyms.txt input.tex > "$work/body.tex"
+awk '$0=="\\input{input.tex}" {print "\\input{body.tex}"; next} {print}' main.tex > "$work/trials.tex"
+(cd "$work" && pdflatex -draftmode -interaction=nonstopmode -halt-on-error -file-line-error trials.tex > build.out) || { tail -n 70 "$work/build.out"; exit 1; }
+awk -F '\t' '
+  FNR==NR {label[$1]=$2 "\t" $3 "\t" $4; next}
+  /^SYNONYM-TRIAL / {id=substr($0,15)+0; seen[id]=1}
+  /^Overfull \\hbox/ {n[id]++; split($0,width,/[()]/); sum[id]+=width[2]+0}
+  END {
+    for (id=1; id in label; id++) {
+      if (!(id in seen)) exit 1
+      printf "%d\t%.5f\t%s\n", n[id], sum[id], label[id]
+    }
+  }
+' "$work/labels.tsv" "$work/trials.log" > "$work/results.tsv"
+printf '\nTriples tested: '; wc -l < "$work/results.tsv"
+awk -F '\t' '$1==0 {if (++clean<=60) print $3 " + " $4 " + " $5} END {print "Clean triples:", clean+0}' "$work/results.tsv"
+$ set -eu
+root=$PWD
+work=$(mktemp -d)
+sha256sum main.tex synonyms.txt > "$work/protected.sha256"
+awk '
+  FNR==NR {
+    n=split($0, words, /, */)
+    for (i=1; i<=n; i++)
+      for (j=1; j<=n; j++)
+        allowed[words[i],words[j]]=1
+    next
+  }
+  function replace_at(column, old, new, len) {
+    len=length(old)
+    if (!allowed[old,new] || substr($0,column,len)!=old ||
+        substr($0,column-1,1) ~ /[A-Za-z]/ ||
+        substr($0,column+len,1) ~ /[A-Za-z]/) {
+      printf "Invalid substitution at line %d, column %d\n", FNR, column > "/dev/stderr"
+      exit 1
+    }
+    $0=substr($0,1,column-1) new substr($0,column+len)
+  }
+  FNR==5  {replace_at(245,"natures","personalities")}
+  FNR==7  {
+    replace_at(969,"creative","inventive")
+    replace_at(422,"heart","core")
+    replace_at(363,"riotous","tumultuous")
+  }
+  FNR==13 {replace_at(111,"wide","broad")}
+  FNR==19 {replace_at(73,"pathfinder","pioneer")}
+  {print}
+' synonyms.txt input.tex > "$work/input.tex"
+build_clean() {
+  pdflatex -interaction=nonstopmode -halt-on-error -file-line-error \
+    -output-directory="$2" "$1" > "$2/build.out" 2>&1 ||
+    { cat "$2/build.out"; return 1; }
+  test -s "$2/main.pdf" && test -s "$2/main.log" || return 1
+  if grep -inF 'Overfull \hbox' "$2/main.log"; then return 1; fi
+}
+(cd "$work" && build_clean "$root/main.tex" "$work")
+cp "$work/input.tex" input.tex
+mkdir "$work/final"
+build_clean main.tex "$work/final"
+sha256sum -c "$work/protected.sha256"
+grep -F 'Output written on ' "$work/final/main.log"
+printf 'Verified: 0 overfull hbox warnings.\n'
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Replaced six words in `input.tex` with approved synonyms. Verified that `pdflatex` compiles `main.tex` with zero overfull `\hbox` warnings. `main.tex` and `synonyms.txt` were unchanged.

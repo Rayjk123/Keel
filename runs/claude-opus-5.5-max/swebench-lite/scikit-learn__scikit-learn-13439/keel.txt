@@ -1,0 +1,178 @@
+$ ls -la && git log --oneline -3 && git status
+$ grep -n "def \|class \|_iter\|__getitem__\|__len__" sklearn/pipeline.py | head -80
+$ sed -n 185,240p sklearn/pipeline.py
+$ cd /tmp && cat > repro.py << 'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+try:
+    print("len(pipe) =", len(pipe))
+except Exception as e:
+    print("len(pipe) FAILED:", type(e).__name__, e)
+
+try:
+    print("pipe[:len(pipe)] =", pipe[:len(pipe)])
+except Exception as e:
+    print("pipe[:len(pipe)] FAILED:", type(e).__name__, e)
+EOF
+python repro.py</br>
+$ cd /tmp && cat > repro.py << 'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+try:
+    print("len(pipe) =", len(pipe))
+except Exception as e:
+    print("len(pipe) FAILED:", type(e).__name__, e)
+
+try:
+    print("pipe[:len(pipe)] =", pipe[:len(pipe)])
+except Exception as e:
+    print("pipe[:len(pipe)] FAILED:", type(e).__name__, e)
+EOF
+python repro.py
+$ cd /testbed 2>/dev/null || cd "$OLDPWD"; pwd; grep -n "__len__\|__getitem__\|__iter__" sklearn/ensemble/base.py; echo ---; sed -n 125,135p sklearn/pipeline.py; echo ---; grep -n "def test_pipeline_slice\|def test_pipeline_index" -A 22 sklearn/tests/test_pipeline.py; echo ---; grep -rn "my_pipeline\[\|pipe\[:\|indexing\|\[-1\]\|\[:-1\]" doc/modules/compose.rst | head; grep -n "2568" -B2 -A6 doc/whats_new/v0.21.rst
+$ cd /testbed && sed -n 136,150p sklearn/ensemble/base.py; echo ---; python -c "
+from sklearn.pipeline import Pipeline
+try:
+    Pipeline([])
+except Exception as e:
+    print('Pipeline([]) ->', type(e).__name__, e)
+"; echo ---; sed -n 80,115p doc/modules/compose.rst; echo ---; grep -n "sklearn.pipeline\`" -A4 doc/whats_new/v0.21.rst
+$ cd /testbed && sed -n 160,185p sklearn/pipeline.py; echo ---; python -c "
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+p = Pipeline([('s', StandardScaler()), ('c', SVC())])
+print('numpy', np.__version__)
+print('np.array([p], dtype=object).shape =', np.array([p], dtype=object).shape)
+a = np.empty(2, dtype=object); a[0] = p
+print('object-array item assignment keeps Pipeline:', a[0] is p)
+print('bool(p) =', bool(p))
+"; echo ---; grep -rnE "np\.(as)?array\(.*(estimator|estimators|steps|pipe)" sklearn --include=*.py | grep -v "/tests/" | head -20
+$ cd /testbed && python - << 'EOF'
+path = 'sklearn/pipeline.py'
+src = open(path).read()
+anchor = "    def __getitem__(self, ind):\n"
+assert src.count(anchor) == 1, src.count(anchor)
+new = '''    def __len__(self):
+        """Returns the number of steps in the pipeline
+
+        All steps are counted, including those set to ``'passthrough'`` or
+        ``None``, consistently with indexing and slicing.
+        """
+        return len(self.steps)
+
+'''
+src = src.replace(anchor, new + anchor)
+open(path, 'w').write(src)
+EOF
+git diff && python /tmp/repro.py
+$ cd /testbed && cat > /tmp/check_side_effects.py << 'EOF'
+from collections.abc import Sized, Sequence, Iterable
+import numpy as np
+from numpy.ma import MaskedArray
+from sklearn.datasets import make_classification
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+
+p = Pipeline([('s', StandardScaler()), ('c', SVC(gamma='scale'))])
+print('bool(p) =', bool(p))
+print('Sized/Sequence/Iterable:', isinstance(p, Sized), isinstance(p, Sequence), isinstance(p, Iterable))
+print('np.array([p], dtype=object).shape =', np.array([p], dtype=object).shape)
+a = np.empty(2, dtype=object); a[0] = p
+print('object-array item assignment keeps Pipeline:', a[0] is p)
+m = MaskedArray(np.empty(2), mask=True, dtype=object); m[0] = p
+print('MaskedArray item assignment keeps Pipeline:', m[0] is p)
+
+# passthrough / None steps are counted, consistent with indexing/slicing
+p2 = Pipeline([('a', 'passthrough'), ('b', None), ('c', SVC(gamma='scale'))])
+print('len with passthrough/None =', len(p2), '| full slice steps equal:', p2[:len(p2)].steps == p2.steps)
+
+# GridSearchCV storing pipelines as parameter values in cv_results_
+X, y = make_classification(random_state=0)
+inner = Pipeline([('s2', StandardScaler()), ('svc', SVC(gamma='scale'))])
+other = SVC(gamma='scale', C=0.1)
+gs = GridSearchCV(Pipeline([('s', StandardScaler()), ('clf', SVC(gamma='scale'))]),
+                  {'clf': [inner, other]}, cv=3).fit(X, y)
+col = gs.cv_results_['param_clf']
+print('cv_results_ param_clf:', type(col).__name__, col.shape, col.dtype,
+      [type(v).__name__ for v in col], '| same objects:', col[0] is inner, col[1] is other)
+EOF
+python /tmp/check_side_effects.py; echo ---; grep -rn "Sized\b" sklearn --include=*.py | grep -v "/tests/" | head
+$ cd /testbed && python - << 'EOF'
+path = 'sklearn/tests/test_pipeline.py'
+src = open(path).read()
+anchor = "def test_set_pipeline_steps():\n"
+assert src.count(anchor) == 1, src.count(anchor)
+new = '''def test_pipeline_len():
+    pipe = Pipeline([('transf', Transf()),
+                     ('noop', 'passthrough'),
+                     ('clf', FitParamT())])
+    # all steps are counted, including 'passthrough' ones, consistently with
+    # indexing and slicing
+    assert len(pipe) == 3
+    assert len(pipe[:-1]) == 2
+    # slicing up to len(pipe) gives back all the steps
+    assert pipe[:len(pipe)].steps == pipe.steps
+
+
+'''
+src = src.replace(anchor, new + anchor)
+open(path, 'w').write(src)
+EOF
+git diff sklearn/tests/test_pipeline.py && python -m pytest -q -p no:cacheprovider -rfE $(ls -d sklearn/pipeline.py sklearn/tests/test_pipeline.py sklearn/compose sklearn/utils/tests/test_pprint.py sklearn/tests/test_base.py sklearn/tests/test_metaestimators.py sklearn/model_selection/tests/test_search.py sklearn/model_selection/tests/test_validation.py 2>/dev/null) 2>&1 | tail -n 25; git status --short
+$ cd /testbed && ARGS="sklearn/pipeline.py sklearn/tests/test_pipeline.py sklearn/compose sklearn/utils/tests/test_pprint.py sklearn/tests/test_base.py sklearn/tests/test_metaestimators.py sklearn/model_selection/tests/test_search.py sklearn/model_selection/tests/test_validation.py"; for f in $ARGS; do [ -e "$f" ] || echo "MISSING: $f"; done; grep -n "addopts" -A2 setup.cfg; python -m pytest -p no:cacheprovider --co -q $ARGS 2>&1 | grep "::" | cut -d: -f1 | sort | uniq -c; echo "--- flake8 on changed lines:"; git diff -U0 | python -m flake8 --diff && echo clean; echo "--- new test without the fix:"; git diff sklearn/pipeline.py > /tmp/fix.patch && git checkout -- sklearn/pipeline.py && python -m pytest -q -p no:cacheprovider sklearn/tests/test_pipeline.py -k "test_pipeline_len" 2>&1 | grep -E "^E |passed|failed" | tail -n 4; git apply /tmp/fix.patch && git status --short && python /tmp/repro.py | head -n 1
+$ cd /testbed && echo "--- lint tools:"; python -m pycodestyle --version 2>&1 | head -n 1; python -m pyflakes --version 2>&1 | head -n 1; echo "--- added lines >79 chars or with trailing whitespace:"; git diff -U0 | grep '^+[^+]' | awk '{ l=length($0)-1; if (l>79 || $0 ~ /[ \t]$/) print "BAD (" l "): " $0 }'; echo "(end)"; echo "--- how param values are picked:"; grep -n "\.choice(\|randint(len" sklearn/model_selection/_search.py; echo "--- ParameterGrid / ParameterSampler with pipeline values:"; python - << 'EOF'
+from scipy.stats import uniform
+from sklearn.model_selection import ParameterGrid, ParameterSampler
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+inner = Pipeline([('s2', StandardScaler()), ('svc', SVC())])
+other = SVC(C=0.1)
+ok = lambda ps: all(p['clf'] is inner or p['clf'] is other for p in ps)
+print('ParameterGrid ok:', ok(list(ParameterGrid({'clf': [inner, other]}))))
+print('ParameterSampler (all lists) ok:',
+      ok(list(ParameterSampler({'clf': [inner, other]}, n_iter=2, random_state=0))))
+print('ParameterSampler (mixed with distribution) ok:',
+      ok(list(ParameterSampler({'clf': [inner, other], 'x': uniform()}, n_iter=6, random_state=0))))
+EOF
+$ cd /testbed && git diff --stat && python -m pytest -q -p no:cacheprovider sklearn/tests/test_pipeline.py sklearn/pipeline.py 2>&1 | tail -n 1; python -m pytest -q -p no:cacheprovider --doctest-glob='*.rst' doc/modules/compose.rst 2>&1 | tail -n 3; rm -f /tmp/repro.py /tmp/check_side_effects.py /tmp/fix.patch; git status --short
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I added `Pipeline.__len__`, so `len(pipe)` and `pipe[:len(pipe)]` now work. The issue's example returns 2 and the full pipeline, and the relevant tests pass.
+
+**Change:** in `sklearn/pipeline.py`, `__len__` returns `len(self.steps)`. It counts every step, including `'passthrough'` and `None` ones, the same way indexing and slicing address steps. That is what makes `pipe[:len(pipe)]` return all steps.
+
+**Test:** I added `test_pipeline_len` to `sklearn/tests/test_pipeline.py`. It fails without the fix and passes with it.
+
+**Testing:** 264 tests passed. They cover the pipeline tests and doctests, `compose`, model selection (search and validation), pretty-printing, `base` and metaestimators. The doctests in `doc/modules/compose.rst` also pass. I did not run the full suite, and no linter is installed, so I only checked line length and trailing whitespace by hand.
+
+**Behaviour change:** numpy now treats a Pipeline as a list of its steps. `np.array([pipe], dtype=object)` gives shape `(1, 2)` instead of `(1,)`. This comes with adding `len()`, and fitted ensembles already behave this way. sklearn's own code is unaffected: when pipelines are search candidates, `GridSearchCV.cv_results_`, `ParameterGrid` and `ParameterSampler` still return the original pipeline objects. User code that builds numpy arrays of estimators directly would see the new shape.
+
+`bool(pipe)` is still `True`, because an empty Pipeline can't be created.
+
+I didn't add a changelog entry. Indexing itself is new in the unreleased 0.21, so `len()` could be mentioned in that existing entry in `doc/whats_new/v0.21.rst`.

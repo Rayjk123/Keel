@@ -1,0 +1,170 @@
+$ pwd && ls -la && git status --short --branch
+$ git grep -n -i hook -- requests tests docs ':!requests/packages' && ls -la tests && cat .travis.yml
+$ cat requests/hooks.py && sed -n '1,210p;435,665p' requests/models.py && cat requests/sessions.py && sed -n '1,155p;645,790p' tests/test_requests.py && sed -n '152,235p' docs/user/advanced.rst
+$ cat requests/sessions.py
+$ sed -n '1,180p;452,483p' requests/models.py && cat requests/hooks.py && sed -n '1,80p' tests/test_requests.py && cat Makefile && python --version && command -v python2 python2.7 python3 pytest nosetests || true
+$ sed -n '1,57p' requests/sessions.py && sed -n '1,70p' requests/models.py && cat requests/__init__.py | tail -55 && git grep -n 'return_response=False\|dispatch_hook(' -- tests && python -c 'import requests; print(requests.__file__, requests.__version__)'
+$ sed -n '478,526p;600,664p' requests/models.py && git grep -n -E 'isinstance\(.*list|__call__|__iter__' -- requests/models.py requests/hooks.py requests/utils.py && sed -n '1,150p' requests/api.py
+$ apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: tests/test_requests.py
+@@
+ from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+ from requests.exceptions import InvalidURL
++from requests.hooks import dispatch_hook
+@@
+             assert 'foo' in response.text
+             assert 'bar' in response.text
+ 
++    def test_session_multiple_response_hooks(self):
++        calls = []
++
++        def first(response):
++            calls.append('first')
++
++        def second(response):
++            calls.append('second')
++
++        with requests.session(hooks={'response': [first, second]}) as session:
++            request = session.get(httpbin('get'), return_response=False)
++            dispatch_hook('response', request.hooks, request.response)
++
++        self.assertEqual(calls, ['first', 'second'])
++
+     def test_session_persistent_cookies(self):
+*** End Patch
+PATCH
+PYTHONPATH=tests:. python -m unittest test_requests.RequestsTestSuite.test_session_multiple_response_hooks
+$ python - <<'PY'
+from pathlib import Path
+path = Path('tests/test_requests.py')
+text = path.read_text()
+anchor = 'from requests.exceptions import InvalidURL\n'
+assert text.count(anchor) == 1
+text = text.replace(anchor, anchor + 'from requests.hooks import dispatch_hook\n')
+anchor = '    def test_session_persistent_cookies(self):\n'
+assert text.count(anchor) == 1
+text = text.replace(anchor, '''    def test_session_multiple_response_hooks(self):
+        calls = []
+
+        def first(response):
+            calls.append('first')
+
+        def second(response):
+            calls.append('second')
+
+        with requests.session(hooks={'response': [first, second]}) as session:
+            request = session.get(httpbin('get'), return_response=False)
+            dispatch_hook('response', request.hooks, request.response)
+
+        self.assertEqual(calls, ['first', 'second'])
+
+''' + anchor)
+path.write_text(text)
+PY
+PYTHONPATH=tests:. python -m unittest test_requests.RequestsTestSuite.test_session_multiple_response_hooks
+$ python - <<'PY'
+from pathlib import Path
+path = Path('requests/models.py')
+text = path.read_text()
+old = '''        """Properly register a hook."""
+
+        self.hooks[event].append(hook)
+'''
+new = '''        """Register a callback or list of callbacks for an event."""
+
+        if isinstance(hook, list):
+            self.hooks[event].extend(hook)
+        else:
+            self.hooks[event].append(hook)
+'''
+assert text.count(old) == 1
+path.write_text(text.replace(old, new))
+path = Path('docs/user/advanced.rst')
+text = path.read_text()
+old = '''    hooks=dict(args=print_url)
+
+That ``callback_function`` will receive'''
+new = '''    hooks=dict(args=print_url)
+
+To register multiple callbacks for the same event, pass a list as the
+value, e.g. ``hooks={'response': [log_response, check_status]}``.
+Callbacks run in the order they appear in the list. This also works for
+hooks passed to a session.
+
+That ``callback_function`` will receive'''
+assert text.count(old) == 1
+path.write_text(text.replace(old, new))
+PY
+PYTHONPATH=tests:. python -m unittest test_requests.RequestsTestSuite.test_session_multiple_response_hooks
+$ git diff --check && git diff --stat && git diff && python - <<'PY'
+from importlib.util import find_spec
+for name in ('httpbin', 'gunicorn', 'pytest'):
+    print('{}: {}'.format(name, find_spec(name) is not None))
+PY
+$ PYTHONPATH=tests:. python - <<'PY'
+import json
+import os
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class HeadersHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({'headers': dict(self.headers)}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+for key in list(os.environ):
+    if key.lower().endswith('_proxy'):
+        del os.environ[key]
+
+with HTTPServer(('127.0.0.1', 0), HeadersHandler) as server:
+    os.environ['HTTPBIN_URL'] = 'http://127.0.0.1:%d/' % server.server_port
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        names = ['test_single_hook', 'test_multiple_hooks', 'test_session_multiple_response_hooks']
+        suite = unittest.defaultTestLoader.loadTestsFromNames(
+            ['test_requests.RequestsTestSuite.' + name for name in names])
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+    finally:
+        server.shutdown()
+        thread.join()
+if not result.wasSuccessful():
+    raise SystemExit(1)
+
+from requests import Request
+from requests.hooks import dispatch_hook
+def double(value):
+    return value * 2
+def increment(value):
+    return value + 1
+callbacks = [increment, double]
+r = Request(hooks={'response': callbacks, 'pre_send': increment, 'pre_request': []})
+assert dispatch_hook('response', r.hooks, 1) == 4
+assert dispatch_hook('pre_send', r.hooks, 1) == 2
+assert dispatch_hook('pre_request', r.hooks, 1) == 1
+assert r.deregister_hook('response', increment)
+assert callbacks == [increment, double]
+print('Direct Request hook checks passed.')
+PY
+$ python - <<'PY'
+from pathlib import Path
+path = Path('docs/user/advanced.rst')
+text = path.read_text()
+old = 'That ``callback_function`` will receive a chunk of data as its first\nargument.'
+assert text.count(old) == 1
+path.write_text(text.replace(old, 'Each callback receives the event data as its first argument.'))
+PY
+git diff --check && git status --short
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Request and session hook dictionaries now accept either a single callback or a list of callbacks for each event. Callbacks run in the supplied order without modifying the caller’s list.
+
+I documented the behavior and added a regression test for session-level response hooks. All three hook tests passed locally.

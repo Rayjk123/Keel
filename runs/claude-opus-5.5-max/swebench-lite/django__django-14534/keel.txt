@@ -1,0 +1,130 @@
+$ ls -la && git log --oneline -3
+$ grep -n "class BoundWidget" -A 50 django/forms/boundfield.py && echo "-----" && grep -n "def subwidgets" -B 3 -A 15 django/forms/boundfield.py
+$ grep -n "class ChoiceWidget" -A 110 django/forms/widgets.py | grep -n "" | sed -n '1,120p'
+$ cat > /tmp/repro.py << 'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+
+class SomeForm(forms.Form):
+    field = forms.MultipleChoiceField(choices=[('a', 'A'), ('b', 'B')], widget=forms.CheckboxSelectMultiple)
+    radio = forms.ChoiceField(choices=[('a', 'A'), ('b', 'B')], widget=forms.RadioSelect(attrs={'id': 'custom'}))
+    text = forms.CharField()
+
+for kwargs in ({}, {'auto_id': 'prefix_%s'}, {'auto_id': False}):
+    form = SomeForm(**kwargs)
+    print('---', kwargs)
+    for name in ('field', 'radio', 'text'):
+        for sw in form[name].subwidgets:
+            try:
+                label_id = sw.id_for_label
+            except Exception as e:
+                label_id = 'EXC %r' % e
+            print('  %-6s id_for_label=%-20r rendered id=%r' % (name, label_id, sw.data['attrs'].get('id')))
+EOF
+python /tmp/repro.py
+$ grep -rn "id_for_label" django/ docs/ --include=*.py --include=*.html --include=*.txt | grep -v "def id_for_label" | grep -v "^django/forms/widgets.py" ; echo "----- create_option overrides:"; grep -rn "def create_option" django/
+$ grep -n "def subwidgets" -A 3 django/forms/widgets.py | head -8; echo "-----"; grep -n "    def get_context" -A 14 django/forms/widgets.py | sed -n '1,15p'; echo "----- docs:"; sed -n '745,830p' docs/ref/forms/widgets.txt
+$ grep -rn "id_for_label" tests/ | grep -v "\.id_for_label(" | grep -v "def id_for_label" | grep -v "\['" ; echo "-----"; grep -n "def test_iterable_boundfield_select" -A 12 tests/forms_tests/tests/test_forms.py
+$ sed -n '680,716p' tests/forms_tests/tests/test_forms.py
+$ python - << 'EOF'
+import pathlib
+p = pathlib.Path('django/forms/boundfield.py')
+src = p.read_text()
+old = """    @property
+    def id_for_label(self):
+        return 'id_%s_%s' % (self.data['name'], self.data['index'])
+"""
+new = """    @property
+    def id_for_label(self):
+        return self.data['attrs'].get('id')
+"""
+assert src.count(old) == 1, 'target not found exactly once'
+p.write_text(src.replace(old, new))
+print('patched')
+EOF
+git diff django/forms/boundfield.py
+$ python /tmp/repro.py
+$ cd tests && python runtests.py forms_tests admin_widgets postgres_tests model_forms --parallel 4 2>&1 | tail -30
+$ python - << 'EOF'
+import pathlib
+p = pathlib.Path('tests/forms_tests/tests/test_forms.py')
+src = p.read_text()
+
+old1 = """        fields = list(BeatleForm(auto_id=False)['name'])
+        self.assertEqual(len(fields), 4)
+
+        self.assertEqual(fields[0].id_for_label, 'id_name_0')
+        self.assertEqual(fields[0].choice_label, 'John')
+"""
+new1 = """        fields = list(BeatleForm(auto_id=False)['name'])
+        self.assertEqual(len(fields), 4)
+
+        self.assertIsNone(fields[0].id_for_label)
+        self.assertEqual(fields[0].choice_label, 'John')
+"""
+assert src.count(old1) == 1, 'old1 not found exactly once'
+src = src.replace(old1, new1)
+
+anchor = "    def test_boundfield_id_for_label_override_by_attrs(self):\n"
+assert src.count(anchor) == 1, 'anchor not found exactly once'
+new_tests = '''    def test_boundfield_subwidget_id_for_label(self):
+        """
+        If auto_id is provided when initializing the form, the generated ID in
+        subwidgets must reflect that prefix.
+        """
+        class SomeForm(Form):
+            field = MultipleChoiceField(
+                choices=[('a', 'A'), ('b', 'B')],
+                widget=CheckboxSelectMultiple,
+            )
+
+        form = SomeForm(auto_id='prefix_%s')
+        subwidgets = form['field'].subwidgets
+        self.assertEqual(subwidgets[0].id_for_label, 'prefix_field_0')
+        self.assertEqual(subwidgets[1].id_for_label, 'prefix_field_1')
+
+    def test_boundfield_subwidget_id_for_label_override_by_attrs(self):
+        """
+        An id provided in the widget's attrs is used by the subwidgets'
+        id_for_label, which matches the id of the rendered element.
+        """
+        class SomeForm(Form):
+            field = ChoiceField(
+                choices=[('a', 'A'), ('b', 'B')],
+                widget=RadioSelect(attrs={'id': 'custom'}),
+            )
+
+        subwidgets = SomeForm()['field'].subwidgets
+        self.assertEqual(subwidgets[0].id_for_label, 'custom_0')
+        self.assertEqual(subwidgets[1].id_for_label, 'custom_1')
+        self.assertHTMLEqual(
+            subwidgets[0].tag(),
+            '<input type="radio" name="field" value="a" id="custom_0" required>',
+        )
+
+'''
+src = src.replace(anchor, new_tests + anchor)
+p.write_text(src)
+print('patched')
+EOF
+git diff tests/ && cd tests && python runtests.py forms_tests.tests.test_forms -v 2 2>&1 | grep -E "subwidget_id_for_label|iterable_boundfield|^Ran|^OK|FAILED|Error" | head -20
+$ git diff django/forms/boundfield.py > /tmp/fix.patch && git checkout django/forms/boundfield.py && (cd tests && python runtests.py forms_tests.tests.test_forms.FormsTestCase.test_boundfield_subwidget_id_for_label forms_tests.tests.test_forms.FormsTestCase.test_boundfield_subwidget_id_for_label_override_by_attrs 2>&1 | grep -E "AssertionError|^Ran|^OK|FAILED"); git apply /tmp/fix.patch && echo "--- fix re-applied:" && git diff --stat
+$ cd tests && python runtests.py forms_tests admin_widgets postgres_tests model_forms model_formsets admin_views --parallel 4 2>&1 | grep -E "^Ran|^OK|FAILED|^ERROR|^FAIL" ; cd .. && git status --short && rm -f /tmp/repro.py /tmp/fix.patch
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I fixed `BoundWidget.id_for_label` so it returns the id that is actually rendered on each checkbox or radio input. All related test suites pass.
+
+**Cause:** In `django/forms/boundfield.py`, `id_for_label` built the id itself as `'id_%s_%s' % (name, index)`. It ignored the id that `BoundField.subwidgets` and `ChoiceWidget.create_option` had already worked out from `auto_id` or the widget's `attrs['id']`. So with a custom `auto_id` or widget id, `<label for=...>` pointed at the wrong element. Subwidgets of non-choice widgets also crashed with `KeyError('index')`.
+
+**Fix:** `id_for_label` now returns `self.data['attrs'].get('id')`. I used `.get()` instead of the issue's suggested `['id']` because some inputs have no id, such as with `auto_id=False` or for `Select` options. In those cases it now returns `None` instead of raising an error.
+
+**Behaviour change:** When no id is rendered, `id_for_label` now gives `None` rather than the old `'id_<name>_<index>'`. That old value never matched any element in the HTML, but anything relying on it will see a different result. The docs already say this attribute outputs the element's id, so they needed no change.
+
+**Tests:**
+- I updated one existing test, `test_iterable_boundfield_select`. It expected the old `'id_name_0'` for a form with `auto_id=False` whose options have no id, so it now expects `None`.
+- I added two regression tests: a custom `auto_id` with `CheckboxSelectMultiple` (the issue's case), and a custom widget `id` with `RadioSelect`. Both fail without the fix and pass with it.
+- I ran `forms_tests`, `admin_widgets`, `admin_views`, `model_forms`, `model_formsets` and `postgres_tests`: 1987 tests passed. 579 were skipped because they need things this setup doesn't have, mostly PostgreSQL and Selenium, so those weren't exercised.
+
+Only `django/forms/boundfield.py` and `tests/forms_tests/tests/test_forms.py` were changed.

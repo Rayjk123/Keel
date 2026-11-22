@@ -1,0 +1,449 @@
+$ ls -la && git log --oneline -5 && git status
+$ grep -n "hook" requests/models.py requests/hooks.py requests/sessions.py
+$ sed -n 135,160p requests/models.py && echo "-----" && sed -n 455,480p requests/models.py
+$ cat requests/hooks.py && echo "-----" && sed -n 120,235p requests/sessions.py
+$ cd /tmp && cat > repro_hooks.py << 'EOF'
+import sys
+sys.path.insert(0, '/' + 'REPO')
+EOF
+cd - >/dev/null && python --version && python -c "
+import requests
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+def h1(r): print('  h1 called'); return r
+def h2(r): print('  h2 called'); return r
+
+print('Single callable:')
+r = Request(url='http://example.com', hooks={'response': h1})
+print('  hooks[response] =', r.hooks['response'])
+dispatch_hook('response', r.hooks, 'data')
+
+print('List of callables:')
+r = Request(url='http://example.com', hooks={'response': [h1, h2]})
+print('  hooks[response] =', r.hooks['response'])
+try:
+    dispatch_hook('response', r.hooks, 'data')
+except Exception as e:
+    print('  FAILED:', type(e).__name__, e)
+"
+$ rm -f /tmp/repro_hooks.py && grep -rn "hooks=\|register_hook\|\.hooks" requests/ --include=*.py | grep -v "^requests/packages/urllib3" && ls tests/
+$ grep -n "Request(" requests/models.py requests/sessions.py requests/auth.py && echo "-----" && sed -n 225,260p requests/auth.py && echo "-----" && sed -n 370,385p requests/auth.py
+$ sed -n 280,320p requests/models.py
+$ grep -n "hook" tests/test_requests.py | head -40 && echo "-----" && grep -n "def merge_kwargs" -A 45 requests/sessions.py | head -50 && echo "-----" && grep -n "def from_key_val_list" -A 22 requests/utils.py
+$ sed -n 690,760p tests/test_requests.py
+$ grep -n "Programming Language\|python_requires" setup.py; echo "-----"; grep -rn -i "hook" docs/ --include=*.rst | grep -v "^docs/_build" ; echo "-----"; grep -n "hooks" requests/api.py; echo "-----"; head -20 HISTORY.rst
+$ sed -n 160,230p docs/user/advanced.rst; echo "-----"; sed -n 43,75p requests/models.py; echo "-----"; sed -n 235,260p requests/sessions.py
+$ python - << 'EOF'
+import io
+path = 'requests/models.py'
+src = io.open(path, encoding='utf-8').read()
+
+old = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        self.hooks[event].append(hook)
+'''
+
+new = '''    def register_hook(self, event, hook):
+        """Properly register a hook.
+
+        :param event: the name of the event to hook into (see
+            ``requests.hooks.HOOKS``).
+        :param hook: a callable, or an iterable (e.g. a list or tuple) of
+            callables. The callables are added, in order, to the end of the
+            event's list of hooks. Anything that isn't callable (including
+            non-callable items of an iterable) is ignored.
+        """
+
+        if hasattr(hook, '__call__'):
+            self.hooks[event].append(hook)
+        elif hasattr(hook, '__iter__'):
+            # Copy the callables into our own list rather than storing the
+            # caller's list, so that hooks registered later on this request
+            # can't leak back into a list shared with a session or caller.
+            self.hooks[event].extend(h for h in hook if hasattr(h, '__call__'))
+'''
+
+assert src.count(old) == 1, src.count(old)
+src = src.replace(old, new)
+io.open(path, 'w', encoding='utf-8').write(src)
+print("patched")
+EOF
+git diff requests/models.py
+$ python -W error::DeprecationWarning - << 'EOF'
+import requests
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+calls = []
+def h1(d): calls.append('h1'); return d + '>h1'
+def h2(d): calls.append('h2'); return d + '>h2'
+def h3(d): calls.append('h3'); return d + '>h3'
+
+def check(name, cond):
+    print(('PASS' if cond else 'FAIL') + ': ' + name)
+    assert cond, name
+
+# 1. Original bug: list of callables in the constructor
+r = Request(url='http://example.com', hooks={'response': [h1, h2]})
+check('list value stored flat', r.hooks['response'] == [h1, h2])
+del calls[:]
+out = dispatch_hook('response', r.hooks, 'data')
+check('both hooks dispatched in order, chained', calls == ['h1', 'h2'] and out == 'data>h1>h2')
+
+# 2. Single callable unchanged
+r = Request(url='http://example.com', hooks={'response': h1})
+check('single callable still works', r.hooks['response'] == [h1])
+
+# 3. Tuple
+r = Request(url='http://example.com', hooks={'pre_send': (h1, h2)})
+check('tuple value accepted', r.hooks['pre_send'] == [h1, h2])
+
+# 4. Public register_hook with a list, appended after existing hooks
+r = Request(url='http://example.com', hooks={'response': h1})
+r.register_hook('response', [h2, h3])
+check('register_hook(list) extends in order', r.hooks['response'] == [h1, h2, h3])
+
+# 5. Non-callables ignored
+r = Request(url='http://example.com', hooks={'response': [h1, 'not callable', None, h2]})
+check('non-callable list items dropped', r.hooks['response'] == [h1, h2])
+r = Request(url='http://example.com', hooks={'response': None})
+check('None value ignored', r.hooks['response'] == [])
+r = Request(url='http://example.com', hooks={'response': 'abc'})
+check('string value ignored (not split into chars)', r.hooks['response'] == [])
+
+# 6. Bare Request() + register_hook
+r = Request()
+r.register_hook('args', [h1, h2])
+check('bare Request().register_hook(list)', all(hasattr(h, '__call__') for h in r.hooks['args']) and len(r.hooks['args']) == 2)
+
+# 7. Session-level list hooks (offline: return_response=False)
+user_list = [h1, h2]
+s = requests.session(hooks={'response': user_list})
+r = s.get('http://example.com', return_response=False)
+check('session list hooks reach Request flat', r.hooks['response'] == [h1, h2])
+
+# 8. No aliasing back into the session / user list
+r.register_hook('response', h3)
+check('request hooks extended', r.hooks['response'] == [h1, h2, h3])
+check('session hooks untouched', list(s.hooks['response']) == [h1, h2])
+check('user list untouched', user_list == [h1, h2])
+
+# 9. deregister works on items registered via a list
+check('deregister_hook returns True', r.deregister_hook('response', h2) is True)
+check('deregistered item removed', r.hooks['response'] == [h1, h3])
+
+# 10. Unknown event name with a callable still raises like before
+try:
+    Request(url='http://example.com', hooks={'bogus': h1})
+    check('unknown event raises KeyError', False)
+except KeyError:
+    check('unknown event raises KeyError (unchanged)', True)
+
+print('ALL CHECKS PASSED')
+EOF
+$ python - << 'EOF'
+import requests
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+calls = []
+def h1(d): calls.append('h1'); return d + '>h1'
+def h2(d): calls.append('h2'); return d + '>h2'
+def h3(d): calls.append('h3'); return d + '>h3'
+
+def check(name, cond):
+    print(('PASS' if cond else 'FAIL') + ': ' + name)
+    assert cond, name
+
+# 1. Original bug: list of callables in the constructor
+r = Request(url='http://example.com', hooks={'response': [h1, h2]})
+check('list value stored flat', r.hooks['response'] == [h1, h2])
+del calls[:]
+out = dispatch_hook('response', r.hooks, 'data')
+check('both hooks dispatched in order, chained', calls == ['h1', 'h2'] and out == 'data>h1>h2')
+
+# 2. Single callable unchanged
+r = Request(url='http://example.com', hooks={'response': h1})
+check('single callable still works', r.hooks['response'] == [h1])
+
+# 3. Tuple
+r = Request(url='http://example.com', hooks={'pre_send': (h1, h2)})
+check('tuple value accepted', r.hooks['pre_send'] == [h1, h2])
+
+# 4. Public register_hook with a list, appended after existing hooks
+r = Request(url='http://example.com', hooks={'response': h1})
+r.register_hook('response', [h2, h3])
+check('register_hook(list) extends in order', r.hooks['response'] == [h1, h2, h3])
+
+# 5. Non-callables ignored
+r = Request(url='http://example.com', hooks={'response': [h1, 'not callable', None, h2]})
+check('non-callable list items dropped', r.hooks['response'] == [h1, h2])
+r = Request(url='http://example.com', hooks={'response': None})
+check('None value ignored', r.hooks['response'] == [])
+r = Request(url='http://example.com', hooks={'response': 'abc'})
+check('string value ignored (not split into chars)', r.hooks['response'] == [])
+
+# 6. Bare Request() + register_hook
+r = Request()
+r.register_hook('args', [h1, h2])
+check('bare Request().register_hook(list)', r.hooks['args'] == [h1, h2])
+
+# 7. Session-level list hooks (offline: return_response=False)
+user_list = [h1, h2]
+s = requests.session(hooks={'response': user_list})
+r = s.get('http://example.com', return_response=False)
+check('session list hooks reach Request flat', r.hooks['response'] == [h1, h2])
+
+# 8. No aliasing back into the session / user list
+r.register_hook('response', h3)
+check('request hooks extended', r.hooks['response'] == [h1, h2, h3])
+check('session hooks untouched', list(s.hooks['response']) == [h1, h2])
+check('user list untouched', user_list == [h1, h2])
+
+# 9. deregister works on items registered via a list
+check('deregister_hook returns True', r.deregister_hook('response', h2) is True)
+check('deregistered item removed', r.hooks['response'] == [h1, h3])
+
+# 10. Unknown event name with a callable still raises like before
+try:
+    Request(url='http://example.com', hooks={'bogus': h1})
+    check('unknown event raises KeyError', False)
+except KeyError:
+    check('unknown event raises KeyError (unchanged)', True)
+
+print('ALL CHECKS PASSED')
+EOF
+$ git show HEAD:requests/models.py | grep -n "status_code is 0"; echo "-----"; sed -n 1,60p tests/test_requests.py; echo "-----"; python -c "import pytest; print('pytest', pytest.__version__)"
+$ awk 'NR<=695 && /^class /{line=NR": "$0} END{print line}' tests/test_requests.py; echo "-----"; timeout 120 python -m pytest tests/test_requests.py -k "hook" -q -p no:cacheprovider 2>&1 | tail -15
+$ python - << 'EOF'
+import io
+
+def patch(path, old, new):
+    src = io.open(path, encoding='utf-8').read()
+    assert src.count(old) == 1, (path, src.count(old))
+    io.open(path, 'w', encoding='utf-8').write(src.replace(old, new))
+
+patch('requests/models.py', '''        if hasattr(hook, '__call__'):
+            self.hooks[event].append(hook)
+        elif hasattr(hook, '__iter__'):
+            # Copy the callables into our own list rather than storing the
+            # caller's list, so that hooks registered later on this request
+            # can't leak back into a list shared with a session or caller.
+            self.hooks[event].extend(h for h in hook if hasattr(h, '__call__'))
+''', '''        # Look the event up first, so an unknown event name is still an error
+        # even if nothing ends up being registered for it.
+        event_hooks = self.hooks[event]
+
+        if hasattr(hook, '__call__'):
+            event_hooks.append(hook)
+        elif hasattr(hook, '__iter__'):
+            # Copy the callables into our own list rather than storing the
+            # caller's list, so that hooks registered later on this request
+            # can't leak back into a list shared with a session or caller.
+            event_hooks.extend(h for h in hook if hasattr(h, '__call__'))
+''')
+
+patch('tests/test_requests.py', '''            assert 'foo' in response.text
+            assert 'bar' in response.text
+
+    def test_session_persistent_cookies(self):
+''', '''            assert 'foo' in response.text
+            assert 'bar' in response.text
+
+    def test_allow_list_of_hooks_to_register_hook(self):
+        """A list (or tuple) of hooks can be passed to register_hook() or as
+        a value of the hooks argument; each hook is registered on its own."""
+
+        def add_foo_header(args):
+            args.setdefault('headers', {})['X-Foo'] = 'foo'
+            return args
+
+        def add_bar_header(args):
+            args.setdefault('headers', {})['X-Bar'] = 'bar'
+            return args
+
+        hooks = [add_foo_header, add_bar_header]
+
+        r = requests.models.Request()
+        r.register_hook('args', hooks)
+        self.assertEqual(r.hooks['args'], hooks)
+
+        r = requests.models.Request(hooks={'args': hooks})
+        self.assertEqual(r.hooks['args'], hooks)
+
+        r = requests.models.Request(hooks={'args': tuple(hooks)})
+        self.assertEqual(r.hooks['args'], hooks)
+
+        # A list is added after any hooks that are already registered.
+        r = requests.models.Request(hooks={'args': add_foo_header})
+        r.register_hook('args', [add_bar_header])
+        self.assertEqual(r.hooks['args'], hooks)
+
+    def test_non_callable_hooks_are_ignored(self):
+
+        def hook(response):
+            return response
+
+        r = requests.models.Request(hooks={'response': [hook, None, 'nope']})
+        self.assertEqual(r.hooks['response'], [hook])
+
+        r = requests.models.Request(hooks={'response': None})
+        self.assertEqual(r.hooks['response'], [])
+
+    def test_list_of_request_hooks_are_all_dispatched(self):
+        """Each hook in a list is called, in order, with the data returned
+        by the hooks before it."""
+
+        calls = []
+
+        def first(data):
+            calls.append(('first', data))
+            return 'from first'
+
+        def second(data):
+            calls.append(('second', data))
+
+        r = requests.models.Request(hooks={'response': [first, second]})
+        result = requests.hooks.dispatch_hook('response', r.hooks, 'original')
+
+        self.assertEqual(calls, [('first', 'original'), ('second', 'from first')])
+        self.assertEqual(result, 'from first')
+
+    def test_session_list_of_hooks(self):
+        """A list of hooks on a session is registered on its requests, and
+        a request doesn't share its list of hooks with the session."""
+
+        def first(response):
+            return response
+
+        def second(response):
+            return response
+
+        def third(response):
+            return response
+
+        session_hooks = [first, second]
+        s = requests.session(hooks={'response': session_hooks})
+
+        r = s.get(httpbin('get'), return_response=False)
+        self.assertEqual(r.hooks['response'], [first, second])
+
+        r.register_hook('response', third)
+        self.assertEqual(r.hooks['response'], [first, second, third])
+        self.assertEqual(session_hooks, [first, second])
+
+    def test_session_persistent_cookies(self):
+''')
+print("patched")
+EOF
+git diff requests/models.py
+$ git stash list | wc -l; timeout 180 python -m pytest tests/test_requests.py -k "hook" -v -p no:cacheprovider 2>&1 | grep -E "::|passed|failed|error"; python -c "
+from requests.models import Request
+try:
+    Request(hooks={'bogus': None}); print('FAIL: no KeyError')
+except KeyError: print('PASS: unknown event with None value still raises KeyError')
+" 2>/dev/null; echo "===== same tests WITHOUT the models.py fix ====="; git stash push -q -- requests/models.py && (timeout 180 python -m pytest tests/test_requests.py -k "hook" -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed"); git stash pop -q; echo "===== restored ====="; git diff --stat; git stash list | wc -l
+$ cat .env; echo; echo "HTTPBIN_URL=${HTTPBIN_URL:-<unset>}"; start=$(date +%s); timeout 900 python -m pytest tests/ -v -p no:cacheprovider 2>&1 | grep -E "::" | sed -E 's/ +\[ *[0-9]+%\]$//' | sort > /tmp/hooks_fixed.txt; echo "elapsed: $(( $(date +%s) - start ))s"; echo "outcomes with fix:"; awk '{print $NF}' /tmp/hooks_fixed.txt | sort | uniq -c; grep -vE " PASSED$" /tmp/hooks_fixed.txt | head -40
+$ ps -eo pid,etime,args | grep -E "[p]ytest" ; echo "-----"; cat .env; echo; echo "HTTPBIN_URL=${HTTPBIN_URL:-<unset>}"; echo "-----"; ls -la /tmp/hooks_fixed.txt 2>&1; echo "-----"; git status --short
+$ for pid in 132 136; do
+  if ps -p "$pid" -o args= 2>/dev/null | grep -q "pytest tests/ -v -p no:cacheprovider"; then
+    kill "$pid" && echo "sent SIGTERM to $pid"
+  fi
+done
+sleep 2
+if ps -eo pid,etime,args | grep -E "[p]ytest"; then echo "WARNING: pytest still running"; else echo "no pytest processes left"; fi
+rm -f /tmp/hooks_fixed.txt
+echo "-----"
+python -c "import pytest_timeout" 2>/dev/null && echo "pytest-timeout: available" || echo "pytest-timeout: not installed"
+echo "-----"
+timeout 60 python -m pytest tests/ --collect-only -q -p no:cacheprovider > /tmp/collect.txt 2>&1; echo "collect exit=$?"
+grep -E "::" /tmp/collect.txt | cut -d: -f1 | sort | uniq -c
+grep -vE "::" /tmp/collect.txt | grep -v "^$" | tail -8
+rm -f /tmp/collect.txt
+$ repo=$(pwd)
+if ps -p 132,136 -o pid=,args=; then echo "old run STILL ALIVE"; else echo "old run (132, 136): gone"; fi
+echo "-----"
+rm -rf /tmp/hookcheck && mkdir -p /tmp/hookcheck/base
+git archive HEAD | tar -x -C /tmp/hookcheck/base
+echo "baseline has original register_hook: $(grep -c 'self.hooks\[event\].append(hook)' /tmp/hookcheck/base/requests/models.py)"
+cat > /tmp/hookcheck/alarm_timeout.py << 'EOF'
+"""Minimal stand-in for pytest-timeout: fail a test whose call phase runs too long."""
+import os
+import signal
+import sys
+
+import pytest
+
+LIMIT = int(os.environ.get('ALARM_TIMEOUT', '15'))
+
+
+class PerTestTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise PerTestTimeout('test call exceeded %ss' % LIMIT)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(LIMIT)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def pytest_terminal_summary(terminalreporter):
+    mod = sys.modules.get('requests')
+    terminalreporter.write_line('requests imported from: %s' % getattr(mod, '__file__', None))
+EOF
+date +%s > /tmp/hookcheck/start
+for name in fixed base; do
+  if [ "$name" = fixed ]; then dir="$repo"; else dir=/tmp/hookcheck/base; fi
+  (cd "$dir" && PYTHONPATH=/tmp/hookcheck PYTHONUNBUFFERED=1 ALARM_TIMEOUT=15 \
+    nohup setsid timeout 1500 python -m pytest tests/ -v -rfE -p alarm_timeout -p no:cacheprovider \
+    > /tmp/hookcheck/$name.log 2>&1 < /dev/null &)
+done
+sleep 60
+for name in fixed base; do
+  echo "== $name: $(grep -cE '^tests/\S+::\S+ (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)' /tmp/hookcheck/$name.log) tests finished after $(( $(date +%s) - $(cat /tmp/hookcheck/start) ))s"
+  tail -n 2 /tmp/hookcheck/$name.log
+done
+$ cd /tmp/hookcheck || exit 1
+if ps -eo pid,etime,args | grep -E "[a]larm_time"; then echo "^ background test run(s) still alive"; else echo "no background test runs left"; fi
+cat > reasons.awk << 'EOF'
+# For each failure/error section of a pytest log (long tracebacks), print
+# "<section name> TAB <exception type> TAB <first line of the last E block>".
+function flush() {
+    if (cur != "") print cur "\t" etype "\t" emsg
+    cur = ""; etype = ""; emsg = ""; prevE = 0; incap = 0
+}
+/^___+ .+ ___+$/ { flush(); cur = $0; sub(/^_+ /, "", cur); sub(/ _+$/, "", cur); next }
+/^===+ .* ===+$/ { flush(); next }
+cur == "" || incap { next }
+/^---+ Captured .* ---+$/ { incap = 1; next }
+/^E / { if (!prevE) { emsg = $0; sub(/^E +/, "", emsg) }; prevE = 1; next }
+{ prevE = 0 }
+/^[^ ]+:[0-9]+: [A-Za-z_][A-Za-z0-9_.]*$/ { etype = $0; sub(/^.*: /, "", etype) }
+END { flush() }
+EOF
+for name in fixed base; do
+  echo "== $name: $(tail -n 1 $name.log | tr -d '=' | sed -E 's/^ +| +$//g')"
+  echo "   $(grep -h 'requests imported from' $name.log)"
+  grep -E '^tests/[^ ]+::[^ ]+ (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)' $name.log | awk '{print $1, $2}' | LC_ALL=C sort > $name.outcomes
+  awk -f reasons.awk $name.log | sed -E 's#/tmp/hookcheck/base/#<repo>/#g; s#/testbed/#<repo>/#g; s/0x[0-9a-fA-F]+/0x?/g' | LC_ALL=C sort > $name.reasons
+  echo "   test outcome lines: $(wc -l < $name.outcomes), failure sections parsed: $(wc -l < $name.reasons)"
+done
+echo "----- outcome differences (< fixed tree, > HEAD baseline) -----"
+diff fixed.outcomes base.outcomes
+echo "----- failure-reason differences (< fixed tree, > HEAD baseline) -----"
+diff fixed.reasons base.reasons | cut -c1-260
+echo "----- failure reasons in the fixed tree (count, type, message) -----"
+cut -f2,3 fixed.reasons | sed -E 's/with url: [^ ]+/with url: <path>/' | cut -c1-150 | LC_ALL=C sort | uniq -c | sort -rn | head -15
+echo "----- warnings in the baseline run -----"
+grep -E "Warning: " base.log | sed -E 's/^ *[^ ]+:[0-9]+: //' | cut -c1-90 | LC_ALL=C sort | uniq -c | sort -rn | head -8

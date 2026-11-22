@@ -1,0 +1,53 @@
+diff --git a/doc/whats-new.rst b/doc/whats-new.rst
+index c1440ec1..57563c33 100755
+--- a/doc/whats-new.rst
++++ b/doc/whats-new.rst
+@@ -116,6 +116,8 @@ New Features
+ 
+ Bug fixes
+ ~~~~~~~~~
++- Fix :py:meth:`DataArray.to_unstacked_dataset` when the stacked index contains
++  only variable names, and preserve length-one sample dimensions when unstacking.
+ - Fix errors combining attrs in :py:func:`open_mfdataset` (:issue:`4009`, :pull:`4173`)
+   By `John Omotani <https://github.com/johnomotani>`_
+ - If groupby receives a ``DataArray`` with name=None, assign a default name (:issue:`158`)
+diff --git a/xarray/core/dataarray.py b/xarray/core/dataarray.py
+index b0df8749..26e2963d 100755
+--- a/xarray/core/dataarray.py
++++ b/xarray/core/dataarray.py
+@@ -1958,10 +1958,15 @@ class DataArray(AbstractArray, DataWithCoords):
+         variables = idx.levels[level_number]
+         variable_dim = idx.names[level_number]
+ 
+-        # pull variables out of datarray
++        sample_dims = set(self.dims) - {dim}
+         data_dict = {}
+         for k in variables:
+-            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
++            # Drop the stacked coordinate if the variable label is the entire key.
++            subset = self.sel({variable_dim: k}, drop=True)
++            squeeze_dims = [
++                d for d, n in subset.sizes.items() if n == 1 and d not in sample_dims
++            ]
++            data_dict[k] = subset.squeeze(squeeze_dims, drop=True)
+ 
+         # unstacked dataset
+         return Dataset(data_dict)
+diff --git a/xarray/tests/test_dataset.py b/xarray/tests/test_dataset.py
+index 9c8d4072..d22cebae 100755
+--- a/xarray/tests/test_dataset.py
++++ b/xarray/tests/test_dataset.py
+@@ -3045,6 +3045,13 @@ class TestDataset:
+         d0 = D.isel(x=0)
+         assert_identical(d0, x0)
+ 
++    @pytest.mark.parametrize("size", [3, 1])
++    def test_to_unstacked_dataset_only_sample_dims(self, size):
++        x = np.arange(size)
++        data = xr.Dataset({"a": ("x", x), "b": ("x", x + 1)}, coords={"x": x})
++        stacked = data.to_stacked_array("features", sample_dims=["x"])
++        assert_identical(data, stacked.to_unstacked_dataset("features"))
++
+     def test_to_stacked_array_to_unstacked_dataset_different_dimension(self):
+         # test when variables have different dimensionality
+         a, b = create_test_stacked_array()

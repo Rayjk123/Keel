@@ -1,0 +1,225 @@
+$ ls -la && git log --oneline -3
+$ cat astropy/modeling/separable.py
+$ cd /tmp && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm:'); print(separability_matrix(cm))
+print('flat:'); print(separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+print('nested right (BUG?):'); print(separability_matrix(m.Pix2Sky_TAN() & cm))
+print('nested left:'); print(separability_matrix(cm & m.Pix2Sky_TAN()))
+"
+$ grep -n "cright\[-right.shape\[0\]:, -right.shape\[1\]:\] = 1" astropy/modeling/separable.py && sed -i 's/cright\[-right.shape\[0\]:, -right.shape\[1\]:\] = 1/cright[-right.shape[0]:, -right.shape[1]:] = right/' astropy/modeling/separable.py && git diff && sed -n '237,247p' astropy/modeling/separable.py
+$ cd /tmp && python -c "
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, is_separable
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('issue case, nested right:'); print(separability_matrix(m.Pix2Sky_TAN() & cm))
+
+def check(name, nested, flat):
+    a, b = separability_matrix(nested), separability_matrix(flat)
+    ok = np.array_equal(a, b) and np.array_equal(is_separable(nested), is_separable(flat))
+    print(('OK  ' if ok else 'FAIL'), name)
+    if not ok: print(a); print(b)
+    return ok
+
+L = lambda: m.Linear1D(1)
+results = [
+  check('tan & (lin&lin)', m.Pix2Sky_TAN() & (L() & L()), m.Pix2Sky_TAN() & L() & L()),
+  check('(lin&lin) & tan', (L() & L()) & m.Pix2Sky_TAN(), L() & L() & m.Pix2Sky_TAN()),
+  check('lin & (tan & lin)', L() & (m.Pix2Sky_TAN() & L()), L() & m.Pix2Sky_TAN() & L()),
+  check('(lin&lin) & (lin&lin)', (L() & L()) & (L() & L()), L() & L() & L() & L()),
+  check('deep: lin & (lin & (lin & tan))', L() & (L() & (L() & m.Pix2Sky_TAN())), L() & L() & L() & m.Pix2Sky_TAN()),
+  check('tan & (rot | map)', m.Pix2Sky_TAN() & (m.Rotation2D(2) | m.Mapping((0, 1))),
+        m.Pix2Sky_TAN() & m.Rotation2D(2)),
+  check('shift & (shift&shift | swap map)', m.Shift(1) & ((m.Shift(1) & m.Shift(2)) | m.Mapping((1, 0))),
+        m.Shift(1) & m.Mapping((1, 0))),
+]
+print('all ok:', all(results))
+"
+$ cd /tmp && python -m pytest "$OLDPWD/astropy/modeling/tests/test_separable.py" "$OLDPWD/astropy/modeling/tests/test_compound.py" "$OLDPWD/astropy/modeling/tests/test_core.py" -q -p no:cacheprovider 2>&1 | tail -15
+$ cd "$OLDPWD" 2>/dev/null; R=$(pwd); git stash && echo "--- ORIGINAL CODE ---" && (cd /tmp && python -m pytest "$R/astropy/modeling/tests/test_separable.py" "$R/astropy/modeling/tests/test_compound.py" "$R/astropy/modeling/tests/test_core.py" -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed"); git stash pop && echo "--- fix restored ---" && git diff --stat
+$ grep -n "compound_models\|^def \|^    '\|sh1\|map1\|cm_4d\|import" astropy/modeling/tests/test_separable.py | head -60
+$ sed -n '16,58p;132,137p' astropy/modeling/tests/test_separable.py
+$ python - <<'EOF'
+path = 'astropy/modeling/tests/test_separable.py'
+src = open(path).read()
+
+old_start = "compound_models = {\n"
+new_start = """cm_4d_expected = (np.array([False, False, True, True]),
+                  np.array([[True, True, False, False],
+                            [True, True, False, False],
+                            [False, False, True, False],
+                            [False, False, False, True]]))
+
+
+compound_models = {
+"""
+assert src.count(old_start) == 1
+src = src.replace(old_start, new_start)
+
+old_end = """    'cm7': (map2 | p2 & sh1,
+            (np.array([False, True]),
+             np.array([[True, False], [False, True]]))
+            )
+}
+"""
+new_end = """    'cm7': (map2 | p2 & sh1,
+            (np.array([False, True]),
+             np.array([[True, False], [False, True]]))
+            ),
+    'cm8': (rot & (sh1 & sh2), cm_4d_expected),
+    'cm9': (rot & sh1 & sh2, cm_4d_expected),
+    'cm10': ((rot & sh1) & sh2, cm_4d_expected),
+    'cm11': (rot & sh1 & (scl1 & scl2),
+             (np.array([False, False, True, True, True]),
+              np.array([[True, True, False, False, False],
+                        [True, True, False, False, False],
+                        [False, False, True, False, False],
+                        [False, False, False, True, False],
+                        [False, False, False, False, True]]))
+             ),
+    'cm12': (sh1 & (sh1 & sh2 | Mapping((1, 0))),
+             (np.array([True, True, True]),
+              np.array([[True, False, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+}
+"""
+assert src.count(old_end) == 1
+src = src.replace(old_end, new_end)
+open(path, 'w').write(src)
+print("edit applied")
+EOF
+git diff astropy/modeling/tests/test_separable.py && R=$(pwd) && cd /tmp && python -m pytest "$R/astropy/modeling/tests/test_separable.py" -v -p no:cacheprovider 2>&1 | grep -E "PASSED|FAILED|ERROR|passed|failed"
+$ R=$(pwd) && (cd /tmp && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, is_separable
+t = m.Rotation2D(2) & m.Shift(1) & m.Shift(2)
+print('rot & sh1 & sh2 parses as: left =', type(t.left).__name__, repr(t.left.op), '/ right =', type(t.right).__name__)
+c = m.Shift(1) & (m.Shift(2) & m.Scale(1) | m.Mapping((0, 1, 0)))
+print('non-square nested-right case:'); print(separability_matrix(c)); print(is_separable(c))
+") && python - <<'EOF'
+path = 'astropy/modeling/tests/test_separable.py'
+src = open(path).read()
+old = "    'cm10': ((rot & sh1) & sh2, cm_4d_expected),\n"
+new = """    'cm10': (sh1 & (sh2 & scl1 | Mapping((0, 1, 0))),
+             (np.array([True, True, True, True]),
+              np.array([[True, False, False],
+                        [False, True, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+"""
+assert src.count(old) == 1
+src = src.replace(old, new)
+open(path, 'w').write(src)
+print("edit applied")
+EOF
+sed -n "/'cm8'/,/'cm11'/p" astropy/modeling/tests/test_separable.py && (cd /tmp && python -m pytest "$R/astropy/modeling/tests/test_separable.py" -q -p no:cacheprovider 2>&1 | tail -2)
+$ R=$(pwd); git stash push -q astropy/modeling/separable.py && echo "=== new tests vs ORIGINAL separable.py ==="; (cd /tmp && python -m pytest "$R/astropy/modeling/tests/test_separable.py" -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed"); git stash pop -q && echo "=== fix restored ===" && git diff --stat; echo "=== other users of separability code ==="; grep -rn "separability_matrix\|_separable(\|_cstack\|is_separable" --include=*.py astropy | grep -v "astropy/modeling/separable.py\|astropy/modeling/tests/test_separable.py"; echo "=== changelog dir ==="; ls docs/changes/modeling 2>/dev/null | head
+$ R=$(pwd); (cd /tmp && python -c "
+from astropy.modeling import models
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import _separable, is_separable, separability_matrix
+sh1, sh2, rot, map3 = models.Shift(1), models.Shift(2), models.Rotation2D(2), Mapping((0, 0))
+cm1 = map3 & sh1 | rot & sh1 | sh1 & sh2 & sh1
+print('raw _separable(cm1):'); print(_separable(cm1))
+print('is_separable(cm1)      :', is_separable(cm1))
+print('is_separable(cm1 & sh1):', is_separable(cm1 & sh1))
+print('is_separable(sh1 & cm1):', is_separable(sh1 & cm1))
+print('separability_matrix(sh1 & cm1):'); print(separability_matrix(sh1 & cm1))
+print('non-compound right operand, sh1 & Identity(2):'); print(separability_matrix(sh1 & models.Identity(2)))
+"); echo "=== docs mentioning separability ==="; grep -rn "separability_matrix\|is_separable" docs/ | head -20
+$ R=$(pwd)
+python - <<'EOF'
+path = 'astropy/modeling/tests/test_separable.py'
+src = open(path).read()
+old = """    'cm12': (sh1 & (sh1 & sh2 | Mapping((1, 0))),
+             (np.array([True, True, True]),
+              np.array([[True, False, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+}
+"""
+new = """    'cm12': (sh1 & (sh1 & sh2 | Mapping((1, 0))),
+             (np.array([True, True, True]),
+              np.array([[True, False, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+    # cm1 nested on the right: its raw coord matrix has entries > 1, which
+    # ``is_separable`` relies on, so it must be copied as-is (not booleanized).
+    'cm13': (sh1 & (map3 & sh1 | rot & sh1 | sh1 & sh2 & sh1),
+             (np.array([True, False, False, True]),
+              np.array([[True, False, False],
+                        [False, True, False],
+                        [False, True, False],
+                        [False, False, True]]))
+             ),
+    # A plain (non-compound) multi-output Mapping on the right of '&'.
+    'cm14': (sh1 & Mapping((1, 0)),
+             (np.array([True, True, True]),
+              np.array([[True, False, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+}
+"""
+assert src.count(old) == 1
+open(path, 'w').write(src.replace(old, new))
+print("edit applied")
+EOF
+sed -n "/'cm13'/,/^}/p" astropy/modeling/tests/test_separable.py
+cd /tmp
+echo "=== cm13 vs. alternative ways of handling the right operand ==="
+python - <<'EOF'
+import numpy as np
+from astropy.modeling import models, separable as s
+from astropy.modeling.models import Mapping
+sh1, sh2, rot, map3 = models.Shift(1), models.Shift(2), models.Rotation2D(2), Mapping((0, 0))
+model = sh1 & (map3 & sh1 | rot & sh1 | sh1 & sh2 & sh1)
+orig = s._operators['&']
+variants = {'fixed (copy as-is)': lambda r: r,
+            'booleanized copy': lambda r: (r != 0).astype(float),
+            'original (fill 1s)': lambda r: np.ones_like(r)}
+for name, f in variants.items():
+    s._operators['&'] = lambda l, r, f=f: orig(l, r if isinstance(r, s.Model) else f(r))
+    print(f"{name:19s} is_separable={s.is_separable(model).astype(int).tolist()} "
+          f"matrix={s.separability_matrix(model).astype(int).tolist()}")
+s._operators['&'] = orig
+print("cm13 expects        is_separable=[1, 0, 0, 1] matrix=[[1, 0, 0], [0, 1, 0], [0, 1, 0], [0, 0, 1]]")
+EOF
+TESTS="$R/astropy/modeling/tests/test_separable.py $R/astropy/modeling/separable.py $R/astropy/modeling/tests/test_core.py $R/astropy/modeling/tests/test_compound.py $R/astropy/modeling/tests/test_models.py::test_custom_separability_matrix"
+run() { timeout 600 python -m pytest $TESTS -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|^ERROR|passed|failed" | sed 's/ - .*//'; }
+run > /tmp/with.txt; echo "=== WITH fix:    $(tail -1 /tmp/with.txt)"
+git -C "$R" stash push -q astropy/modeling/separable.py && { run > /tmp/without.txt; git -C "$R" stash pop -q; }; echo "=== WITHOUT fix: $(tail -1 /tmp/without.txt)"
+echo "=== FAILED lines that differ (< only with fix, > only without fix) ==="
+grep FAILED /tmp/with.txt > /tmp/with_f.txt; grep FAILED /tmp/without.txt > /tmp/without_f.txt; diff /tmp/with_f.txt /tmp/without_f.txt
+echo "=== repo state (stash count should be 0) ==="; git -C "$R" status --short; git -C "$R" stash list | wc -l
+$ git diff; echo "=== style check (changed files) ==="; (python -m flake8 --max-line-length=100 astropy/modeling/tests/test_separable.py astropy/modeling/separable.py 2>&1 || python -m pycodestyle --max-line-length=100 astropy/modeling/tests/test_separable.py astropy/modeling/separable.py 2>&1) | head -20; echo "=== towncrier config ==="; grep -n -A12 "^\[tool.towncrier\]" pyproject.toml | head -40
+$ grep -n "max-line-length\|max_line_length" setup.cfg tox.ini 2>/dev/null; echo "=== longest added lines (limit above) ==="; git diff -U0 | grep '^+' | grep -v '^+++' | awk '{ print length($0)-1 ": " $0 }' | sort -rn | head -3; echo "=== trailing whitespace in added lines ==="; git diff -U0 | grep -E '^\+.*[[:space:]]$' || echo none; echo "=== compile ==="; python -m py_compile astropy/modeling/separable.py astropy/modeling/tests/test_separable.py && echo ok; echo "=== towncrier change types ==="; awk '/^\[tool.towncrier\]/{f=1} f && /^\[[^\[]/ && !/towncrier/{f=0} f' pyproject.toml | grep -E '^\s*(directory|name) ='
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is done and verified: `separability_matrix` now gives the expected diagonal result for `Pix2Sky_TAN() & cm`, matching the flat model.
+
+**Cause:** In `_cstack` (the `&` handler) in `astropy/modeling/separable.py`, the right-hand operand's matrix was overwritten with 1s instead of being copied. The left-hand side was already copied correctly. Every operand reaches this code as a matrix, so any right operand whose matrix isn't all ones came out wrong. That includes nested compound models, as in the issue, but also plain models: `Shift(1) & Mapping((1, 0))` was wrong too. Chains of 1-D models were unaffected, which is why the bug looked specific to nesting.
+
+**Fix:** One line. The right operand's matrix is now copied unchanged, exactly as the left side is. The values must not be converted to True/False, because `is_separable` relies on counts above 1.
+
+**Tests:** I added seven cases (cm8–cm14) to `astropy/modeling/tests/test_separable.py`. They cover the issue's example, a flat version for comparison, a nested model with more outputs than inputs, a swapped `Mapping`, a nested model whose matrix has counts above 1, and a plain `Mapping` on the right.
+- The six right-operand cases fail on the original code and pass with the fix; the flat comparison passes both ways.
+- The counts case also fails if the copy is converted to True/False.
+
+**Results:**
+- All separability tests and the doctests in `separable.py` pass.
+- Across the separability, core and compound-model tests, nothing breaks because of the change.
+- 7 tests in `test_compound.py` and `test_core.py` fail identically with and without the fix. The one error I looked at is a floating-point mismatch of about 1e-16; I didn't investigate the other six.
+
+**Not done:**
+- **Changelog entry:** it needs the PR number in its filename (`docs/changes/modeling/<PR>.bugfix.rst`), so I didn't create it.
+- **Style check:** flake8 isn't installed, so I checked the changed lines myself: they are within the 100-character limit, have no trailing whitespace, and both files compile.

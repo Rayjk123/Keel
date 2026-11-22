@@ -1,0 +1,134 @@
+$ ls -la && echo "-----" && cat main.tex && echo "-----" && cat synonyms.txt && echo "-----" && cat input.tex
+$ ls -la && echo "-----MAIN-----" && cat main.tex && echo "-----SYN HEAD-----" && head -n 20 synonyms.txt && echo "-----" && wc -l synonyms.txt input.tex main.tex
+$ sed -n '20,30p' synonyms.txt && echo "-----" && which pdflatex && pdflatex --version | head -2 && echo "-----" && mkdir -p /tmp/build && cp main.tex input.tex /tmp/build/ && cd /tmp/build && pdflatex -interaction=nonstopmode main.tex > /dev/null 2>&1; grep -n -A3 "Overfull" /tmp/build/main.log; echo "count: $(grep -c 'Overfull' /tmp/build/main.log)"
+$ cd ~ 2>/dev/null; cd "$OLDPWD" 2>/dev/null; pwd; cat -A input.tex | cut -c1-60; echo "-----special chars:"; grep -n '[%&$#_{}~^\\]' input.tex; echo "-----"; tail -c 50 input.tex | od -c | tail -3; echo "-----"; python3 - <<'EOF'
+import re
+syn={}
+for line in open('synonyms.txt'):
+    parts=[p.strip() for p in line.strip().split(',') if p.strip()]
+    if len(parts)>=2: syn[parts[0]]=parts[1:]
+print("num families:",len(syn))
+WORD=re.compile(r"[A-Za-z]+(?:['-][A-Za-z]+)*")
+lines=open('input.tex').read().split('\n')
+for i,l in enumerate(lines,1):
+    heads=[m.group(0) for m in WORD.finditer(l) if m.group(0) in syn]
+    if l.strip(): print(i, len(heads), heads)
+# heads not found in text
+alltext=open('input.tex').read()
+found=set(m.group(0) for m in WORD.finditer(alltext))
+print("heads NOT in text:", [h for h in syn if h not in found])
+EOF
+$ cd /app && which perl awk gawk sed bash; perl -v | head -2; echo "-----"; cd /tmp/build && time (pdflatex -interaction=nonstopmode main.tex > /dev/null 2>&1); echo "-----heads missing from input.tex:"; cd /app && cut -d, -f1 synonyms.txt | while read h; do grep -qw -- "$h" input.tex || echo "MISSING: $h"; done; echo done
+$ mkdir -p /tmp/work && cat > /tmp/work/search.pl <<'EOF'
+#!/usr/bin/perl
+use strict; use warnings;
+my ($parline, $beam, $maxdepth, $nshow) = @ARGV;
+$beam //= 20; $maxdepth //= 4; $nshow //= 25;
+my $app = '/app'; my $work = '/tmp/work';
+sub min { $_[0] < $_[1] ? $_[0] : $_[1] }
+my %fam;
+open my $sf, '<', "$app/synonyms.txt" or die "syn: $!";
+while (my $l = <$sf>) {
+  chomp $l; $l =~ s/\r//g;
+  my @p = grep { length } map { (my $x = $_) =~ s/^\s+|\s+$//g; $x } split /,/, $l;
+  next unless @p >= 2;
+  my $h = shift @p; $fam{$h} = [@p];
+}
+close $sf;
+open my $if, '<', "$app/input.tex" or die; my @lines = <$if>; close $if; chomp @lines;
+my $para = $lines[$parline-1];
+sub needs_an { my $w = lc shift; return 0 if $w =~ /^(uni|use|usu|one|eu)/; return 1 if $w =~ /^(hour|honest|honor)/; return ($w =~ /^[aeiou]/) ? 1 : 0; }
+my @occ;
+for my $h (sort keys %fam) {
+  while ($para =~ /(?<![A-Za-z])\Q$h\E(?![A-Za-z])/g) {
+    my ($s, $e) = ($-[0], $+[0]);
+    my @opts = @{$fam{$h}};
+    my $pre = substr($para, 0, $s);
+    if ($pre =~ /(?:^|[^A-Za-z])(a|an|A|An)\s+$/) {
+      my $an = (lc($1) eq 'an') ? 1 : 0;
+      @opts = grep { needs_an($_) == $an } @opts;
+    }
+    push @occ, { s=>$s, e=>$e, h=>$h, opts=>\@opts } if @opts;
+  }
+}
+@occ = sort { $a->{s} <=> $b->{s} } @occ;
+print scalar(@occ), " occurrences:\n";
+for my $i (0..$#occ) { print "  [$i] $occ[$i]{h} -> @{$occ[$i]{opts}}\n"; }
+sub build {
+  my ($v) = @_; my $t = $para;
+  for my $i (sort { $occ[$b]{s} <=> $occ[$a]{s} } keys %$v) {
+    my $o = $occ[$i];
+    substr($t, $o->{s}, $o->{e} - $o->{s}) = $o->{opts}[ $v->{$i} ];
+  }
+  return $t;
+}
+sub key { my ($v) = @_; return join(',', map { "$_:$v->{$_}" } sort { $a <=> $b } keys %$v); }
+sub desc { my ($v) = @_; return join('; ', map { "$occ[$_]{h}->$occ[$_]{opts}[$v->{$_}]" } sort { $a <=> $b } keys %$v) || '(none)'; }
+open my $mf, '<', "$app/main.tex" or die; my $m = do { local $/; <$mf> }; close $mf;
+$m =~ s/\\input\{input\.tex\}/\\input{variants.tex}/ or die "no input";
+open my $tf, '>', "$work/test.tex" or die; print $tf $m; close $tf;
+sub evaluate {
+  my ($vars) = @_;
+  open my $vf, '>', "$work/variants.tex" or die;
+  for my $v (@$vars) { print $vf build($v), "\n\n"; }
+  close $vf;
+  system("cd $work && pdflatex -draftmode -interaction=batchmode test.tex >/dev/null 2>&1") == 0 or print "WARNING: pdflatex nonzero exit\n";
+  my @res = map { { over=>0, pts=>0, under=>0 } } @$vars;
+  open my $lf, '<', "$work/test.log" or die;
+  while (my $l = <$lf>) {
+    if ($l =~ /^Overfull \\hbox \(([\d.]+)pt too wide\) in paragraph at lines (\d+)--/) {
+      my $idx = ($2 - 1) / 2; $res[$idx]{over}++; $res[$idx]{pts} += $1;
+    } elsif ($l =~ /^Underfull \\hbox \(badness (\d+)\) in paragraph at lines (\d+)--/) {
+      my $idx = ($2 - 1) / 2; $res[$idx]{under}++;
+    }
+  }
+  close $lf;
+  return \@res;
+}
+my $base = evaluate([{}]);
+printf "base: over=%d pts=%.2f under=%d\n", $base->[0]{over}, $base->[0]{pts}, $base->[0]{under};
+exit if $base->[0]{over} == 0 || $maxdepth == 0;
+my @frontier = ({});
+for my $depth (1..$maxdepth) {
+  my %cand;
+  for my $v (@frontier) {
+    for my $i (0..$#occ) {
+      next if exists $v->{$i};
+      for my $j (0..$#{$occ[$i]{opts}}) {
+        my %nv = (%$v, $i => $j);
+        $cand{key(\%nv)} //= \%nv;
+      }
+    }
+  }
+  my @vars = values %cand;
+  my $res = evaluate(\@vars);
+  my @idx = sort { $res->[$a]{over} <=> $res->[$b]{over} || $res->[$a]{pts} <=> $res->[$b]{pts} || $res->[$a]{under} <=> $res->[$b]{under} } 0..$#vars;
+  my @zero = grep { $res->[$_]{over} == 0 } @idx;
+  printf "depth %d: %d candidates, %d zero-overfull\n", $depth, scalar(@vars), scalar(@zero);
+  if (@zero) {
+    for my $n (0..min($nshow, scalar(@zero))-1) { my $x = $zero[$n]; printf "  under=%d  %s\n", $res->[$x]{under}, desc($vars[$x]); }
+    last;
+  }
+  for my $n (0..min(5,$#idx)) { my $x = $idx[$n]; printf "  over=%d pts=%.2f under=%d  %s\n", $res->[$x]{over}, $res->[$x]{pts}, $res->[$x]{under}, desc($vars[$x]); }
+  @frontier = map { $vars[$_] } @idx[0..min($beam, scalar(@idx))-1];
+}
+EOF
+cd /tmp/work && for p in 19 13; do echo "===== PARAGRAPH $p ====="; perl search.pl $p 20 3 15; done
+$ cd /tmp/work && perl -0pi -e 's/return 0 if \$w =~ \/\^\(uni\|use\|usu\|one\|eu\)\/;/return 0 if \$w =~ \/^(uniq|unif|unit|unio|univ|use|usu|uti|one|eu)\/;/' search.pl && grep -n "needs_an {" search.pl && for p in 7 5; do echo "===== PARAGRAPH $p ====="; time perl search.pl $p 15 5 30 | grep -v '^  \[' ; done
+$ cd /app && cp -n input.tex /tmp/work/input.orig.tex && perl -i -pe 'if ($. == 5) { s/\bnatures\b/characters/ } if ($. == 7) { s/\bmarshes\b/bogs/; s/\bintricate\b/sophisticated/; s/\btemperament\b/character/ } if ($. == 13) { s/\bwide\b/broad/ } if ($. == 19) { s/\bpathfinder\b/pioneer/ }' input.tex && echo "---- word diff (orig vs new):" && diff <(tr -s ' \n' '\n\n' < /tmp/work/input.orig.tex) <(tr -s ' \n' '\n\n' < input.tex); mkdir -p /tmp/final && rm -f /tmp/final/* && pdflatex -interaction=nonstopmode -halt-on-error -output-directory=/tmp/final main.tex > /tmp/final/stdout.txt 2>&1; echo "pdflatex exit=$?"; echo "overfull count: $(grep -ci 'overfull' /tmp/final/main.log)"; grep -n -i -E 'overfull|underfull|warning|error' /tmp/final/main.log; tail -n 3 /tmp/final/stdout.txt; ls -la /app
+$ perl -e 'local $/; open A,"<","/tmp/work/input.orig.tex"; open B,"<","/app/input.tex"; my @a=split /(\s+)/,<A>; my @b=split /(\s+)/,<B>; print "tokens: ",scalar(@a)," vs ",scalar(@b),"\n"; for my $i (0..$#a){ print "  changed: [$a[$i]] -> [$b[$i]]\n" if $a[$i] ne $b[$i]; }' && rm -rf /tmp/verify && cp -r /app /tmp/verify && cd /tmp/verify && pdflatex -interaction=nonstopmode main.tex > /dev/null 2>&1; echo "exit=$?"; echo "Overfull hbox count: $(grep -c 'Overfull \\hbox' /tmp/verify/main.log)"; grep 'Output written' /tmp/verify/main.log; cd /app && git status 2>/dev/null | head -3; md5sum /app/main.tex /app/synonyms.txt /tmp/verify/main.tex
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`main.tex` now compiles with pdflatex (exit code 0, 5 pages) and the log has no overfull hbox warnings. It started with 7, spread over 4 paragraphs. I compiled a fresh copy of the project in place and got the same clean result.
+
+The only changes are six word swaps in `input.tex`, each a synonym from that word's own line in `synonyms.txt`:
+
+| Line | Original | Replacement |
+|---|---|---|
+| 5 | natures | characters |
+| 7 | marshes | bogs |
+| 7 | intricate | sophisticated |
+| 7 | temperament | character |
+| 13 | wide | broad |
+| 19 | pathfinder | pioneer |
+
+A token-by-token check against a backup confirms nothing else changed, including spacing and punctuation. `main.tex` and `synonyms.txt` were not edited. To find the swaps, I wrote a small script that tried many synonym combinations and compiled each one to see which removed the warnings. I chose the options that read most naturally and kept "a"/"an" correct; for example, I avoided "the vows of life". My working files and build output are in `/tmp`, so `/app` contains only the three original files.
