@@ -27,7 +27,6 @@ before(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.BASE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
   process.env.MODEL = "fake";
-  process.env.EFFORT = "max";
   console.error = () => {};
   keel = await import("../agent.ts");
 });
@@ -119,6 +118,30 @@ describe("history", () => {
     assert.equal(requests[0].messages[0].role, "system");
     assert.deepEqual(requests[0].messages[1], { role: "user", content: "the task" });
     assert.equal(requests[0].model, "fake");
+  });
+});
+
+describe("effort", () => {
+  test("leaves reasoning_effort out when EFFORT is unset or empty", async () => {
+    delete process.env.EFFORT;
+    await run([submit("ok")]);
+    assert.equal("reasoning_effort" in requests[0], false);
+    process.env.EFFORT = "";
+    try {
+      await run([submit("ok")]);
+    } finally {
+      delete process.env.EFFORT;
+    }
+    assert.equal("reasoning_effort" in requests[0], false);
+  });
+
+  test("sends EFFORT as reasoning_effort", async () => {
+    process.env.EFFORT = "max";
+    try {
+      await run([submit("ok")]);
+    } finally {
+      delete process.env.EFFORT;
+    }
     assert.equal(requests[0].reasoning_effort, "max");
   });
 });

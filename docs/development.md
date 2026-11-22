@@ -26,7 +26,7 @@ Both commands also run on every push and pull request through GitHub Actions.
 
 ```
 agent.ts                the whole agent
-test/                   tests for the loop, adapter and command runner
+test/                   tests for the loop, adapter, command runner and Bedrock proxy
 bench/keel_agent.py     plugs Keel into Harbor for benchmarking
 bench/swebench_lite.py  runs and grades SWE-bench Lite
 bedrock/                optional proxy for AWS Bedrock

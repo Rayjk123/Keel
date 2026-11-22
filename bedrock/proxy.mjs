@@ -1,11 +1,11 @@
 // Throwaway proxy: serves OpenAI-style /chat/completions and forwards to AWS Bedrock Converse.
+import { realpathSync } from "node:fs";
 import http from "node:http";
-import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
+import { fileURLToPath } from "node:url";
 
 const HOST = process.env.PROXY_HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT ?? 8787);
 const MAX_TOKENS = Number(process.env.MAX_TOKENS ?? 8192);
-const client = new BedrockRuntimeClient({ maxAttempts: 8 });
 
 function toConverse(messages) {
   const system = [];
@@ -28,23 +28,25 @@ function toConverse(messages) {
   };
 }
 
-function effortFields(model, effort) {
+export function effortFields(model, effort) {
   if (model.includes("anthropic.")) return { output_config: { effort } };
   if (model.includes("openai.")) return { reasoning: { effort } };
   throw Object.assign(new Error(`reasoning_effort is not supported for ${model}`), { name: "UnsupportedEffort" });
 }
 
-async function complete(body) {
+export function converseInput(body) {
   const { system, messages } = toConverse(body.messages);
-  const out = await client.send(
-    new ConverseCommand({
-      modelId: body.model,
-      system: system.length ? system : undefined,
-      messages,
-      inferenceConfig: { maxTokens: body.max_tokens ?? MAX_TOKENS },
-      additionalModelRequestFields: body.reasoning_effort ? effortFields(body.model, body.reasoning_effort) : undefined,
-    }),
-  );
+  return {
+    modelId: body.model,
+    system: system.length ? system : undefined,
+    messages,
+    inferenceConfig: { maxTokens: body.max_tokens ?? MAX_TOKENS },
+    additionalModelRequestFields: body.reasoning_effort ? effortFields(body.model, body.reasoning_effort) : undefined,
+  };
+}
+
+async function complete(send, body) {
+  const out = await send(converseInput(body));
   const content = (out.output?.message?.content ?? []).map((b) => b.text ?? "").join("");
   const usage = out.usage ?? {};
   console.error(`${new Date().toISOString()} ${body.model} effort=${body.reasoning_effort ?? "default"} in=${usage.inputTokens} out=${usage.outputTokens} stop=${out.stopReason}`);
@@ -67,21 +69,26 @@ async function complete(body) {
   };
 }
 
-http
-  .createServer(async (req, res) => {
-    if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) {
-      res.writeHead(404).end();
-      return;
-    }
-    let raw = "";
-    for await (const chunk of req) raw += chunk;
-    res.setHeader("Connection", "close");
-    try {
-      const result = await complete(JSON.parse(raw));
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
-    } catch (e) {
-      console.error(`error: ${e.name}: ${e.message}`);
-      res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: `${e.name}: ${e.message}` } }));
-    }
-  })
-  .listen(PORT, HOST, () => console.error(`bedrock proxy on http://${HOST}:${PORT}/v1`));
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
+  const { BedrockRuntimeClient, ConverseCommand } = await import("@aws-sdk/client-bedrock-runtime");
+  const client = new BedrockRuntimeClient({ maxAttempts: 8 });
+  const send = (input) => client.send(new ConverseCommand(input));
+  http
+    .createServer(async (req, res) => {
+      if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) {
+        res.writeHead(404).end();
+        return;
+      }
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      res.setHeader("Connection", "close");
+      try {
+        const result = await complete(send, JSON.parse(raw));
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+      } catch (e) {
+        console.error(`error: ${e.name}: ${e.message}`);
+        res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: `${e.name}: ${e.message}` } }));
+      }
+    })
+    .listen(PORT, HOST, () => console.error(`bedrock proxy on http://${HOST}:${PORT}/v1`));
+}

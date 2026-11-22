@@ -51,4 +51,4 @@ Then run the benchmarks as described in [Running the benchmarks](../benchmarks/r
 
 ## Removing it
 
-The proxy is self-contained. Delete the `bedrock/` folder to remove it. Nothing else depends on it.
+The proxy is self-contained. To remove it, delete the `bedrock/` folder, its tests in `test/proxy.test.ts`, and `allowJs` in `tsconfig.json`. Nothing else depends on it.

@@ -104,7 +104,7 @@ The tests run the real agent loop against a scripted fake model, so they finish 
 
 ```
 agent.ts                the destination 1 agent
-test/                   tests for the loop, adapter and command runner
+test/                   tests for the loop, adapter, command runner and Bedrock proxy
 bench/keel_agent.py     plugs the agent into Harbor for benchmarking
 bench/swebench_lite.py  runs and grades SWE-bench Lite
 bench/setup.sh          readies a new machine for benchmarking
