@@ -1,0 +1,176 @@
+$ cd /app && ls -lR && cat src/program.cbl
+$ cd /app && for f in src/*.DAT data/*; do echo "$f"; od -An -tc "$f"; done && which cobc && mkdir -p /tmp/refer/src /tmp/refer/data && cobc -x src/program.cbl -o /tmp/refer/ref && cp src/INPUT.DAT /tmp/refer/src && cp data/* /tmp/refer/data && cd /tmp/refer && ./ref; echo status=$?; for f in /tmp/refer/data/*; do cat "$f"; echo; done
+$ cd /tmp/refer && python3 - <<'PY'
+import subprocess,pathlib
+p=pathlib.Path
+for buyer,amt in [(b'U001',a) for a in [b'200',b'',b'20\n',b'0000000200',b'1234567890',b'    200   ',b'abcdefghij',b'000000001\n']] + [(b'U002',b'0000000200')]:
+ for f in p('/app/data').glob('*'): (p('data')/f.name).write_bytes(f.read_bytes())
+ p('src/INPUT.DAT').write_bytes(buyer+b'U002B001'+amt)
+ r=subprocess.run('./ref',capture_output=True)
+ print(buyer,amt,r.returncode,r.stderr,p('data/ACCOUNTS.DAT').read_bytes()[24:34],p('data/ACCOUNTS.DAT').read_bytes()[58:68],p('data/TRANSACTIONS.DAT').read_bytes()[-22:])
+PY
+$ cd /tmp/refer && cobc -C -o gen.c /app/src/program.cbl && sed -n '60,360p' gen.c
+$ cd /tmp/refer && python3 - <<'PY'
+import subprocess,pathlib
+p=pathlib.Path
+for amt,short in [(b'0000\x002\x003 \x00',False),(b'000000001\n',False),(b'0000000001',True)]:
+ for f in p('/app/data').glob('*'): (p('data')/f.name).write_bytes(f.read_bytes())
+ if short:
+  f=p('data/ACCOUNTS.DAT'); f.write_bytes(f.read_bytes()[:34]+b'U002')
+ p('src/INPUT.DAT').write_bytes(b'U001U002B001'+amt)
+ r=subprocess.run('./ref',capture_output=True); print(r,p('data/ACCOUNTS.DAT').read_bytes(),p('data/TRANSACTIONS.DAT').read_bytes()[-22:])
+print(((2**64-2800)//100)%10**10)
+PY
+$ cd /tmp/refer && python3 - <<'PY'
+import subprocess,pathlib
+p=pathlib.Path
+for kind in ['shortbook','shortbook1','spaces','nulls','space2','lastzero']:
+ for f in p('/app/data').glob('*'): (p('data')/f.name).write_bytes(f.read_bytes())
+ if kind.startswith('shortbook'):
+  f=p('data/BOOKS.DAT'); f.write_bytes((f.read_bytes()[28:56] if kind=='shortbook' else b'')+b'B001')
+ else:
+  a={'spaces':b'      200 ','nulls':b'0000\x0020300','space2':b'00000 0200','lastzero':b'000000000\x00'}[kind]; f=p('data/ACCOUNTS.DAT'); s=f.read_bytes(); f.write_bytes(s[:24]+a+s[34:])
+ p('src/INPUT.DAT').write_bytes(b'U001U002B0010000000001')
+ r=subprocess.run('./ref',capture_output=True); print(kind,r.stdout,r.returncode,p('data/ACCOUNTS.DAT').read_bytes()[24:34])
+PY
+$ cd /tmp/refer && python3 - <<'PY'
+import subprocess,pathlib
+p=pathlib.Path
+for a in [b'000002 300',b'000002\x00300',b'000000002 ',b'         1',b'0000000@01',b'\x00123456789',b'\xff123456789',b'\xff'*10,b'\x00'*10,b' '*10,b'012345678\xff']:
+ for f in p('/app/data').glob('*'): (p('data')/f.name).write_bytes(f.read_bytes())
+ f=p('data/ACCOUNTS.DAT');s=f.read_bytes();f.write_bytes(s[:24]+a+s[34:]);p('src/INPUT.DAT').write_bytes(b'U001U002B001'+a); r=subprocess.run('./ref',capture_output=True);print(a,f.read_bytes()[24:34],f.read_bytes()[58:68],p('data/TRANSACTIONS.DAT').read_bytes()[-18:-8])
+PY
+$ cd /tmp/refer && grep -nE '(b_12|b_17|b_29|cob_sub|cob_add)' gen.c | tail -50
+$ lib=$(ldconfig -p | awk '/libcob.so /{print $NF;exit}'); objdump -d --disassemble=cob_decimal_set_field "$lib" | head -245
+$ objdump -d --start-address=0x22580 --stop-address=0x225bb /usr/lib/x86_64-linux-gnu/libcob.so; cd /tmp/refer && python3 - <<'PY'
+from pathlib import Path
+import subprocess
+for pad in [b'\0',b' ']:
+ for f in Path('/app/data').glob('*'): (Path('data')/f.name).write_bytes(f.read_bytes())
+ f=Path('data/BOOKS.DAT'); f.write_bytes(b'B'+pad*3+f.read_bytes()[4:])
+ Path('src/INPUT.DAT').write_bytes(b'U001U002B')
+ print(pad, subprocess.run('./ref',capture_output=True).stdout)
+PY
+$ cat > /app/program.py <<'PY'
+"""Process the first BOOKFORUM purchase request using fixed-width byte records."""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / "data"
+ACCOUNTS = DATA / "ACCOUNTS.DAT"
+BOOKS = DATA / "BOOKS.DAT"
+MODULUS = 10**10
+
+
+def records(file, buffer):
+    """READ into the existing FD: a short read leaves the old suffix intact."""
+    while chunk := file.read(len(buffer)):
+        buffer[:len(chunk)] = chunk
+        yield len(chunk)
+
+
+def rewrite(file, record, count):
+    if count != len(record):
+        # A short read (or a second REWRITE without READ) isn't rewritable.
+        raise SystemExit("READ must be executed first (status = 43)")
+    file.seek(-count, 1)
+    file.write(record)
+
+
+def display_value(field):
+    """Read an unsigned DISPLAY coefficient as in GnuCOBOL 3."""
+    if field.isdigit():
+        return int(field)
+    if field[0] in (0, 255):
+        return (-1 if field[0] == 0 else 1) * 10**len(field)
+    start = 0
+    while start < len(field) - 1 and field[start] & 15 == 0:
+        start += 1
+    value = 0
+    for byte in field[start:]:
+        value = 10 * value + byte - ord("0")
+    return value % (1 << 64)
+
+
+def main():
+    with (ROOT / "src/INPUT.DAT").open("rb") as f:
+        request = f.read(22)
+    if not request:
+        print("Error: Input file is empty")
+        return
+    request = request.ljust(22, b"\0")
+    buyer, seller, book = request[:4], request[4:8], request[8:12]
+    # MOVE from PIC 9(10) to PIC 9(10)V99 adds two implied decimal places.
+    amount_field = request[12:].replace(b"\0", b"0").replace(b" ", b"0")
+    amount_cents = display_value(amount_field + b"00")
+
+    account = bytearray(34)
+    item = bytearray(28)
+    found_buyer = found_seller = valid_owner = False
+    with ACCOUNTS.open("rb") as f:
+        for _ in records(f, account):
+            found_buyer |= account[:4] == buyer
+            found_seller |= account[:4] == seller
+    with BOOKS.open("rb") as f:
+        for _ in records(f, item):
+            valid_owner |= item[:4] == book and item[24:] == seller
+
+    print(" ")
+    if not (found_buyer and found_seller and valid_owner):
+        print("Transaction failed due to validation errors")
+        return
+
+    with ACCOUNTS.open("r+b") as f:
+        for count in records(f, account):
+            who = account[:4]
+            if who != buyer and who != seller:
+                continue
+            delta = -amount_cents if who == buyer else amount_cents
+            cents = 100 * display_value(account[24:]) + delta
+            balance = abs(cents) // 100 % MODULUS
+            account[24:] = f"{balance:010d}".encode("ascii")
+            rewrite(f, account, count)
+            if who == buyer == seller:
+                rewrite(f, account, 0)
+
+    with BOOKS.open("r+b") as f:
+        for count in records(f, item):
+            if item[:4] == book:
+                item[24:] = buyer
+                rewrite(f, item, count)
+
+    with (DATA / "TRANSACTIONS.DAT").open("ab") as f:
+        f.write(book + amount_field + seller + buyer)
+    print("Transaction completed successfully")
+
+
+if __name__ == "__main__":
+    main()
+PY
+sed -i '/^import sys$/d' /app/program.py
+$ cd /tmp/refer && cp /app/program.py . && python3 - <<'PY'
+from pathlib import Path
+import subprocess, random
+p=Path; rng=random.Random(341)
+for i in range(160):
+ files={f.name:f.read_bytes() for f in p('/app/data').glob('*')}
+ buyer=rng.choice([b'U001',b'U002',b'U003',b'X404'])
+ amt=rng.choice([bytes(rng.randrange(256) for _ in range(10)),b' 42',b'0123456789',b'0000000009\n',b'9999999999'])
+ req=buyer+b'U002B001'+amt if i else b''
+ if i%5==0: files['BOOKS.DAT']+=files['BOOKS.DAT'][:24]+b'U001'
+ if i%7==0: files['ACCOUNTS.DAT']+=b'U00'
+ if i%3==0: files['ACCOUNTS.DAT']=files['ACCOUNTS.DAT'][:24]+bytes(rng.randrange(256) for _ in range(10))+files['ACCOUNTS.DAT'][34:]
+ p('src/INPUT.DAT').write_bytes(req)
+ results=[]
+ for cmd in [['./ref'],['python3','program.py']]:
+  for k,v in files.items(): (p('data')/k).write_bytes(v)
+  r=subprocess.run(cmd,capture_output=True)
+  results.append((r.returncode,[ (p('data')/k).read_bytes() for k in files]))
+ if results[0]!=results[1]: print(i,req,results);raise SystemExit(1)
+print('160 differential comparisons passed')
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Created `/app/program.py` as a standalone Python reimplementation. It reads the first request from `/app/src/INPUT.DAT`, validates the accounts and book ownership, and applies the corresponding updates to the three data files.
+
+All three output files matched GnuCOBOL byte-for-byte in 160 differential tests. Testing used temporary copies and left `/app/data/` unchanged.

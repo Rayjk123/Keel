@@ -1,0 +1,72 @@
+$ id && command -v nginx || true; cat /etc/os-release; ls -la /etc/nginx 2>/dev/null || true; command -v systemctl || true; command -v curl || true
+$ bash -s <<'EOF'
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y nginx
+mkdir -p /var/www/html /etc/nginx/conf.d /var/log/nginx
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path('/etc/nginx/nginx.conf')
+text = path.read_text()
+directives = [
+    ("log_format", "benchmark_request",
+     "log_format benchmark_request '$time_local $request_method $status \"$http_user_agent\"';"),
+    ("limit_req_zone", "benchmark_limit",
+     "limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s;"),
+]
+for directive, name, replacement in directives:
+    if directive == "log_format":
+        pattern = r'(?m)^[ \t]*log_format\s+' + re.escape(name) + r'\b[^;]*;'
+    else:
+        pattern = r'(?m)^[ \t]*limit_req_zone\s+[^;]*\bzone=' + re.escape(name) + r':[^;]*;'
+    text, count = re.subn(pattern, "    " + replacement, text)
+    if not count:
+        text, count = re.subn(r'(?m)^(\s*http\s*\{)', lambda m: m.group(1) + '\n    ' + replacement, text, count=1)
+        if not count:
+            raise SystemExit("Could not find http block in nginx.conf")
+path.write_text(text)
+PY
+cat > /etc/nginx/conf.d/benchmark-site.conf <<'CONF'
+server {
+    listen 8080;
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark_request;
+    error_log /var/log/nginx/benchmark-error.log;
+
+    limit_req zone=benchmark_limit burst=10 nodelay;
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+}
+CONF
+printf '%s\n' 'Welcome to the benchmark webserver' > /var/www/html/index.html
+printf '%s\n' 'Page not found - Please check your URL' > /var/www/html/404.html
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+if [ -s /run/nginx.pid ] && kill -0 "$(cat /run/nginx.pid)" 2>/dev/null; then
+    nginx -s reload
+else
+    nginx
+fi
+for i in 1 2 3 4 5; do
+    if curl --noproxy '*' -fsS http://127.0.0.1:8080/ -o /tmp/benchmark-nginx-index; then break; fi
+    sleep 1
+done
+grep -Fx 'Welcome to the benchmark webserver' /tmp/benchmark-nginx-index
+status=$(curl --noproxy '*' -sS -o /tmp/benchmark-nginx-404 -w '%{http_code}' http://127.0.0.1:8080/benchmark-nonexistent-page)
+[ "$status" = 404 ]
+grep -Fx 'Page not found - Please check your URL' /tmp/benchmark-nginx-404
+printf 'Nginx is responding on localhost:8080. Access log: /var/log/nginx/benchmark-access.log\n'
+EOF
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Nginx is installed and running on **localhost:8080**. The configuration passed its syntax test, and both the index page and custom 404 response were verified.
+
+Access log: `/var/log/nginx/benchmark-access.log`  
+Error log: `/var/log/nginx/benchmark-error.log`

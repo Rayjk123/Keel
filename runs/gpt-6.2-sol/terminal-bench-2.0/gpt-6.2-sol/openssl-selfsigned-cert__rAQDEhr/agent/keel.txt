@@ -1,0 +1,92 @@
+$ set -eu
+umask 077
+mkdir -p /app/ssl
+cd /app/ssl
+
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out server.key
+chmod 600 server.key
+openssl req -new -x509 -sha256 -days 365 -key server.key \
+  -subj '/O=DevOps Team/CN=dev-internal.company.local' \
+  -addext 'subjectAltName=DNS:dev-internal.company.local' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth' \
+  -out server.crt
+
+cat server.key server.crt > server.pem
+chmod 600 server.pem
+openssl x509 -in server.crt -noout -subject -dates -sha256 -fingerprint > verification.txt
+chmod 755 /app/ssl
+chmod 644 server.crt verification.txt
+
+cat > /app/check_cert.py <<'PY'
+#!/usr/bin/env python3
+"""Load the development TLS certificate and check its identity and expiry."""
+
+from datetime import datetime, timezone
+from pathlib import Path
+import ssl
+import subprocess
+import sys
+
+CERTIFICATE = Path(__file__).resolve().parent / "ssl" / "server.crt"
+EXPECTED_HOSTNAME = "dev-internal.company.local"
+
+
+def main():
+    try:
+        if not CERTIFICATE.is_file():
+            raise FileNotFoundError(CERTIFICATE)
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cafile=str(CERTIFICATE))
+
+        details = subprocess.check_output(
+            [
+                "openssl", "x509", "-in", str(CERTIFICATE), "-noout",
+                "-subject", "-nameopt", "sep_multiline,sname", "-enddate",
+            ],
+            text=True,
+        )
+        fields = dict(
+            tuple(part.strip() for part in line.split("=", 1))
+            for line in details.splitlines()
+            if "=" in line
+        )
+        common_name = fields["CN"]
+        expiration = datetime.fromtimestamp(
+            ssl.cert_time_to_seconds(fields["notAfter"]), tz=timezone.utc
+        )
+
+        if common_name != EXPECTED_HOSTNAME:
+            raise ValueError(f"Unexpected Common Name: {common_name}")
+        if expiration <= datetime.now(timezone.utc):
+            raise ValueError("The certificate has expired")
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError) as exc:
+        print(f"Certificate verification failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Common Name: {common_name}")
+    print(f"Expiration date: {expiration.date().isoformat()}")
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+chmod 755 /app/check_cert.py
+openssl verify -CAfile server.crt -purpose sslserver \
+  -verify_hostname dev-internal.company.local server.crt
+python3 /app/check_cert.py
+cat verification.txt
+stat -c '%a %n' /app/ssl server.key server.crt server.pem verification.txt /app/check_cert.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Created and verified a 365-day self-signed TLS certificate for `dev-internal.company.local` (organization: `DevOps Team`). It expires on **2027-11-22 UTC**.
+
+- `/app/ssl/server.key`: 2048-bit RSA private key, mode `600`
+- `/app/ssl/server.crt`: self-signed certificate
+- `/app/ssl/server.pem`: combined key and certificate, mode `600`
+- `/app/ssl/verification.txt`: subject, validity dates, and SHA-256 fingerprint
+
+OpenSSL verified the certificate for the requested hostname, and `/app/check_cert.py` printed `Certificate verification successful`.

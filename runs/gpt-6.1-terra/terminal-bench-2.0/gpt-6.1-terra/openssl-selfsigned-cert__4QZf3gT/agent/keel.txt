@@ -1,0 +1,73 @@
+$ set -euo pipefail
+umask 077
+mkdir -p /app/ssl
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /app/ssl/server.key 2>/dev/null
+chmod 600 /app/ssl/server.key
+openssl req -new -x509 -sha256 -key /app/ssl/server.key -out /app/ssl/server.crt -days 365 \
+  -subj '/O=DevOps Team/CN=dev-internal.company.local' \
+  -addext 'subjectAltName=DNS:dev-internal.company.local' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth'
+cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem
+chmod 600 /app/ssl/server.pem
+openssl x509 -in /app/ssl/server.crt -noout -subject -dates -fingerprint -sha256 > /app/ssl/verification.txt
+chmod 644 /app/ssl/server.crt /app/ssl/verification.txt
+cat > /app/check_cert.py <<'PY'
+#!/usr/bin/env python3
+"""Check the internal development server certificate."""
+from datetime import datetime, timezone
+from pathlib import Path
+import ssl
+import sys
+
+CERTIFICATE = Path("/app/ssl/server.crt")
+EXPECTED_CN = "dev-internal.company.local"
+
+
+def main():
+    if not CERTIFICATE.is_file():
+        raise ValueError(f"Certificate does not exist: {CERTIFICATE}")
+
+    # Loading the certificate as a trust anchor checks that it is valid PEM.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile=str(CERTIFICATE))
+    cert = ssl._ssl._test_decode_cert(str(CERTIFICATE))
+
+    common_names = [
+        value for rdn in cert["subject"] for name, value in rdn
+        if name == "commonName"
+    ]
+    if common_names != [EXPECTED_CN]:
+        raise ValueError(f"Unexpected Common Name: {common_names}")
+
+    def parse_date(value):
+        return datetime.strptime(value, "%b %d %H:%M:%S %Y %Z").replace(
+            tzinfo=timezone.utc
+        )
+
+    not_before = parse_date(cert["notBefore"])
+    not_after = parse_date(cert["notAfter"])
+    if not not_before <= datetime.now(timezone.utc) < not_after:
+        raise ValueError("Certificate is not currently valid")
+
+    print(f"Common Name: {common_names[0]}")
+    print(f"Expiration date: {not_after:%Y-%m-%d}")
+    print("Certificate verification successful")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, ssl.SSLError) as exc:
+        print(f"Certificate verification failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+PY
+chmod 755 /app/check_cert.py
+cmp <(openssl pkey -in /app/ssl/server.key -pubout 2>/dev/null) <(openssl x509 -in /app/ssl/server.crt -pubkey -noout)
+openssl verify -CAfile /app/ssl/server.crt /app/ssl/server.crt
+python3 /app/check_cert.py
+cat /app/ssl/verification.txt
+ls -l /app/ssl/ /app/check_cert.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Created the key, certificate, combined PEM, verification file, and Python check script. The key and PEM have `600` permissions. OpenSSL and the Python script both passed their checks.
