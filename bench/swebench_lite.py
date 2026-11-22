@@ -61,11 +61,11 @@ def find_swebench() -> str:
     sys.exit("swebench not found: run `pip install -r bench/requirements.txt` in the environment you use for this script")
 
 
-def solve(row: dict, out_dir: Path, model: str, base_url: str, timeout: int) -> dict:
+def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, timeout: int) -> dict:
     instance_id = row["instance_id"]
     trial = out_dir / instance_id
     trial.mkdir(parents=True, exist_ok=True)
-    name = f"keel-{instance_id}".replace("/", "_")
+    name = f"keel-{run_id}-{instance_id}".replace("/", "_")
     started = time.time()
     status = "ok"
     error = ""
@@ -138,7 +138,7 @@ def main() -> None:
 
     failed: list[str] = []
     with preds_path.open("a") as sink, ThreadPoolExecutor(args.workers) as pool:
-        futures = [pool.submit(solve, r, out_dir, args.model, args.base_url, args.timeout) for r in todo]
+        futures = [pool.submit(solve, r, out_dir, args.run_id, args.model, args.base_url, args.timeout) for r in todo]
         for f in futures:
             result = f.result()
             line = f"{result['instance_id']}: {result['status']} {result['seconds']}s patch={len(result['model_patch'])}B"
