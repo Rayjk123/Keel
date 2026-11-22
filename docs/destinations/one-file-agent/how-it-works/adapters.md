@@ -32,7 +32,7 @@ The optional `provider` and `raw` fields let an adapter keep the original reply 
 
 ```ts
 interface Adapter {
-  toWire(messages: Message[], tools: ToolDef[]): unknown;
+  toWire(messages: Message[], tools: ToolDef[]): object;
   fromWire(response: unknown): Message;
 }
 ```

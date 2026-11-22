@@ -19,13 +19,14 @@ Each cell is tasks passed out of tasks attempted. Every run uses the same 10 han
 - **Same tasks every time.** The task lists are fixed, so runs are comparable. Growing a list starts a new series.
 - **Everything is recorded.** Each run lives in `runs/<run>/` with a `manifest.json` holding the commit, the hash of `agent.ts`, the machine and the exact tasks, next to every trial's logs.
 
-## Models and harness changes
+## Models, effort and harness changes
 
-Every run records two separate labels in its manifest: the **harness** (`baseline`, `edit-tool`, and so on) and the **model**. That keeps the two questions apart, and a leaderboard can sort or filter by either:
+Every run records three separate labels in its manifest: the **harness** (`baseline`, `edit-tool`, and so on), the **model**, and the reasoning **effort** (`default` unless you set `EFFORT`). That keeps the questions apart, and a leaderboard can sort or filter by any of them:
 
 | Question | Hold fixed | Change | Example |
 |---|---|---|---|
 | Which model is best in this harness? | Harness | Model | `HARNESS=baseline`, a different model |
 | Which harness change helps? | Model | Harness | the same model, `HARNESS=edit-tool` |
+| What does more reasoning buy? | Model and harness | Effort | the same model, `EFFORT=max` |
 
-The folder name combines them, `runs/<model>/` for the baseline and `runs/<model>-<harness>/` after that.
+The folder name combines them: `runs/<model>/` for the baseline, with `-<harness>` and `-<effort>` added when those are set, unless you name the folder with `RUN`.

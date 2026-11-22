@@ -22,7 +22,7 @@ type ToolDef = {
 };
 
 interface Adapter {
-  toWire(messages: Message[], tools: ToolDef[]): unknown;
+  toWire(messages: Message[], tools: ToolDef[]): object;
   fromWire(response: unknown): Message;
 }
 
@@ -77,6 +77,7 @@ export function textAdapter(model: string): Adapter {
 const BASE_URL = process.env.BASE_URL ?? "http://localhost:8000/v1";
 const MODEL = process.env.MODEL;
 const API_KEY = process.env.API_KEY ?? "none";
+const EFFORT = process.env.EFFORT;
 const DONE = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 const FINISH_RULE =
   "When the task is done, write a short summary of what you did, and reply with a bash block containing " +
@@ -129,7 +130,7 @@ async function chat(adapter: Adapter, messages: Message[]): Promise<Message> {
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}`, Connection: "close" },
-    body: JSON.stringify(adapter.toWire(messages, TOOLS)),
+    body: JSON.stringify({ ...adapter.toWire(messages, TOOLS), ...(EFFORT ? { reasoning_effort: EFFORT } : {}) }),
     signal: AbortSignal.timeout(600_000),
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);

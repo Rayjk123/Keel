@@ -7,6 +7,7 @@ export PYTHONPATH="$PWD/bench"
 MODELS="${MODELS:?list one or more models, e.g. ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
 HARNESS="${HARNESS:-baseline}"
+export KEEL_EFFORT="${EFFORT:-}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 if [ -z "${BENCH_PYTHON:-}" ]; then
   if [ -x bench/.venv/bin/python ]; then BENCH_PYTHON=bench/.venv/bin/python; else BENCH_PYTHON=python3; fi
@@ -38,8 +39,11 @@ pick() { sed 's/^/-i /' "bench/subsets/$1.txt" | tr '\n' ' '; }
 
 for MODEL in $MODELS; do
   slug="$(echo "${MODEL#*/}" | tr -c 'A-Za-z0-9.\n' '-' | sed 's/-*$//')"
-  RUN="${RUN:-$slug}"
-  [ "$RUN" = "$slug" ] && [ "$HARNESS" != "baseline" ] && RUN="$slug-$HARNESS"
+  if [ -z "${RUN:-}" ]; then
+    RUN="$slug"
+    [ "$HARNESS" != "baseline" ] && RUN="$RUN-$HARNESS"
+    [ -n "$KEEL_EFFORT" ] && RUN="$RUN-$KEEL_EFFORT"
+  fi
   mkdir -p "runs/$RUN"
   "$BENCH_PYTHON" bench/manifest.py "$RUN" "$MODEL"
   echo "=== $MODEL ($RUN)"

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-type Wire = { model: string; messages: { role: string; content: string }[] };
+type Wire = { model: string; messages: { role: string; content: string }[]; reasoning_effort?: string };
 
 const DONE = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 
@@ -27,6 +27,7 @@ before(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.BASE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
   process.env.MODEL = "fake";
+  process.env.EFFORT = "max";
   console.error = () => {};
   keel = await import("../agent.ts");
 });
@@ -118,6 +119,7 @@ describe("history", () => {
     assert.equal(requests[0].messages[0].role, "system");
     assert.deepEqual(requests[0].messages[1], { role: "user", content: "the task" });
     assert.equal(requests[0].model, "fake");
+    assert.equal(requests[0].reasoning_effort, "max");
   });
 });
 

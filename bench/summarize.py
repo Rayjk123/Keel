@@ -65,6 +65,7 @@ def summarize_run(run_dir: Path) -> dict:
         "model": manifest["model"],
         "model_name": manifest.get("model_name") or manifest["model"].split("/", 1)[-1],
         "harness": manifest.get("harness", "baseline"),
+        "effort": manifest.get("effort", "default"),
         "started": manifest["started"],
         "keel_commit": manifest["keel_commit"],
         "scores": scores,
@@ -72,15 +73,15 @@ def summarize_run(run_dir: Path) -> dict:
 
 
 def table(runs: list[dict]) -> str:
-    head = "| Harness | Model | " + " | ".join(t for _, t in BENCHMARKS) + " |\n"
-    head += "|---|---|" + "---|" * len(BENCHMARKS) + "\n"
+    head = "| Harness | Model | Effort | " + " | ".join(t for _, t in BENCHMARKS) + " |\n"
+    head += "|---|---|---|" + "---|" * len(BENCHMARKS) + "\n"
     lines = []
     for r in runs:
         cells = []
         for key, _ in BENCHMARKS:
             s = r["scores"][key]
             cells.append(f"{s['passed']}/{s['total']}" if s["finished"] == s["total"] else f"{s['passed']}/{s['total']} ({s['finished']} done)" if s["finished"] else "pending")
-        lines.append(f"| {r['harness']} | {r['model_name']} | " + " | ".join(cells) + " |")
+        lines.append(f"| {r['harness']} | {r['model_name']} | {r['effort']} | " + " | ".join(cells) + " |")
     return head + "\n".join(lines) + "\n"
 
 

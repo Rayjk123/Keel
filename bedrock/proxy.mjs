@@ -28,6 +28,12 @@ function toConverse(messages) {
   };
 }
 
+function effortFields(model, effort) {
+  if (model.includes("anthropic.")) return { output_config: { effort } };
+  if (model.includes("openai.")) return { reasoning: { effort } };
+  throw Object.assign(new Error(`reasoning_effort is not supported for ${model}`), { name: "UnsupportedEffort" });
+}
+
 async function complete(body) {
   const { system, messages } = toConverse(body.messages);
   const out = await client.send(
@@ -36,11 +42,12 @@ async function complete(body) {
       system: system.length ? system : undefined,
       messages,
       inferenceConfig: { maxTokens: body.max_tokens ?? MAX_TOKENS },
+      additionalModelRequestFields: body.reasoning_effort ? effortFields(body.model, body.reasoning_effort) : undefined,
     }),
   );
   const content = (out.output?.message?.content ?? []).map((b) => b.text ?? "").join("");
   const usage = out.usage ?? {};
-  console.error(`${new Date().toISOString()} ${body.model} in=${usage.inputTokens} out=${usage.outputTokens} stop=${out.stopReason}`);
+  console.error(`${new Date().toISOString()} ${body.model} effort=${body.reasoning_effort ?? "default"} in=${usage.inputTokens} out=${usage.outputTokens} stop=${out.stopReason}`);
   return {
     id: `bedrock-${Date.now()}`,
     object: "chat.completion",

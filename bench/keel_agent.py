@@ -47,6 +47,8 @@ class KeelAgent(BaseInstalledAgent):
             "BASE_URL": os.environ.get("KEEL_BASE_URL", DEFAULT_BASE_URL),
             "MODEL": self.model_name.split("/", 1)[-1],
         }
+        if os.environ.get("KEEL_EFFORT"):
+            env["EFFORT"] = os.environ["KEEL_EFFORT"]
         await self.exec_as_agent(
             environment,
             command=(

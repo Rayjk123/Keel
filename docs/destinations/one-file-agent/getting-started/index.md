@@ -31,3 +31,4 @@ Keel is configured with environment variables.
 | `BASE_URL` | `http://localhost:8000/v1` | The chat API to call |
 | `MODEL` | required | The model name |
 | `API_KEY` | `none` | Bearer token, if your API needs one |
+| `EFFORT` | unset | Reasoning effort, sent as `reasoning_effort`, for example `low`, `high` or `max` |

@@ -77,6 +77,7 @@ def solve(row: dict, out_dir: Path, model: str, base_url: str, timeout: int) -> 
                 "-v", f"{AGENT}:/opt/keel/agent.ts:ro",
                 "-v", f"{trial}:/out",
                 "-e", f"BASE_URL={base_url}", "-e", f"MODEL={model}",
+                *(["-e", f"EFFORT={os.environ['KEEL_EFFORT']}"] if os.environ.get("KEEL_EFFORT") else []),
                 "-e", "BASH_ENV=/root/.bashrc",
                 "-e", "TASK=" + PROMPT.format(problem=row["problem_statement"]),
                 "-w", "/testbed",
