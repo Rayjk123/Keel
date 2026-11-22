@@ -2,7 +2,7 @@
 
 Keel is scored on Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite, with the same 10 hand-picked tasks from each every time. Keel includes an adapter for [Harbor](https://harborframework.com) (install it with `uv tool install harbor`), which runs each task in its own Docker container, runs Keel inside it, and scores the result with the task's official tests.
 
-Every change to the harness gets a score. The chart has one bar per run, grouped by benchmark, so you can watch the success rate move as Keel gains new abilities. To run the benchmarks yourself or add a run, see [Running the benchmarks](running.md).
+Every change to the harness gets a score. The chart has one row per run, best overall first, and one column per benchmark, so you can watch the success rate move as Keel gains new abilities. To run the benchmarks yourself or add a run, see [Running the benchmarks](running.md).
 
 ![Pass rate by benchmark for each run](../../../assets/charts/scoreboard.svg)
 

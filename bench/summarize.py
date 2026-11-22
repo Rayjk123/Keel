@@ -10,7 +10,7 @@ BENCHMARKS = [
     ("aider-polyglot", "Aider Polyglot"),
     ("swebench-lite", "SWE-bench Lite"),
 ]
-COLORS = ["#0d9488", "#6366f1", "#f59e0b", "#ec4899", "#0ea5e9", "#84cc16"]
+BAR = "#0d9488"
 
 
 def harbor_outcomes(folder: Path) -> dict[str, bool]:
@@ -86,43 +86,33 @@ def table(runs: list[dict]) -> str:
 
 
 def chart(runs: list[dict]) -> str:
-    width, height, left, top, plot_h = 760, 380, 56, 56, 240
-    legend, lx, ly = [], left, height - 32
-    for r in runs:
-        item_w = 36 + 7.2 * len(r["run"])
-        if lx > left and lx + item_w - 18 > width - 20:
-            lx, ly = left, ly + 20
-        legend.append((lx, ly, r["run"]))
-        lx += item_w
-    height = ly + 32
-    group_w = (width - left - 20) / len(BENCHMARKS)
-    bar_w = min(36, (group_w - 24) / max(len(runs), 1))
+    rows = sorted(runs, key=lambda r: -sum(r["scores"][k]["passed"] for k, _ in BENCHMARKS))
+    width, label_w, gap, top, row_h, bar_h = 760, 176, 16, 40, 24, 12
+    panel_w = (width - label_w - gap * (len(BENCHMARKS) - 1)) / len(BENCHMARKS)
+    bar_max = panel_w - 40
+    height = top + row_h * len(rows) + 8
     css = (
         ":root{--fg:#1f2937;--grid:#e5e7eb;--bg:#ffffff}"
         "@media (prefers-color-scheme:dark){:root{--fg:#e5e7eb;--grid:#374151;--bg:#111827}}"
         "text{font-family:system-ui,sans-serif;fill:var(--fg)}"
     )
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Pass rate by benchmark for each run"><style>{css}</style>']
-    for pct in (0, 25, 50, 75, 100):
-        y = top + plot_h - plot_h * pct / 100
-        out.append(f'<line x1="{left}" x2="{width - 20}" y1="{y}" y2="{y}" stroke="var(--grid)"/>')
-        out.append(f'<text x="{left - 8}" y="{y + 4}" font-size="11" text-anchor="end">{pct}%</text>')
-    for gi, (key, title) in enumerate(BENCHMARKS):
-        gx = left + gi * group_w + group_w / 2
-        out.append(f'<text x="{gx}" y="{top + plot_h + 22}" font-size="12" text-anchor="middle">{title}</text>')
-        start = gx - bar_w * len(runs) / 2
-        for ri, r in enumerate(runs):
+    for gi, (_, title) in enumerate(BENCHMARKS):
+        px = label_w + gi * (panel_w + gap)
+        out.append(f'<text x="{px}" y="24" font-size="12" font-weight="600">{title}</text>')
+        out.append(f'<line x1="{px}" x2="{px}" y1="{top}" y2="{top + row_h * len(rows)}" stroke="var(--grid)"/>')
+    for ri, r in enumerate(rows):
+        y = top + ri * row_h
+        out.append(f'<text x="{label_w - 12}" y="{y + 16}" font-size="12" text-anchor="end">{r["run"]}</text>')
+        for gi, (key, _) in enumerate(BENCHMARKS):
             s = r["scores"][key]
-            if not s["total"] or not s["finished"]:
-                continue
-            frac = s["passed"] / s["total"]
-            h = max(plot_h * frac, 2)
-            x = start + ri * bar_w
-            out.append(f'<rect x="{x + 2}" y="{top + plot_h - h}" width="{bar_w - 4}" height="{h}" rx="3" fill="{COLORS[ri % len(COLORS)]}"/>')
-            out.append(f'<text x="{x + bar_w / 2}" y="{top + plot_h - h - 6}" font-size="11" text-anchor="middle">{s["passed"]}/{s["total"]}</text>')
-    for ri, (lx, ly, name) in enumerate(legend):
-        out.append(f'<rect x="{lx}" y="{ly}" width="12" height="12" rx="2" fill="{COLORS[ri % len(COLORS)]}"/>')
-        out.append(f'<text x="{lx + 18}" y="{ly + 10}" font-size="12">{name}</text>')
+            px = label_w + gi * (panel_w + gap)
+            w = bar_max * s["passed"] / s["total"] if s["total"] else 0
+            if w:
+                by, end = y + (row_h - bar_h) / 2, px + w
+                out.append(f'<path d="M{px} {by}H{end - 4}a4 4 0 0 1 4 4v{bar_h - 8}a4 4 0 0 1 -4 4H{px}Z" fill="{BAR}"/>')
+            label = f"{s['passed']}/{s['total']}" if s["finished"] else "pending"
+            out.append(f'<text x="{px + w + 6}" y="{y + 16}" font-size="11">{label}</text>')
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
