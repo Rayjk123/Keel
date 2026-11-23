@@ -6,13 +6,14 @@ export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$PWD/bench"
 MODELS="${MODELS:?list one or more models, e.g. ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
-HARNESS="${HARNESS:-baseline}"
+KEEL_ADAPTER="${KEEL_ADAPTER:-native}"
+if [ "$KEEL_ADAPTER" = text ]; then HARNESS="${HARNESS:-baseline}"; else HARNESS="${HARNESS:-native-tools}"; fi
 export KEEL_EFFORT="${EFFORT:-}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 if [ -z "${BENCH_PYTHON:-}" ]; then
   if [ -x bench/.venv/bin/python ]; then BENCH_PYTHON=bench/.venv/bin/python; else BENCH_PYTHON=python3; fi
 fi
-export WORKERS HARNESS
+export WORKERS HARNESS KEEL_ADAPTER
 
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
 [ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/

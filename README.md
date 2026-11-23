@@ -33,7 +33,8 @@ The next port isn't chosen yet. When it is, it gets its own row here and its own
 
 The first destination was the smallest agent I could build that still does real work. It takes a task in plain English, then works on it the way a developer would: it looks around, runs commands, reads the output, and keeps going until the job is done. The whole agent is one TypeScript file, `agent.ts`, with no SDK and no dependencies.
 
-- **Tiny.** One file, about 200 lines. Nothing hidden behind layers.
+- **Small.** Two files you can read in one sitting: the loop in `agent.ts` and the tools in `tools.ts`. Nothing hidden behind layers.
+- **Real tools.** `bash`, `read`, `write`, `edit` and `patch`, called through native tool calling, with forgiving edits and Codex-style multi-file patches.
 - **Zero dependencies.** It uses Node's built-in `fetch` and nothing else.
 - **Works with any model.** It speaks the standard OpenAI-style chat API, so it runs on local models through Ollama, on hosted APIs, or on AWS Bedrock.
 - **Benchmark-ready.** It runs on Terminal-Bench, Aider Polyglot and SWE-bench, so every change gets a score.
@@ -54,6 +55,8 @@ Keel works in the folder you run it from, so try it in a scratch directory first
 | `BASE_URL` | `http://localhost:8000/v1` | The chat API to call |
 | `MODEL` | required | The model name |
 | `API_KEY` | `none` | Bearer token, if your API needs one |
+| `ADAPTER` | `native` | `native` for tool calling, or `text` for one fenced bash block per reply |
+| `MAX_STEPS` | `50` | Model replies allowed per task |
 | `EFFORT` | unset | Reasoning effort, sent as `reasoning_effort`, for example `low`, `high` or `max` |
 
 ### Run it on a benchmark
@@ -103,8 +106,9 @@ The tests run the real agent loop against a scripted fake model, so they finish 
 ## What's inside
 
 ```
-agent.ts                the destination 1 agent
-test/                   tests for the loop, adapter, command runner and Bedrock proxy
+agent.ts                the agent loop and its adapters
+tools.ts                bash, read, write, edit and patch
+test/                   tests for the loop, adapters, tools and Bedrock proxy
 bench/keel_agent.py     plugs the agent into Harbor for benchmarking
 bench/swebench_lite.py  runs and grades SWE-bench Lite
 bench/setup.sh          readies a new machine for benchmarking

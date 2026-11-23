@@ -1,0 +1,430 @@
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..bba59b1c3 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -241,8 +241,9 @@ def _cstack(left, right):
+     if isinstance(right, Model):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
++        # Use the existing coordinate matrix directly instead of overwriting with ones
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, :right.shape[1]] = right
+ 
+     return np.hstack([cleft, cright])
+ 
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 000000000..efe9200bc
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import _separable, _cstack, _coord_matrix
++
++# Let's debug step by step what happens with nested compound model
++print("=== Debugging separability computation ===")
++
++# First create the components
++pix2sky = m.Pix2Sky_TAN()
++linear10 = m.Linear1D(10)
++linear5 = m.Linear1D(5)
++
++cm = linear10 & linear5
++nested_cm = pix2sky & cm
++
++print("Pix2Sky_TAN(): n_inputs={}, n_outputs={}".format(pix2sky.n_inputs, pix2sky.n_outputs))
++print("Linear1D(10): n_inputs={}, n_outputs={}".format(linear10.n_inputs, linear10.n_outputs))  
++print("Linear1D(5): n_inputs={}, n_outputs={}".format(linear5.n_inputs, linear5.n_outputs))
++print("cm = Linear1D(10) & Linear1D(5): n_inputs={}, n_outputs={}".format(cm.n_inputs, cm.n_outputs))
++print("nested_cm = Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5)): n_inputs={}, n_outputs={}".format(nested_cm.n_inputs, nested_cm.n_outputs))
++
++# Let's see what _coord_matrix returns for individual components
++print("\n=== Individual coord matrices ===")
++c_pix2sky = _coord_matrix(pix2sky, 'left', 4)  # 4 outputs total 
++print("Pix2Sky_TAN() coord matrix:")
++print(c_pix2sky)
++print()
++
++c_linear10 = _coord_matrix(linear10, 'left', 2)
++print("Linear1D(10) coord matrix:")
++print(c_linear10)
++print()
++
++c_linear5 = _coord_matrix(linear5, 'left', 2)
++print("Linear1D(5) coord matrix:")
++print(c_linear5)
++print()
++
++# Now what happens when we stack cm (which is linear10 & linear5) with pix2sky
++print("=== Testing _cstack operation ===")
++sepleft = _separable(pix2sky)  # This should be the coord matrix for pix2sky
++sepright = _separable(cm)      # This should be the coord matrix for cm
++
++print("sepleft (pix2sky):")
++print(sepleft)
++print("sepright (cm):")  
++print(sepright)
++
++# Let's see what the _cstack function does
++result = _cstack(sepleft, sepright)
++print("Result of _cstack(sepleft, sepright):")
++print(result)
+\ No newline at end of file
+diff --git a/debug_separable.py b/debug_separable.py
+new file mode 100644
+index 000000000..7ce163096
+--- /dev/null
++++ b/debug_separable.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import _separable, _cstack, _coord_matrix
++
++# Let's examine the separable property of different models
++print("=== Model separable properties ===")
++
++pix2sky = m.Pix2Sky_TAN()
++linear10 = m.Linear1D(10)
++linear5 = m.Linear1D(5)
++
++print("Pix2Sky_TAN().separable:", pix2sky.separable)
++print("Linear1D(10).separable:", linear10.separable)
++print("Linear1D(5).separable:", linear5.separable)
++
++# Test with compound model - this will raise NotImplementedError as expected
++try:
++    cm = linear10 & linear5
++    print("(Linear1D(10) & Linear1D(5)).separable:", cm.separable)
++except NotImplementedError as e:
++    print("CompoundModel separable property: NotImplementedError (expected)")
++    pass
++
++# Now test the coordinate matrix for each
++print("\n=== Coordinate matrices ===")
++c_pix2sky = _coord_matrix(pix2sky, 'left', 4)
++print("Pix2Sky_TAN() coord matrix:")
++print(c_pix2sky)
++print()
++
++c_linear10 = _coord_matrix(linear10, 'left', 2)
++print("Linear1D(10) coord matrix:")
++print(c_linear10)
++print()
++
++c_linear5 = _coord_matrix(linear5, 'left', 2)
++print("Linear1D(5) coord matrix:")
++print(c_linear5)
++print()
++
++# The problem: when we compute the separability of a compound model
++# nested_cm = pix2sky & cm, it calls _separable on each part
++# and then _cstack on those results
++
++print("=== What happens with _separable ===")
++print("Calling _separable(pix2sky):")
++result1 = _separable(pix2sky)
++print(result1)
++print()
++
++# For the compound model, it goes to the CompoundModel path in _separable
++# Let's manually check what would happen in that case:
++cm = linear10 & linear5
++print("For cm = Linear1D(10) & Linear1D(5):")
++print("  cm.left =", linear10)
++print("  cm.right =", linear5)
++print("  cm.op =", '&')
++
++sepleft = _separable(linear10)
++sepright = _separable(linear5)
++print("  _separable(linear10) =", sepleft)
++print("  _separable(linear5) =", sepright)
++
++# This calls _cstack(sepleft, sepright) which should be correct
++result_cm = _cstack(sepleft, sepright)
++print("  _cstack result for cm:", result_cm)
++print()
++
++print("=== What _cstack does with nested case ===")
++# When we have pix2sky & cm, the _separable function will call:
++# _separable(pix2sky) and _separable(cm) then _cstack on those
++print("pix2sky._calculate_separability_matrix() returns:", pix2sky._calculate_separability_matrix())
++print("cm._calculate_separability_matrix() returns:", cm._calculate_separability_matrix())
++
++# So it goes to the CompoundModel path in _separable, which calls:
++# sepleft = _separable(pix2sky.left) -> but pix2sky has no left attribute!
++# Let's see what happens with a compound model like this...
+\ No newline at end of file
+diff --git a/deep_debug.py b/deep_debug.py
+new file mode 100644
+index 000000000..7273af2ed
+--- /dev/null
++++ b/deep_debug.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import _separable, _cstack, _coord_matrix
++
++print("=== Deep debugging the nested case ===")
++
++# Create our problematic nested model
++pix2sky = m.Pix2Sky_TAN()
++linear10 = m.Linear1D(10)
++linear5 = m.Linear1D(5)
++
++cm = linear10 & linear5
++nested_cm = pix2sky & cm
++
++print("nested_cm structure:")
++print("  left:", nested_cm.left)  
++print("  right:", nested_cm.right)
++print("  op:", nested_cm.op)
++print()
++
++# What happens when we call _separable on nested_cm?
++print("Step 1: _separable(nested_cm)")
++print("This should go to CompoundModel path (line 306-309)")
++
++sepleft = _separable(nested_cm.left)
++sepright = _separable(nested_cm.right)
++
++print("sepleft (_separable(pix2sky)):")
++print(sepleft)
++print("sepright (_separable(cm)):")
++print(sepright)
++print()
++
++# What does _cstack do with these?
++print("Step 2: _cstack(sepleft, sepright)")
++result = _cstack(sepleft, sepright)
++print(result)
++print()
++
++# Let's also manually check the individual components:
++print("=== Manual verification ===")
++print("cm is Linear1D(10) & Linear1D(5)")
++print("  cm.left =", cm.left)
++print("  cm.right =", cm.right)
++
++print("\nComputing _separable(cm) manually:")
++left_separ = _separable(cm.left)  # This is Linear1D(10)
++right_separ = _separable(cm.right) # This is Linear1D(5)
++print("left_separ (Linear1D(10)):")
++print(left_separ)
++print("right_separ (Linear1D(5)):")
++print(right_separ)
++
++cstack_result = _cstack(left_separ, right_separ)
++print("_cstack(left_separ, right_separ):")
++print(cstack_result)
++
++# Now let's see what should happen
++print("\n=== What the result SHOULD be ===")
++print("Expected: 4x4 matrix where:")
++print("- First 2 rows represent Pix2Sky_TAN outputs (2 inputs)")
++print("- Last 2 rows represent Linear1D(10) & Linear1D(5) outputs (2 inputs)") 
++print("So it should be like:")
++print("[[1. 1. 0. 0.]  # First output of pix2sky depends on both inputs")
++print(" [1. 1. 0. 0.]  # Second output of pix2sky depends on both inputs")  
++print(" [0. 0. 1. 0.]  # First output of linear10 depends only on its input")
++print(" [0. 0. 0. 1.]  # Second output of linear5 depends only on its input")
++print(" ]")
++
++# But we're getting:
++print("\n=== What we ARE getting ===")
++print(result)
+\ No newline at end of file
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 000000000..614e63f19
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""
++Final verification that the separability matrix bug is fixed.
++This reproduces the exact example from the issue description.
++"""
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix
++
++print("=== Final Verification of Fix ===")
++
++# Test case 1: Basic compound model (should work before and after)
++cm = m.Linear1D(10) & m.Linear1D(5)
++result1 = separability_matrix(cm)
++print("Basic compound model Linear1D(10) & Linear1D(5):")
++print(result1)
++print("Expected: diagonal matrix (correct)")
++print()
++
++# Test case 2: Complex model with Pix2Sky_TAN (should work before and after)  
++complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++result2 = separability_matrix(complex_cm)
++print("Complex model Pix2Sky_TAN() & Linear1D(10) & Linear1D(5):")
++print(result2)
++print("Expected: correct separability matrix (correct)")
++print()
++
++# Test case 3: The problematic nested case (this was the bug)
++nested_cm = m.Pix2Sky_TAN() & cm
++result3 = separability_matrix(nested_cm)
++print("Nested model Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5)):")
++print(result3)
++print()
++
++# Verify that the fix is correct:
++# - First 2 rows should depend on inputs 1,2 (Pix2Sky_TAN)
++# - Last 2 rows should depend on inputs 3,4 (Linear1D(10) and Linear1D(5))
++expected_correct = [
++    [True,  True, False, False],   # Pix2Sky output 1 depends on inputs 1,2
++    [True,  True, False, False],   # Pix2Sky output 2 depends on inputs 1,2  
++    [False, False, True, False],   # Linear1D(10) output depends only on input 3
++    [False, False, False, True]    # Linear1D(5) output depends only on input 4
++]
++
++print("Expected result:")
++for row in expected_correct:
++    print(row)
++
++print("\nActual result matches expected:", 
++      all(all(a == e for a, e in zip(actual_row, expected_row)) 
++          for actual_row, expected_row in zip(result3, expected_correct)))
++
++print("\n=== Fix Verification Complete ===")
+\ No newline at end of file
+diff --git a/fix_verification.py b/fix_verification.py
+new file mode 100644
+index 000000000..ac0202b90
+--- /dev/null
++++ b/fix_verification.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python
++
++import numpy as np
++from astropy.modeling import models as m
++from astropy.modeling.separable import _separable, _cstack, _coord_matrix
++
++print("=== Testing the fix ===")
++
++# Create test case
++pix2sky = m.Pix2Sky_TAN()
++linear10 = m.Linear1D(10)
++linear5 = m.Linear1D(5)
++
++cm = linear10 & linear5
++nested_cm = pix2sky & cm
++
++print("Testing _cstack with correct logic")
++print("sepleft (from pix2sky):")
++sepleft = _separable(pix2sky)
++print(sepleft)
++print()
++
++print("sepright (from cm):")  
++sepright = _separable(cm)
++print(sepright)
++print()
++
++# The current buggy behavior:
++print("Current _cstack implementation:")
++print("noutp =", 4)  # Should be 4 outputs total
++print("sepleft shape:", sepleft.shape)
++print("sepright shape:", sepright.shape)
++
++# Simulate the current (buggy) _cstack logic:
++# cleft = np.zeros((4, 2))
++# cleft[:2, :2] = sepleft  # This is correct
++# cright = np.zeros((4, 2)) 
++# cright[-2:, -2:] = 1     # This is WRONG! Should use sepright directly
++
++cleft_buggy = np.zeros((4, 2))
++cleft_buggy[:2, :2] = sepleft
++print("cleft (buggy):")
++print(cleft_buggy)
++
++cright_buggy = np.zeros((4, 2))
++cright_buggy[-2:, -2:] = 1  # This is wrong!
++print("cright (buggy) - all ones:")
++print(cright_buggy)
++
++result_buggy = np.hstack([cleft_buggy, cright_buggy])
++print("Result (buggy):")
++print(result_buggy)
++print()
++
++# What it should be:
++print("Correct _cstack implementation:")
++cleft_correct = np.zeros((4, 2))
++cleft_correct[:2, :2] = sepleft
++
++# The fix: instead of setting all ones, use the actual matrix
++cright_correct = np.zeros((4, 2))  
++cright_correct[-2:, -2:] = sepright  # This is correct!
++print("cright (correct) - using actual matrix:")
++print(cright_correct)
++
++result_correct = np.hstack([cleft_correct, cright_correct])
++print("Result (correct):")
++print(result_correct)
++print()
++
++# Compare with actual expected result:
++print("=== Expected vs Actual ===")
++expected = np.array([
++    [1., 1., 0., 0.],  # Pix2Sky output 1
++    [1., 1., 0., 0.],  # Pix2Sky output 2  
++    [0., 0., 1., 0.],  # Linear1D(10) output
++    [0., 0., 0., 1.]   # Linear1D(5) output
++])
++
++print("Expected:")
++print(expected)
++print()
++print("Actual (corrected):")
++print(result_correct)
++print()
++print("Match?", np.array_equal(expected, result_correct))
+\ No newline at end of file
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 000000000..37e654e6b
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix
++
++print("Testing separability matrix issue")
++
++# Basic compound model
++cm = m.Linear1D(10) & m.Linear1D(5)
++print("Basic compound model cm = Linear1D(10) & Linear1D(5):")
++print(separability_matrix(cm))
++print()
++
++# More complex model with Pix2Sky_TAN
++complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++print("Complex model cm = Pix2Sky_TAN() & Linear1D(10) & Linear1D(5):")
++print(separability_matrix(complex_cm))
++print()
++
++# Nested compound model - this is the problematic case
++nested_cm = m.Pix2Sky_TAN() & cm
++print("Nested model cm = Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5)):")
++print(separability_matrix(nested_cm))
++print()
++
++# Let's also check what individual components are
++print("Individual components:")
++print("Pix2Sky_TAN().n_inputs, n_outputs:", m.Pix2Sky_TAN().n_inputs, m.Pix2Sky_TAN().n_outputs)
++print("Linear1D(10).n_inputs, n_outputs:", m.Linear1D(10).n_inputs, m.Linear1D(10).n_outputs)
++print("Linear1D(5).n_inputs, n_outputs:", m.Linear1D(5).n_inputs, m.Linear1D(5).n_outputs)
+\ No newline at end of file

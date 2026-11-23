@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 NODE_VERSION = (ROOT / ".nvmrc").read_text().strip()
 NODE_DIR = ROOT / "bench" / ".cache" / f"node-v{NODE_VERSION}-linux-x64"
 NODE_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-x64.tar.xz"
-AGENT = ROOT / "agent.ts"
+SOURCES = (ROOT / "agent.ts", ROOT / "tools.ts")
 DATASET = "SWE-bench/SWE-bench_Lite"
 PLATFORM = "linux/amd64"
 
@@ -74,9 +74,11 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
             [
                 "docker", "run", "--rm", "--name", name, "--platform", PLATFORM,
                 "-v", f"{NODE_DIR}:/opt/node:ro",
-                "-v", f"{AGENT}:/opt/keel/agent.ts:ro",
+                *[arg for src in SOURCES for arg in ("-v", f"{src}:/opt/keel/{src.name}:ro")],
                 "-v", f"{trial}:/out",
                 "-e", f"BASE_URL={base_url}", "-e", f"MODEL={model}",
+                "-e", f"ADAPTER={os.environ.get('KEEL_ADAPTER', 'native')}",
+                *(["-e", "API_KEY"] if os.environ.get("KEEL_API_KEY") else []),
                 *(["-e", f"EFFORT={os.environ['KEEL_EFFORT']}"] if os.environ.get("KEEL_EFFORT") else []),
                 "-e", "BASH_ENV=/root/.bashrc",
                 "-e", "TASK=" + PROMPT.format(problem=row["problem_statement"]),
@@ -86,6 +88,7 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
             timeout=timeout,
             capture_output=True,
             text=True,
+            env={**os.environ, "API_KEY": os.environ.get("KEEL_API_KEY", "")} if os.environ.get("KEEL_API_KEY") else None,
         )
         if run.returncode != 0:
             status = "docker-error"

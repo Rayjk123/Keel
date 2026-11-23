@@ -25,10 +25,12 @@ def main() -> None:
         "started": datetime.now().astimezone().isoformat(timespec="seconds"),
         "model": model,
         "model_name": model.split("/", 1)[-1],
-        "harness": os.environ.get("HARNESS", "baseline"),
+        "harness": os.environ.get("HARNESS", "native-tools"),
+        "adapter": os.environ.get("KEEL_ADAPTER", "native"),
         "effort": os.environ.get("KEEL_EFFORT") or "default",
         "keel_commit": out("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "agent_ts_sha256": hashlib.sha256((ROOT / "agent.ts").read_bytes()).hexdigest(),
+        "tools_ts_sha256": hashlib.sha256((ROOT / "tools.ts").read_bytes()).hexdigest(),
         "workers": int(os.environ.get("WORKERS", "2")),
         "machine": {
             "os": platform.platform(),

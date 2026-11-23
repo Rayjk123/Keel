@@ -18,15 +18,16 @@ npm run typecheck
 npm test
 ```
 
-The tests run the real agent loop against a scripted fake model, so they finish in under a second and need no model or network. They cover finishing a task, step limits, bad replies, history, reply parsing and command execution.
+The tests run the real agent loop against a scripted fake model, so they finish in under a second and need no model or network. They cover both adapters, finishing a task, step limits, retries, every tool and its error messages, the patch format, and the Bedrock translation.
 
 Both commands also run on every push and pull request through GitHub Actions.
 
 ## Project layout
 
 ```
-agent.ts                the whole agent
-test/                   tests for the loop, adapter, command runner and Bedrock proxy
+agent.ts                the loop and the two adapters
+tools.ts                bash, read, write, edit and patch
+test/                   tests for the loop, adapters, tools and Bedrock proxy
 bench/keel_agent.py     plugs Keel into Harbor for benchmarking
 bench/swebench_lite.py  runs and grades SWE-bench Lite
 bedrock/                optional proxy for AWS Bedrock

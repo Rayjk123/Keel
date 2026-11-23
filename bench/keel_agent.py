@@ -8,8 +8,10 @@ from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-AGENT_SOURCE = Path(__file__).resolve().parent.parent / "agent.ts"
-REMOTE_AGENT_PATH = "/tmp/keel/agent.ts"
+ROOT = Path(__file__).resolve().parent.parent
+SOURCES = ("agent.ts", "tools.ts")
+REMOTE_DIR = "/tmp/keel"
+REMOTE_AGENT_PATH = f"{REMOTE_DIR}/agent.ts"
 DEFAULT_BASE_URL = "http://host.docker.internal:11434/v1"
 LOAD_NVM = '. "$HOME/.nvm/nvm.sh"'
 
@@ -32,7 +34,8 @@ class KeelAgent(BaseInstalledAgent):
     @override
     async def configure(self, environment: BaseEnvironment) -> None:
         await self.exec_as_root(environment, command="mkdir -p /tmp/keel && chmod 777 /tmp/keel")
-        await environment.upload_file(AGENT_SOURCE, REMOTE_AGENT_PATH)
+        for name in SOURCES:
+            await environment.upload_file(ROOT / name, f"{REMOTE_DIR}/{name}")
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
@@ -46,7 +49,12 @@ class KeelAgent(BaseInstalledAgent):
         env = {
             "BASE_URL": os.environ.get("KEEL_BASE_URL", DEFAULT_BASE_URL),
             "MODEL": self.model_name.split("/", 1)[-1],
+            "ADAPTER": os.environ.get("KEEL_ADAPTER", "native"),
         }
+        if os.environ.get("KEEL_API_KEY"):
+            env["API_KEY"] = os.environ["KEEL_API_KEY"]
+        if os.environ.get("KEEL_MAX_STEPS"):
+            env["MAX_STEPS"] = os.environ["KEEL_MAX_STEPS"]
         if os.environ.get("KEEL_EFFORT"):
             env["EFFORT"] = os.environ["KEEL_EFFORT"]
         await self.exec_as_agent(

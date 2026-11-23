@@ -15,6 +15,8 @@ bench/baseline.sh
 
 `bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. On Linux with Docker Engine, first point the containers at your model, as [How the Docker setup fits together](#how-the-docker-setup-fits-together) explains. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
 
+Runs use native tool calling and are labelled `native-tools`. To rerun the original text mode for comparison, set `KEEL_ADAPTER=text`, and the run is labelled `baseline`. `KEEL_MAX_STEPS` changes the 50-reply limit.
+
 Each model gets its own folder, `runs/<model>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side. Set `EFFORT`, for example `EFFORT=max`, to run at a given reasoning effort: the manifest and the scoreboard record it, and the folder gets an `-<effort>` suffix unless you set `RUN`.
 
 After a run, `python bench/summarize.py` reads every folder under `runs/` and rewrites `runs/results.json` (every task's outcome), `runs/scoreboard.md` and the chart on the [Benchmarks](index.md) page. Commit them with the run, and the docs site picks them up on the next build.
@@ -87,7 +89,7 @@ When grading finishes, `swebench` writes a report to the run folder, and the pat
 
 ## How the Docker setup fits together
 
-Keel runs inside each task's container, where it works on the project's code. Your model keeps running on your machine, where it can use your GPU. Containers reach it at `host.docker.internal:11434`. Set `KEEL_BASE_URL` to point somewhere else. On Linux with Docker Engine, containers can't reach `host.docker.internal`. Serve the model on the Docker bridge address instead, usually `172.17.0.1` (`ip -4 addr show docker0` shows yours): for Ollama, export `OLLAMA_HOST=172.17.0.1` in the shells where you start Ollama and run `bench/setup.sh`, and set `KEEL_BASE_URL=http://172.17.0.1:11434/v1`.
+Keel runs inside each task's container, where it works on the project's code. Your model keeps running on your machine, where it can use your GPU. Containers reach it at `host.docker.internal:11434`. Set `KEEL_BASE_URL` to point somewhere else, and `KEEL_API_KEY` if that API needs a key, as [OpenRouter](../getting-started/models.md#openrouter) does. On Linux with Docker Engine, containers can't reach `host.docker.internal`. Serve the model on the Docker bridge address instead, usually `172.17.0.1` (`ip -4 addr show docker0` shows yours): for Ollama, export `OLLAMA_HOST=172.17.0.1` in the shells where you start Ollama and run `bench/setup.sh`, and set `KEEL_BASE_URL=http://172.17.0.1:11434/v1`.
 
 ```
 Your machine                              Docker container (one per task)
