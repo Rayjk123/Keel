@@ -6,7 +6,7 @@ import { fromConverse, toConverse } from "./convert.ts";
 
 const HOST = process.env.PROXY_HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT ?? 8787);
-const MAX_TOKENS = Number(process.env.MAX_TOKENS ?? 8192);
+const MAX_TOKENS = process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined;
 
 export function effortFields(model, effort) {
   if (model.includes("anthropic.")) return { output_config: { effort } };
@@ -22,7 +22,7 @@ export function converseInput(body) {
     system: system.length ? system : undefined,
     messages,
     toolConfig,
-    inferenceConfig: { maxTokens: body.max_tokens ?? MAX_TOKENS },
+    inferenceConfig: (body.max_tokens ?? MAX_TOKENS) ? { maxTokens: body.max_tokens ?? MAX_TOKENS } : undefined,
     additionalModelRequestFields: body.reasoning_effort ? effortFields(body.model, body.reasoning_effort) : undefined,
   };
 }
@@ -52,7 +52,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.a
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
       } catch (e) {
         console.error(`error: ${e.name}: ${e.message}`);
-        res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: `${e.name}: ${e.message}` } }));
+        res.writeHead(e.status ?? 500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: { message: `${e.name}: ${e.message}` } }));
       }
     })
     .listen(PORT, HOST, () => console.error(`bedrock proxy on http://${HOST}:${PORT}/v1`));

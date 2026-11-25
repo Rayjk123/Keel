@@ -14,6 +14,7 @@ type Message = {
   parts: Part[];
   provider?: string;
   raw?: unknown;
+  finish?: string;
 };
 
 export interface Adapter {
@@ -57,7 +58,8 @@ export function textAdapter(model: string): Adapter {
     },
 
     fromWire(response) {
-      const msg = (response as { choices: { message: ChatMessage }[] }).choices[0].message;
+      const choice = (response as { choices: { message: ChatMessage; finish_reason?: string }[] }).choices[0];
+      const msg = choice.message;
       const content = msg.content ?? "";
       const commands = [...content.matchAll(COMMAND_BLOCK)].map((match) => match[1]);
       const text = content.replace(COMMAND_BLOCK, "").trim();
@@ -66,7 +68,7 @@ export function textAdapter(model: string): Adapter {
       if (commands.length === 1) {
         parts.push({ type: "tool_call", id: `text_call_${nextCallId++}`, name: "bash", args: { command: commands[0] } });
       }
-      return { role: "assistant", parts, provider: PROVIDER, raw: msg };
+      return { role: "assistant", parts, provider: PROVIDER, raw: msg, finish: choice.finish_reason };
     },
   };
 }
@@ -130,8 +132,10 @@ export function nativeAdapter(model: string): Adapter {
     },
 
     fromWire(response) {
-      const msg = (response as { choices: { message: { content?: string | null; tool_calls?: WireToolCall[] } }[] }).choices[0]
-        .message;
+      const choice = (
+        response as { choices: { message: { content?: string | null; tool_calls?: WireToolCall[] }; finish_reason?: string }[] }
+      ).choices[0];
+      const msg = choice.message;
       const parts: Part[] = [];
       const text = (msg.content ?? "").trim();
       if (text) parts.push({ type: "text", text });
@@ -139,11 +143,11 @@ export function nativeAdapter(model: string): Adapter {
         parts.push({
           type: "tool_call",
           id: call.id || `call_${nextCallId++}`,
-          name: call.function?.name ?? "",
+          name: (call.function?.name ?? "").split(/[<"'\s]/)[0],
           args: parseArguments(call.function?.arguments),
         });
       }
-      return { role: "assistant", parts, provider: PROVIDER, raw: msg };
+      return { role: "assistant", parts, provider: PROVIDER, raw: msg, finish: choice.finish_reason };
     },
   };
 }
@@ -192,6 +196,9 @@ const NO_COMMAND = `No bash command found in your response. Every response MUST 
 
 ${FINISH_RULE}`;
 const MAX_CONSECUTIVE_NO_COMMAND = 3;
+const CUT_OFF =
+  "Your reply hit the output token limit and was cut off, so none of it was run. " +
+  "Reply again more briefly: think less before acting and write large files in smaller pieces.";
 
 class Submitted {
   summary: string;
@@ -287,7 +294,7 @@ export function runNativeTool(call: ToolCallPart): Part {
   return { type: "tool_result", callId: call.id, output, isError };
 }
 
-export async function agent(adapter: Adapter, task: string, maxSteps = 50): Promise<string> {
+export async function agent(adapter: Adapter, task: string, maxSteps = 200): Promise<string> {
   try {
     return await (adapter.native ? nativeLoop(adapter, task, maxSteps) : textLoop(adapter, task, maxSteps));
   } catch (e) {
@@ -304,6 +311,11 @@ async function nativeLoop(adapter: Adapter, task: string, maxSteps: number): Pro
   let pending: string | undefined;
   for (let step = 0; step < maxSteps; step++) {
     const msg = await chat(adapter, messages);
+    if (msg.finish === "length") {
+      pending = undefined;
+      messages.push({ role: "user", parts: [{ type: "text", text: CUT_OFF }] });
+      continue;
+    }
     messages.push(msg);
     const calls = toolCallsOf(msg.parts);
     if (calls.length) {
@@ -327,6 +339,10 @@ async function textLoop(adapter: Adapter, task: string, maxSteps: number): Promi
   try {
     for (let step = 0; step < maxSteps; step++) {
       const msg = await chat(adapter, messages);
+      if (msg.finish === "length") {
+        messages.push({ role: "user", parts: [{ type: "text", text: CUT_OFF }] });
+        continue;
+      }
       const calls = toolCallsOf(msg.parts);
       if (calls.length) {
         noCommandStreak = 0;
@@ -357,6 +373,6 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     console.error("set MODEL to the model name your server serves");
     process.exit(1);
   }
-  const maxSteps = Number(process.env.MAX_STEPS ?? 50);
+  const maxSteps = Number(process.env.MAX_STEPS ?? 200);
   agent(adapterFor(process.env.ADAPTER, MODEL), process.argv.slice(2).join(" "), maxSteps).then(console.log);
 }

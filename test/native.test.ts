@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 type WireCall = { id: string; type: string; function: { name: string; arguments: string } };
 type WireMessage = { role: string; content: string | null; tool_calls?: WireCall[]; tool_call_id?: string };
 type Wire = { model: string; messages: WireMessage[]; tools: { type: string; function: { name: string } }[] };
-type Reply = { content?: string | null; tool_calls?: unknown[]; status?: number; drop?: boolean };
+type Reply = { content?: string | null; tool_calls?: unknown[]; status?: number; drop?: boolean; finish_reason?: string };
 
 let script: Reply[] = [];
 let requests: Wire[] = [];
@@ -20,7 +20,7 @@ const server = http.createServer(async (req, res) => {
   for await (const chunk of req) raw += chunk;
   requests.push(JSON.parse(raw));
   auth.push(req.headers.authorization);
-  const { status, drop, ...message } = script.shift() ?? { content: "script exhausted" };
+  const { status, drop, finish_reason, ...message } = script.shift() ?? { content: "script exhausted" };
   if (drop) {
     req.socket.destroy();
     return;
@@ -31,7 +31,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, ...message } }] }));
+  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, ...message }, finish_reason }] }));
 });
 
 let keel: typeof import("../agent.ts");
@@ -119,6 +119,16 @@ describe("finishing", () => {
 
   test("two empty replies still end the run", async () => {
     assert.equal(await run([{ content: "" }, { content: "" }]), "finished without a summary");
+  });
+
+  test("a cut-off reply is not run or confirmed, and the model is told it was cut off", async () => {
+    const marker = path.join(dir, "cut-off-ran");
+    const cut = { ...tools(call("bash", { command: `touch ${marker}` })), finish_reason: "length" };
+    assert.equal(await run([finish("Half a summary"), { content: "", finish_reason: "length" }, cut, ...end("Done.")]), "Done.");
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(requests.length, 5);
+    for (const n of [2, 3]) assert.match(requests[n].messages.at(-1)!.content!, /output token limit and was cut off/);
+    assert.match(requests[4].messages.at(-1)!.content!, /replied without calling a tool/);
   });
 
   test("stops at the step limit", async () => {
@@ -297,6 +307,11 @@ describe("nativeAdapter.fromWire", () => {
       { type: "text", text: "Plan." },
       { type: "tool_call", id: "1", name: "read", args: { path: "a" } },
     ]);
+  });
+
+  test("drops format tokens that leak into a tool name", () => {
+    const msg = parse({ content: null, tool_calls: [call("bash<|channel|>analysis", { command: "ls" }, "1")] });
+    assert.deepEqual(msg.parts, [{ type: "tool_call", id: "1", name: "bash", args: { command: "ls" } }]);
   });
 
   test("a plain reply is text only", () => {

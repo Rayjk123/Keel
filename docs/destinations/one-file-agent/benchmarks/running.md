@@ -15,7 +15,7 @@ bench/baseline.sh
 
 `bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. On Linux with Docker Engine, first point the containers at your model, as [How the Docker setup fits together](#how-the-docker-setup-fits-together) explains. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
 
-Runs use native tool calling and are labelled `native-tools`. To rerun the original text mode for comparison, set `KEEL_ADAPTER=text`, and the run is labelled `baseline`. `KEEL_MAX_STEPS` changes the 50-reply limit.
+Runs use native tool calling and are labelled `native-tools`. To rerun the original text mode for comparison, set `KEEL_ADAPTER=text`, and the run is labelled `baseline`. `KEEL_MAX_STEPS` changes the 200-reply limit.
 
 Each model gets its own folder, `runs/<trial>/<run>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side. The trial is `native-tools` by default and `text-and-bash` with `KEEL_ADAPTER=text`; set `TRIAL` to start a new one. Set `EFFORT`, for example `EFFORT=max`, to run at a given reasoning effort: the manifest and the scoreboard record it, and the folder gets an `-<effort>` suffix unless you set `RUN`.
 

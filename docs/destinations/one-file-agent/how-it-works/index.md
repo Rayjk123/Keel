@@ -86,11 +86,13 @@ The model finishes by replying without a tool call. Keel then asks once to confi
 
 The check catches models that describe their next step in words and forget to call the tool.
 
+A reply cut off at the output limit doesn't count as finishing. Keel runs none of it and tells the model to reply again more briefly. Format tokens that leak into a tool name, such as `bash<|channel|>analysis`, are dropped, so the call still reaches the `bash` tool.
+
 ## Limits
 
 | Limit | Value |
 |---|---|
-| Model replies per task | 50, or `MAX_STEPS` |
+| Model replies per task | 200, or `MAX_STEPS` |
 | Time per command | 120 seconds, up to 600 when the model asks |
 | Output kept per command | 10,000 characters |
 | Lines per read | 2,000 |

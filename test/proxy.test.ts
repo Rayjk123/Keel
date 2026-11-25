@@ -33,6 +33,11 @@ describe("effortFields", () => {
 });
 
 describe("converseInput", () => {
+  test("leaves the output limit to the model unless the request sets one", () => {
+    assert.equal(request("us.anthropic.claude-opus-5-5").inferenceConfig, undefined);
+    assert.deepEqual(request("us.anthropic.claude-opus-5-5", { max_tokens: 4096 }).inferenceConfig, { maxTokens: 4096 });
+  });
+
   test("adds no model-specific fields without reasoning_effort", () => {
     assert.equal(request("us.anthropic.claude-opus-5-5").additionalModelRequestFields, undefined);
   });

@@ -36,7 +36,7 @@ Every task gets one reason, taken from the trial's own records: Harbor's result 
 | `no-patch` | Wrong answer | SWE-bench Lite: Keel finished without changing the code |
 | `no-command` | Unusable reply | three replies in a row without exactly one command, so Keel stopped |
 | `malformed-tool-call` | Unusable reply | the model's tool call couldn't be parsed or used, such as a tool name with stray format tokens |
-| `step-limit` | Out of steps, time or context | Keel used all 50 steps |
+| `step-limit` | Out of steps, time or context | Keel used all its steps (200, or 50 before the output-limit fix) |
 | `request-timeout` | Out of steps, time or context | a model reply didn't start within Node's 5-minute limit, or took longer than Keel's 10-minute one |
 | `context-limit` | Out of steps, time or context | the conversation outgrew the model's context window |
 | `task-time-limit` | Out of steps, time or context | the task's own time budget ran out |

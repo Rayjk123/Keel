@@ -11,7 +11,7 @@ AWS_REGION=us-east-2 node proxy.mjs
 
 The proxy listens on `http://127.0.0.1:8787/v1`.
 
-Set `EFFORT` on Keel to choose a reasoning effort. The proxy passes it to Claude as `output_config.effort`, to GPT-6 and Grok models as `reasoning.effort`, and to GPT-OSS, Kimi and GLM models as `reasoning_effort`, and rejects it for other models. Check which levels a model accepts: Grok 4.7 stops at `xhigh`, and GPT-OSS, Kimi and GLM at `high`. Reasoning counts toward the output limit, so raise the proxy's `MAX_TOKENS` (8192 by default) when you raise the effort.
+Set `EFFORT` on Keel to choose a reasoning effort. The proxy passes it to Claude as `output_config.effort`, to GPT-6 and Grok models as `reasoning.effort`, and to GPT-OSS, Kimi and GLM models as `reasoning_effort`, and rejects it for other models. Check which levels a model accepts: Grok 4.7 stops at `xhigh`, and GPT-OSS, Kimi and GLM at `high`. The proxy leaves the output limit to Bedrock, which uses the model's maximum. Set `MAX_TOKENS` to cap every reply. If a reply is cut off at the limit, Keel tells the model and runs none of it.
 
 ## Run Keel through it
 

@@ -47,6 +47,14 @@ describe("toConverse", () => {
     });
   });
 
+  test("replays a tool name Bedrock would reject with only the characters it accepts", () => {
+    const out = toConverse(req([
+      { role: "user", content: "task" },
+      { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "<|channel|>", arguments: "{}" } }] },
+    ]));
+    assert.equal((out.messages[1].content[0] as { toolUse: { name: string } }).toolUse.name, "__channel__");
+  });
+
   test("an assistant message with only tool calls has no empty text block", () => {
     const out = toConverse(req([
       { role: "user", content: "task" },
@@ -134,6 +142,11 @@ describe("fromConverse", () => {
     });
     assert.equal(out.choices[0].finish_reason, "tool_calls");
     assert.deepEqual(out.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  });
+
+  test("rejects a reply cut off by the context window as a client error", () => {
+    const out = { output: { message: { content: [{ text: "partial" }] } }, stopReason: "model_context_window_exceeded" };
+    assert.throws(() => fromConverse(out, "m"), { name: "ContextWindowExceeded", status: 400, message: /maximum context length/ });
   });
 
   test("a tool-only reply has null content", () => {

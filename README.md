@@ -56,7 +56,7 @@ Keel works in the folder you run it from, so try it in a scratch directory first
 | `MODEL` | required | The model name |
 | `API_KEY` | `none` | Bearer token, if your API needs one |
 | `ADAPTER` | `native` | `native` for tool calling, or `text` for one fenced bash block per reply |
-| `MAX_STEPS` | `50` | Model replies allowed per task |
+| `MAX_STEPS` | `200` | Model replies allowed per task |
 | `EFFORT` | unset | Reasoning effort, sent as `reasoning_effort`, for example `low`, `high` or `max` |
 
 ### Run it on a benchmark

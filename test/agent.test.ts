@@ -7,7 +7,9 @@ type Wire = { model: string; messages: { role: string; content: string }[]; reas
 
 const DONE = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 
-let script: string[] = [];
+type Reply = string | { content: string; finish_reason: string };
+
+let script: Reply[] = [];
 let requests: Wire[] = [];
 let connections: (string | undefined)[] = [];
 
@@ -16,9 +18,10 @@ const server = http.createServer(async (req, res) => {
   for await (const chunk of req) raw += chunk;
   requests.push(JSON.parse(raw));
   connections.push(req.headers.connection);
-  const content = script.shift() ?? "script exhausted";
+  const next = script.shift() ?? "script exhausted";
+  const { content, finish_reason } = typeof next === "string" ? { content: next, finish_reason: "stop" } : next;
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }));
+  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason }] }));
 });
 
 let keel: typeof import("../agent.ts");
@@ -36,7 +39,7 @@ after(() => server.close());
 const reply = (command: string, text = "Plan.") => `${text}\n\n\`\`\`bash\n${command}\n\`\`\``;
 const submit = (summary: string) => reply(`printf '${DONE}\\n${summary}\\n'`);
 
-function run(replies: string[], maxSteps?: number) {
+function run(replies: Reply[], maxSteps?: number) {
   script = [...replies];
   requests = [];
   connections = [];
@@ -95,6 +98,13 @@ describe("bad replies", () => {
     assert.ok(history.every((m) => !m.content.includes("I forgot the block")));
     assert.match(lastWire(1).content, /^No bash command found/);
     assert.equal(lastWire(1).role, "user");
+  });
+
+  test("a cut-off reply is not run, and the model is told it was cut off", async () => {
+    const result = await run([{ content: reply("rm -rf /"), finish_reason: "length" }, "none", "none again", submit("ok")]);
+    assert.equal(result, "ok");
+    assert.match(requests[1].messages.at(-1)!.content, /output token limit and was cut off/);
+    assert.ok(requests[1].messages.every((m) => !m.content.includes("rm -rf")));
   });
 
   test("two bash blocks in one reply count as no command", async () => {

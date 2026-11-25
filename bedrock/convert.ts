@@ -52,7 +52,8 @@ export function toConverse(body: OpenAIRequest) {
     } else if (m.role === "assistant") {
       const blocks: Block[] = text ? [{ text }] : [];
       for (const c of m.tool_calls ?? []) {
-        blocks.push({ toolUse: { toolUseId: c.id, name: c.function.name, input: parseInput(c.function.arguments) } });
+        const name = c.function.name.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "_";
+        blocks.push({ toolUse: { toolUseId: c.id, name, input: parseInput(c.function.arguments) } });
       }
       push("assistant", blocks);
     } else {
@@ -79,6 +80,12 @@ export function toConverse(body: OpenAIRequest) {
 }
 
 export function fromConverse(out: ConverseOutput, model: string) {
+  if (out.stopReason === "model_context_window_exceeded") {
+    throw Object.assign(new Error(`the conversation exceeds the maximum context length of ${model}`), {
+      name: "ContextWindowExceeded",
+      status: 400,
+    });
+  }
   const blocks = out.output?.message?.content ?? [];
   const text = blocks.map((b) => (typeof b.text === "string" ? b.text : "")).join("");
   const toolCalls = blocks.flatMap((b) => {
