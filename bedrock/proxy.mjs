@@ -10,7 +10,8 @@ const MAX_TOKENS = Number(process.env.MAX_TOKENS ?? 8192);
 
 export function effortFields(model, effort) {
   if (model.includes("anthropic.")) return { output_config: { effort } };
-  if (model.includes("openai.")) return { reasoning: { effort } };
+  if (["openai.gpt-oss", "moonshotai.", "zai."].some((id) => model.includes(id))) return { reasoning_effort: effort };
+  if (model.includes("openai.") || model.includes("xai.")) return { reasoning: { effort } };
   throw Object.assign(new Error(`reasoning_effort is not supported for ${model}`), { name: "UnsupportedEffort" });
 }
 

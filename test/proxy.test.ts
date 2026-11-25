@@ -16,7 +16,18 @@ describe("effortFields", () => {
     assert.deepEqual(effortFields("us.openai.gpt-6.2-sol", "high"), { reasoning: { effort: "high" } });
   });
 
+  test("sends Grok reasoning.effort", () => {
+    assert.deepEqual(effortFields("us.xai.grok-4.7", "max"), { reasoning: { effort: "max" } });
+  });
+
+  test("sends GPT-OSS, Kimi and GLM a top-level reasoning_effort", () => {
+    for (const model of ["openai.gpt-oss-120b-1:0", "moonshotai.kimi-k2.5", "zai.glm-5"]) {
+      assert.deepEqual(effortFields(model, "high"), { reasoning_effort: "high" });
+    }
+  });
+
   test("rejects models it can't map", () => {
+    assert.throws(() => effortFields("qwen.qwen3-coder-480b-a35b-v1:0", "high"), { name: "UnsupportedEffort" });
     assert.throws(() => effortFields("us.meta.llama4-maverick-17b-instruct-v1:0", "max"), { name: "UnsupportedEffort" });
   });
 });
