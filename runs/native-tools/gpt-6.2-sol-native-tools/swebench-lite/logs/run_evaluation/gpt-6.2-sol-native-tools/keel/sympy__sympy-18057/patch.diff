@@ -1,0 +1,245 @@
+diff --git a/sympy/core/containers.py b/sympy/core/containers.py
+index 933f3202cd..946d0395db 100755
+--- a/sympy/core/containers.py
++++ b/sympy/core/containers.py
+@@ -13,7 +13,7 @@
+ from sympy.core import S
+ from sympy.core.basic import Basic
+ from sympy.core.compatibility import as_int, range, MutableSet
+-from sympy.core.sympify import sympify, converter
++from sympy.core.sympify import sympify, _container_converters
+ from sympy.utilities.iterables import iterable
+ 
+ 
+@@ -162,7 +162,11 @@ def _eval_Eq(self, other):
+             return S.false
+ 
+ 
+-converter[tuple] = lambda tup: Tuple(*tup)
++def _sympify_tuple(tup, strict):
++    return Tuple(*(sympify(item, strict=strict) for item in tup), sympify=False)
++
++
++_container_converters[tuple] = _sympify_tuple
+ 
+ 
+ def tuple_wrapper(method):
+@@ -234,10 +238,14 @@ def __new__(cls, *args):
+             items = [Tuple(k, v) for k, v in args]
+         else:
+             raise TypeError('Pass Dict args as Dict((k1, v1), ...) or Dict({k1: v1, ...})')
++        return cls._from_items(items)
++
++    @classmethod
++    def _from_items(cls, items):
+         elements = frozenset(items)
+         obj = Basic.__new__(cls, elements)
+         obj.elements = elements
+-        obj._dict = dict(items)  # In case Tuple decides it wants to sympify
++        obj._dict = dict(items)
+         return obj
+ 
+     def __getitem__(self, key):
+@@ -289,7 +297,11 @@ def _sorted_args(self):
+ 
+ 
+ # this handles dict, defaultdict, OrderedDict
+-converter[dict] = lambda d: Dict(*d.items())
++def _sympify_dict(d, strict):
++    return Dict._from_items([_sympify_tuple(item, strict) for item in d.items()])
++
++
++_container_converters[dict] = _sympify_dict
+ 
+ class OrderedSet(MutableSet):
+     def __init__(self, iterable=None):
+diff --git a/sympy/core/expr.py b/sympy/core/expr.py
+index 24d89897f7..b02b132dd3 100755
+--- a/sympy/core/expr.py
++++ b/sympy/core/expr.py
+@@ -120,12 +120,13 @@ def _hashable_content(self):
+         return self._args
+ 
+     def __eq__(self, other):
++        # Equality must not parse strings or fall back to an object's repr.
+         try:
+-            other = sympify(other)
+-            if not isinstance(other, Expr):
+-                return False
++            other = _sympify(other)
+         except (SympifyError, SyntaxError):
+             return False
++        if not isinstance(other, Expr):
++            return False
+         # check for pure number expr
+         if  not (self.is_Number and other.is_Number) and (
+                 type(self) != type(other)):
+diff --git a/sympy/core/sympify.py b/sympy/core/sympify.py
+index ed4ea6ce5e..45a376915a 100755
+--- a/sympy/core/sympify.py
++++ b/sympy/core/sympify.py
+@@ -23,6 +23,8 @@ def __str__(self):
+             str(self.base_exc)))
+ 
+ converter = {}  # See sympify docstring.
++# Built-in container converters need to propagate strict mode to their items.
++_container_converters = {}
+ 
+ class CantSympify(object):
+     """
+@@ -271,15 +273,13 @@ def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+     cls = getattr(a, "__class__", None)
+     if cls is None:
+         cls = type(a)  # Probably an old-style class
+-    conv = converter.get(cls, None)
+-    if conv is not None:
+-        return conv(a)
+-
+     for superclass in getmro(cls):
+-        try:
+-            return converter[superclass](a)
+-        except KeyError:
+-            continue
++        conv = converter.get(superclass)
++        if conv is not None:
++            return conv(a)
++        conv = _container_converters.get(superclass)
++        if conv is not None:
++            return conv(a, strict=strict)
+ 
+     if cls is type(None):
+         if strict:
+diff --git a/sympy/core/tests/test_equal.py b/sympy/core/tests/test_equal.py
+index 1ec164666e..f7ed52ca29 100755
+--- a/sympy/core/tests/test_equal.py
++++ b/sympy/core/tests/test_equal.py
+@@ -53,6 +53,22 @@ class T(object):
+     assert (x != t)
+ 
+ 
++def test_cmp_does_not_parse_strings():
++    repr_calls = []
++
++    class TrackRepr(object):
++        def __repr__(self):
++            repr_calls.append(True)
++            return 'x'
++
++    x = Symbol('x')
++    obj = TrackRepr()
++    for other in ('x', obj, (obj,), {obj: 1}, {obj}, frozenset([obj])):
++        assert not (x == other)
++        assert x != other
++    assert not repr_calls
++
++
+ def test_cmp_bug2():
+     class T(object):
+         pass
+diff --git a/sympy/core/tests/test_var.py b/sympy/core/tests/test_var.py
+index be1467f66d..bd5dd8ead9 100755
+--- a/sympy/core/tests/test_var.py
++++ b/sympy/core/tests/test_var.py
+@@ -18,8 +18,8 @@ def test_var():
+     assert ns['e'] == Symbol('e')
+     assert ns['fg'] == Symbol('fg')
+ 
+-# check return value
+-    assert v == ['d', 'e', 'fg']
++    # check return value
++    assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]
+ 
+ 
+ def test_var_return():
+diff --git a/sympy/matrices/dense.py b/sympy/matrices/dense.py
+index 6b42b7ab8e..55c8c0daaa 100755
+--- a/sympy/matrices/dense.py
++++ b/sympy/matrices/dense.py
+@@ -9,7 +9,7 @@
+ from sympy.core.function import expand_mul
+ from sympy.core.singleton import S
+ from sympy.core.symbol import Symbol
+-from sympy.core.sympify import sympify
++from sympy.core.sympify import sympify, _sympify
+ from sympy.functions.elementary.miscellaneous import sqrt
+ from sympy.functions.elementary.trigonometric import cos, sin
+ from sympy.matrices.common import \
+@@ -44,7 +44,10 @@ class DenseMatrix(MatrixBase):
+     _class_priority = 4
+ 
+     def __eq__(self, other):
+-        other = sympify(other)
++        try:
++            other = _sympify(other)
++        except SympifyError:
++            return False
+         self_shape = getattr(self, 'shape', None)
+         other_shape = getattr(other, 'shape', None)
+         if None in (self_shape, other_shape):
+diff --git a/sympy/matrices/tests/test_matrices.py b/sympy/matrices/tests/test_matrices.py
+index 3395999fe7..897511beb8 100755
+--- a/sympy/matrices/tests/test_matrices.py
++++ b/sympy/matrices/tests/test_matrices.py
+@@ -2717,6 +2717,18 @@ def test_equality():
+     assert not C != D
+ 
+ 
++def test_equality_does_not_parse_strings():
++    class LooksLikeMatrix(object):
++        def __repr__(self):
++            return 'Matrix([[1]])'
++
++    A = Matrix([[1]])
++    obj = LooksLikeMatrix()
++    for other in ('Matrix([[1]])', obj, (obj,)):
++        assert not (A == other)
++        assert A != other
++
++
+ def test_col_join():
+     assert eye(3).col_join(Matrix([[7, 7, 7]])) == \
+         Matrix([[1, 0, 0],
+diff --git a/sympy/sets/sets.py b/sympy/sets/sets.py
+index 96b6751597..2bbb0f964c 100755
+--- a/sympy/sets/sets.py
++++ b/sympy/sets/sets.py
+@@ -18,7 +18,7 @@
+ from sympy.core.relational import Eq, Ne
+ from sympy.core.singleton import Singleton, S
+ from sympy.core.symbol import Symbol, Dummy, _uniquely_named_symbol
+-from sympy.core.sympify import _sympify, sympify, converter
++from sympy.core.sympify import _sympify, sympify, _container_converters
+ from sympy.logic.boolalg import And, Or, Not, Xor, true, false
+ from sympy.sets.contains import Contains
+ from sympy.utilities import subsets
+@@ -1753,13 +1753,10 @@ class FiniteSet(Set, EvalfMixin):
+ 
+     def __new__(cls, *args, **kwargs):
+         evaluate = kwargs.get('evaluate', global_evaluate[0])
+-        if evaluate:
+-            args = list(map(sympify, args))
+-
+-            if len(args) == 0:
+-                return S.EmptySet
+-        else:
++        if kwargs.get('sympify', True):
+             args = list(map(sympify, args))
++        if evaluate and not args:
++            return S.EmptySet
+ 
+         args = list(ordered(set(args), Set._infimum_key))
+         obj = Basic.__new__(cls, *args)
+@@ -1929,8 +1926,11 @@ def __lt__(self, other):
+         return self.is_proper_subset(other)
+ 
+ 
+-converter[set] = lambda x: FiniteSet(*x)
+-converter[frozenset] = lambda x: FiniteSet(*x)
++def _sympify_set(items, strict):
++    return FiniteSet(*(sympify(item, strict=strict) for item in items), sympify=False)
++
++
++_container_converters[set] = _container_converters[frozenset] = _sympify_set
+ 
+ 
+ class SymmetricDifference(Set):

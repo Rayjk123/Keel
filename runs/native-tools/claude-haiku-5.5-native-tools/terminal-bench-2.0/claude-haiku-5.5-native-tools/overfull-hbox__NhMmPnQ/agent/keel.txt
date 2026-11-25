@@ -1,0 +1,99 @@
+$ ls -la; cat main.tex; echo ----; cat input.tex; echo ----; cat synonyms.txt
+$ cd /tmp && rm -rf w && mkdir w && cp /code/* w 2>/dev/null; cd ~ ; pwd; cd - >/dev/null; cp -r . /tmp/w 2>/dev/null; cd /tmp/w && pdflatex -interaction=nonstopmode main.tex | grep -iE "overfull|warning|error" ; echo; grep -n "" input.tex | awk -F: '{print $1": "length($0)}' | head -0
+$ cd /tmp && rm -rf w; OLDPWD=$(ls -d /*/ | head -0); find / -name main.tex -not -path "*/proc/*" 2>/dev/null
+$ cd /app && ls -la && pdflatex -interaction=nonstopmode main.tex | tail -40; grep -n "Overfull" main.log
+$ mkdir -p /tmp/w && cd /tmp/w && cp /app/main.tex /app/input.tex /app/synonyms.txt . && cat > search.py <<'EOF'
+import re, subprocess, sys
+fams = []
+for line in open('synonyms.txt'):
+    line=line.strip()
+    if not line: continue
+    fams.append([w.strip().lower() for w in line.split(',') if w.strip()])
+fam_of = {}
+for f in fams:
+    for w in f:
+        fam_of.setdefault(w, []).append(f)
+def count():
+    subprocess.run(['pdflatex','-interaction=nonstopmode','main.tex'],capture_output=True)
+    log=open('main.log',errors='replace').read()
+    return log.count('Overfull \\hbox')
+src=open('input.tex').read()
+print("baseline", count())
+# occurrences
+occ=[(m.start(),m.end(),m.group(0)) for m in re.finditer(r"[A-Za-z]+", src) if m.group(0).lower() in fam_of]
+print(len(occ), "candidate occurrences")
+for s,e,w in occ: print(w, end=' | ')
+EOF
+python3 search.py
+$ which perl awk sed; cd /tmp/w && grep -n "" input.tex | head -30 | cut -c1-300
+$ cd /tmp/w && cat > search.pl <<'EOF'
+use strict;
+my %alts;  # lc word -> { lc alt => 1 }
+my %orig_fams;
+open my $S, '<', 'synonyms.txt' or die;
+while (my $l = <$S>) {
+  chomp $l; $l =~ s/^\s+|\s+$//g; next unless length $l;
+  my @w = map { my $x=$_; $x =~ s/^\s+|\s+$//g; lc $x } split /,/, $l;
+  for my $a (@w) { for my $b (@w) { next if $a eq $b; $alts{$a}{$b}=1 } }
+}
+sub overfull {
+  system("pdflatex -interaction=nonstopmode main.tex >/dev/null 2>&1");
+  open my $L, '<', 'main.log'; my $n=0; while(<$L>){ $n++ if /^Overfull \\hbox/ } close $L; return $n;
+}
+sub writeinput { my ($t)=@_; open my $O,'>','input.tex'; print $O $t; close $O }
+open my $I,'<','input.tex' or die; local $/; my $orig=<$I>; close $I;
+my $cur = $orig;
+writeinput($cur);
+my $best = overfull();
+print "baseline $best\n";
+# iterate greedy
+for my $pass (1..3) {
+  my $improved=0;
+  my @toks; while ($cur =~ /([A-Za-z]+)/g) { push @toks, [$-[1], $+[1]-$-[1], $1] }
+  for my $idx (0..$#toks) {
+    my ($pos,$len,$w)=@{$toks[$idx]};
+    my $lw=lc $w; next unless $alts{$lw};
+    my @cands = sort keys %{$alts{$lw}};
+    my $bestrep; my $bestcount=$best;
+    for my $c (@cands) {
+      my $rep = $c;
+      if ($w =~ /^[A-Z]/ && $w !~ /^[A-Z]+$/) { $rep = ucfirst $c }
+      elsif ($w =~ /^[A-Z]+$/ && length($w)>1) { $rep = uc $c }
+      my $trial = substr($cur,0,$pos).$rep.substr($cur,$pos+$len);
+      writeinput($trial);
+      my $n = overfull();
+      if ($n < $bestcount) { $bestcount=$n; $bestrep=$trial; last if $n==0 }
+    }
+    if (defined $bestrep) {
+      $cur=$bestrep; $best=$bestcount; $improved=1;
+      print "pass $pass: now $best\n";
+      # token list changed; restart pass
+      last if $best==0;
+      last;
+    }
+    last if $best==0;
+  }
+  last if $best==0;
+  last unless $improved;
+}
+writeinput($cur);
+print "final $best\n";
+EOF
+timeout 600 perl search.pl
+$ cd /tmp/w && pdflatex -interaction=nonstopmode main.tex | tail -5; grep -c "Overfull" main.log; cat input.tex | diff - /app/input.tex && echo SAME
+$ cd /tmp/w && cp /app/input.tex . && sed -i 's/open my \$L, .<., .main.log.; my \$n=0;/open my $L, "<", "main.log"; my $n=0; local $\/ = "\\n";/' search.pl && grep -n "main.log" search.pl && timeout 600 perl search.pl
+$ cd /tmp/w && cp /app/input.tex . && sed -i 's/for my \$pass (1..3)/for my $pass (1..500)/' search.pl && timeout 580 perl search.pl; echo; pdflatex -interaction=nonstopmode main.tex >/dev/null; grep -c "^Overfull" main.log; diff /app/input.tex input.tex
+$ cp /tmp/w/input.tex /app/input.tex && cd /app && pdflatex -interaction=nonstopmode main.tex | tail -3; echo "overfull: $(grep -c '^Overfull' main.log)"; grep -ciE "^! |warning" main.log; cmp main.tex <(cat main.tex) && cmp synonyms.txt synonyms.txt; diff <(tr -s ' ' '\n' < /tmp/w/input.tex) <(tr -s ' ' '\n' < /dev/null) >/dev/null; ls
+The task is done, but my earlier summary got the edit list wrong. The diff against the original shows 7 word replacements in `input.tex`, not 9:
+
+- "communicative" → "articulate"
+- "reserved" → "modest"
+- "marshes" → "bogs"
+- "scorn" → "disdain"
+- "responsiveness" → "awareness"
+- "rooms" → "chambers"
+- "pathfinder" → "pioneer"
+
+Each replacement comes from the same line of `synonyms.txt`. Compiling `main.tex` with `pdflatex` now gives 0 overfull hbox warnings, down from 5 at the start. The output is a 5-page `main.pdf`. I did not edit `main.tex` or `synonyms.txt`.
+
+The compile also left `main.aux`, `main.log` and `main.pdf` in `/app`.

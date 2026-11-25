@@ -1,0 +1,444 @@
+$ ls -la
+$ find pylint -type f -name "*.py" | head -30
+$ cat pylint/__main__.py
+$ cat pylint/__init__.py
+$ find pylint/lint -type f -name "*.py"
+$ cat pylint/lint/run.py
+$ cat pylint/lint/pylinter.py
+$ grep -n "recursive" pylint/lint/pylinter.py
+$ sed -n '620,680p' pylint/lint/pylinter.py
+$ grep -n "_discover_files" pylint/lint/pylinter.py
+$ sed -n '585,635p' pylint/lint/pylinter.py
+$ grep -n "_is_ignored_file" pylint/lint/pylinter.py
+$ cat pylint/lint/expand_modules.py
+$ grep -n "ignore_paths" pylint/lint/base_options.py
+$ grep -r "ignore_paths" pylint/config/ --include="*.py"
+$ grep -r "ignore_paths" pylint/ --include="*.py" | grep -v ".pyc"
+$ cat pylint/lint/base_options.py
+$ sed -n '598,615p' pylint/lint/pylinter.py
+$ cat > /tmp/patch.py << 'EOF'
+# Read the file
+with open('pylint/lint/pylinter.py', 'r') as f:
+    content = f.read()
+
+# The problematic lines are around 601-602
+# We need to replace the _is_ignored_file call with a check that uses full path for ignore_paths_re
+
+old_code = '''                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):
+                        skip_subtrees.append(root)
+                        continue'''
+
+new_code = '''                    # Check full path against ignore_paths (used for directory ignores)
+                    if _any_path_matches_ignore(
+                        root, self.config.ignore_paths
+                    ):
+                        skip_subtrees.append(root)
+                        continue'''
+
+# Just modify the code to create a helper function implementation inline
+# Actually, let's do it differently - we'll create the helper function more carefully
+# Let's go back to the original approach but use full path checking properly
+EOF
+python /tmp/patch.py
+$ sed -n '1,50p' pylint/lint/pylinter.py
+$ sed -n '37,40p' pylint/lint/pylinter.py
+$ cat > /tmp/fix.py << 'ENDSCRIPT'
+import sys
+
+# Read the file
+with open('pylint/lint/pylinter.py', 'r') as f:
+    lines = f.readlines()
+
+# Find where to insert the helper function - after imports, before _discover_files
+insert_index = None
+for i, line in enumerate(lines):
+    if line.startswith('def _discover_files'):
+        insert_index = i
+        break
+
+if insert_index is None:
+    print("ERROR: Could not find _discover_files function")
+    sys.exit(1)
+
+# The helper function to check if a path matches ignore_paths_re patterns
+helper_func = '''\
+def _path_matches_ignore_path(path: str) -> bool:
+    """Check if a path matches the ignore_paths regex patterns."""
+    from re import Pattern
+    from typing import Pattern as PatternType
+    return any(
+        ignore_pattern.match(path)
+        for ignore_pattern in self.config.ignore_paths
+    )
+
+'''
+
+# Insert the helper function
+lines.insert(insert_index, helper_func)
+
+# Now update the _discover_files method to use full path checking
+# Find and replace the _is_ignored_file call
+old_code = '''                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):
+                        skip_subtrees.append(root)
+                        continue'''
+
+new_code = '''                    # Check ignore_paths against full path (not just basename)
+                    if _path_matches_ignore_path(root):
+                        skip_subtrees.append(root)
+                        continue'''
+
+found = False
+for i, line in enumerate(lines):
+    if old_code in line or (i > 0 and lines[i-1].strip().startswith('if _is_ignored_file') and 'root' in line):
+        # Found the right location
+        lines[i] = new_code.replace('if', '').strip() + ':\n'
+        found = True
+        # Remove the rest of the if statement
+        j = i + 1
+        while j < len(lines) and not lines[j].strip().startswith('continue'):
+            j += 1
+        del lines[j-1:i+1]
+        break
+
+if not found:
+    print("ERROR: Could not find the code to replace")
+    sys.exit(1)
+
+# Write the modified file
+with open('pylint/lint/pylinter.py', 'w') as f:
+    f.writelines(lines)
+
+print("Fix applied successfully!")
+ENDSCRIPT
+
+python /tmp/fix.py
+$ grep -n "def _discover_files" pylint/lint/pylinter.py
+$ sed -n '585,610p' pylint/lint/pylinter.py
+$ cat > /tmp/fix2.py << 'ENDSCRIPT'
+import sys
+
+# Read the file
+with open('pylint/lint/pylinter.py', 'r') as f:
+    content = f.read()
+
+# Define the helper function to insert
+helper_func = """\
+    def _path_matches_ignore_path(self, path: str) -> bool:
+        \"\"\"Check if a path matches the ignore_paths regex patterns.
+
+        Unlike ignore which uses basenames, ignore_paths are matched against
+        the full path to allow patterns like "^src/gen/.*$".
+        \"\"\"
+        from re import Pattern
+        return any(
+            ignore_pattern.match(path)
+            for ignore_pattern in self.config.ignore_paths
+        )
+
+"""
+
+# Insert the helper function before _discover_files
+content = content.replace(
+    "    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:",
+    helper_func + "    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:"
+)
+
+# Replace the _is_ignored_file call with the new helper
+old_check = """                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):
+                        skip_subtrees.append(root)
+                        continue"""
+
+new_check = """                    # Check ignore_paths against full path (not just basename)
+                    # This allows patterns like "^src/gen/.*$" to work correctly
+                    if self._path_matches_ignore_path(root):
+                        skip_subtrees.append(root)
+                        continue"""
+
+content = content.replace(old_check, new_check)
+
+# Write the modified file
+with open('pylint/lint/pylinter.py', 'w') as f:
+    f.write(content)
+
+print("Fix applied successfully!")
+ENDSCRIPT
+
+python /tmp/fix2.py
+$ sed -n '585,620p' pylint/lint/pylinter.py
+$ cat > /tmp/test_fix.py << 'EOF'
+#!/usr/bin/env python3
+"""Test script to verify the fix for ignore-paths with recursive mode."""
+
+import os
+import tempfile
+import shutil
+import sys
+
+def run_pylint(args):
+    """Run pylint with given arguments."""
+    from pylint.lint import Run as PylintRun
+    
+    try:
+        PylintRun(args, exit=False)
+    except SystemExit as e:
+        return e.code
+
+# Create a test structure
+test_dir = tempfile.mkdtemp(prefix="pylint_test_")
+
+try:
+    # Create src/gen/ directory with some files
+    src_dir = os.path.join(test_dir, "src")
+    gen_dir = os.path.join(src_dir, "gen")
+    os.makedirs(gen_dir)
+    
+    # Create __init__.py in src
+    with open(os.path.join(src_dir, "__init__.py"), "w") as f:
+        f.write("# src package\n")
+    
+    # Create Python files in src/gen/ that should be ignored
+    for i in range(3):
+        with open(os.path.join(gen_dir, f"module{i}.py"), "w") as f:
+            f.write(f"# Generated module {i}\n")
+    
+    # Create a non-generated module that should be checked
+    with open(os.path.join(src_dir, "real_module.py"), "w") as f:
+        f.write("# Real module - should be checked\n")
+        f.write("pass\n")
+    
+    # Create pyproject.toml with ignore-paths
+    pyproject = os.path.join(test_dir, "pyproject.toml")
+    with open(pyproject, "w") as f:
+        f.write('''[tool.pylint.MASTER]
+ignore-paths = [
+    "^src/gen/.*$",
+]
+''')
+    
+    # Run pylint with recursive=y
+    files_dir = os.path.join(src_dir, "real_module.py")
+    exit_code = run_pylint(["--recursive=y", "--output=/dev/null", "--errors-only", files_dir])
+    
+    # The exit code should be 0 if no errors were found in checked files
+    # (ignore-paths should have worked and not generated errors for gen/)
+    print(f"Pylint exit code: {exit_code}")
+    
+    # If the bug exists, pylint would have checked gen/ files and might find errors
+    # With the fix, gen/ files should be ignored
+    if exit_code == 0:
+        print("SUCCESS: gen/ files were correctly ignored!")
+    else:
+        print("FAILURE: gen/ files were NOT ignored!")
+        sys.exit(1)
+
+finally:
+    # Clean up
+    shutil.rmtree(test_dir)
+EOF
+
+python /tmp/test_fix.py
+$ mkdir -p /tmp/test_pylint/src/gen
+cd /tmp/test_pylint
+cat > /tmp/test_pylint/src/gen/test.py << 'EOF'
+pass
+EOF
+cat > /tmp/test_pylint/src/real_test.py << 'EOF'
+print("This should run")
+EOF
+cat > pyproject.toml << 'EOF'
+[tool.pylint.MASTER]
+ignore-paths = [
+    "^src/gen/.*$",
+]
+EOF
+python -m pylint --recursive=y --output=/dev/null --errors-only src/real_test.py 2>&1 | head -20
+$ cd /tmp/test_pylint
+python -m pylint --output=/dev/null --errors-only src/gen/test.py 2>&1 || echo "Exit code: $?"
+$ cd /tmp/test_pylint
+cat > debug_test.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "=== Test 1: Without --recursive=y (individual file) ==="
+python -m pylint --output=/dev/null src/gen/test.py || echo "Exit: $?"
+
+echo ""
+echo "=== Test 2: With --recursive=y (directory) ==="
+python -m pylint --recursive=y --output=/dev/null src/real_test.py || echo "Exit: $?"
+
+echo ""
+echo "=== Test 3: Check if real_test.py is checked ==="
+python -m pylint --output=/dev/null src/real_test.py || echo "Exit: $?"
+EOF
+
+bash debug_test.sh
+$ cd /tmp/test_pylint
+python -m pylint src/real_test.py 2>&1
+$ cd /tmp/test_pylint
+python -m pylint --recursive=y src/ 2>&1 | grep "src/gen/test" || echo "gen/test.py was NOT checked" 
+$ cd /tmp/test_pylint
+cat > src/gen/test.py << 'EOF'
+# This should be ignored
+undefined_function()  # Error: undefined name
+EOF
+python -m pylint --recursive=y src/ 2>&1 | grep "gen/test"
+$ cd /tmp/test_pylint
+python -m pylint --recursive=y src/ 2>&1 | grep -A2 -B2 "gen/test"
+$ cd /tmp/test_pylint
+python -m pylint --recursive=y src/ 2>&1
+$ cd /pylint && python -m pytest tests/lint/test_functional/test_recursive.py -v 2>&1 | head -50
+$ pwd && ls -la tests/lint/test_functional/test_recursive.py 2>&1 | head -20
+$ find tests -name "*recursive*" -type f 2>/dev/null
+$ find tests -name "*.py" -type f | xargs grep -l "recursive" 2>/dev/null | head -10
+$ grep -n "recursive" tests/lint/unittest_lint.py | head -20
+$ sed -n '883,950p' tests/lint/unittest_lint.py
+$ find tests -name "*.py" -type f | xargs grep -l "ignore.*paths" 2>/dev/null | head -10
+$ grep -n "ignore_paths" tests/lint/unittest_expand_modules.py
+$ sed -n '145,165p' tests/lint/unittest_expand_modules.py
+$ cd /testbed && python -m pytest tests/lint/unittest_expand_modules.py -v 2>&1 | tail -40
+$ cd /testbed && python -m pytest tests/lint/unittest_lint.py::test_recursive_ignore -v 2>&1
+$ cat > /tmp/backup_fix.py << 'ENDSCRIPT'
+# Read the file
+with open('pylint/lint/pylinter.py', 'r') as f:
+    content = f.read()
+
+# Remove the helper function and restore the old code
+old_code = """    def _path_matches_ignore_path(self, path: str) -> bool:
+        \"\"\"Check if a path matches the ignore_paths regex patterns.
+
+        Unlike ignore which uses basenames, ignore_paths are matched against
+        the full path to allow patterns like "^src/gen/.*$".
+        \"\"\"
+        from re import Pattern
+        return any(
+            ignore_pattern.match(path)
+            for ignore_pattern in self.config.ignore_paths
+        )
+
+    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:
+        \"\"\"Discover python modules and packages in sub-directory.
+
+        Returns iterator of paths to discovered modules and packages.
+        \"\"\"
+        for something in files_or_modules:
+            if os.path.isdir(something) and not os.path.isfile(
+                os.path.join(something, "__init__.py")
+            ):
+                skip_subtrees: list[str] = []
+                for root, _, files in os.walk(something):
+                    if any(root.startswith(s) for s in skip_subtrees):
+                        # Skip subtree of already discovered package.
+                        continue
+
+                    # Check ignore_paths against full path (not just basename)
+                    # This allows patterns like "^src/gen/.*$" to work correctly
+                    if self._path_matches_ignore_path(root):
+                        skip_subtrees.append(root)
+                        continue"""
+
+new_code = """    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:
+        \"\"\"Discover python modules and packages in sub-directory.
+
+        Returns iterator of paths to discovered modules and packages.
+        \"\"\"
+        for something in files_or_modules:
+            if os.path.isdir(something) and not os.path.isfile(
+                os.path.join(something, "__init__.py")
+            ):
+                skip_subtrees: list[str] = []
+                for root, _, files in os.walk(something):
+                    if any(root.startswith(s) for s in skip_subtrees):
+                        # Skip subtree of already discovered package.
+                        continue
+
+                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):
+                        skip_subtrees.append(root)
+                        continue"""
+
+content = content.replace(old_code, new_code)
+
+# Write the modified file
+with open('pylint/lint/pylinter.py', 'w') as f:
+    f.write(content)
+
+print("Fixed backup restored!")
+ENDSCRIPT
+
+python /tmp/backup_fix.py
+$ cd /testbed && python -m pytest tests/lint/unittest_lint.py::test_recursive_ignore[--ignore-ignored_subdirectory] tests/lint/unittest_lint.py::test_recursive_ignore[--ignore-patterns-ignored_*] -v 2>&1
+$ cat > /tmp/fix2.py << 'ENDSCRIPT'
+import sys
+
+# Read the file
+with open('pylint/lint/pylinter.py', 'r') as f:
+    content = f.read()
+
+# Define the helper function to insert
+helper_func = """    def _path_matches_ignore_path(self, path: str) -> bool:
+        \"\"\"Check if a path matches the ignore_paths regex patterns.
+
+        Unlike ignore which uses basenames, ignore_paths are matched against
+        the full path to allow patterns like "^src/gen/.*$".
+        \"\"\"
+        from re import Pattern
+        return any(
+            ignore_pattern.match(path)
+            for ignore_pattern in self.config.ignore_paths
+        )
+
+"""
+
+# Insert the helper function before _discover_files
+content = content.replace(
+    "    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:",
+    helper_func + "    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:"
+)
+
+# Replace the _is_ignored_file call with the new helper
+old_check = """                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):
+                        skip_subtrees.append(root)
+                        continue"""
+
+new_check = """                    # Check ignore_paths against full path (not just basename)
+                    # This allows patterns like "^src/gen/.*$" to work correctly
+                    if self._path_matches_ignore_path(root):
+                        skip_subtrees.append(root)
+                        continue"""
+
+content = content.replace(old_check, new_check)
+
+# Write the modified file
+with open('pylint/lint/pylinter.py', 'w') as f:
+    f.write(content)
+
+print("Fix applied successfully!")
+ENDSCRIPT
+
+python /tmp/fix2.py
+$ find tests/regrtest_data -name "failing.py" -o -name "ignored_subdirectory"
+stopped: step limit reached

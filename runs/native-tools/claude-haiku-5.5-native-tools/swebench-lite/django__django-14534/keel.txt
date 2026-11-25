@@ -1,0 +1,45 @@
+$ cd django 2>/dev/null || true; grep -n "id_for_label" -A3 django/forms/boundfield.py; grep -n "def create_option" -A25 django/forms/widgets.py | head -40; grep -n "def id_for_label" -B3 -A12 django/forms/boundfield.py | head -5
+$ pwd; ls; find / -name boundfield.py -path "*forms*" 2>/dev/null | head
+$ cd /testbed; grep -n "class BoundWidget" -A50 django/forms/boundfield.py; grep -n "def create_option" -A25 django/forms/widgets.py
+$ cd /testbed; python - <<'EOF'
+import re
+p='django/forms/boundfield.py'
+s=open(p).read()
+s=s.replace("""    def id_for_label(self):
+        return 'id_%s_%s' % (self.data['name'], self.data['index'])""","""    def id_for_label(self):
+        return self.data['attrs'].get('id')""")
+open(p,'w').write(s)
+EOF
+git diff --stat; python -m pytest tests/forms_tests -q -x 2>&1 | tail -15
+$ cd /testbed/tests; python runtests.py forms_tests model_forms 2>&1 | tail -30
+$ cd /testbed/tests; python runtests.py forms_tests model_forms 2>&1 | grep -E "^(Ran|OK|FAILED|FAIL:|ERROR:)" | head -30
+$ cd /testbed/tests; python runtests.py forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_select 2>&1 | head -60
+$ cd /testbed; sed -n 700,730p tests/forms_tests/tests/test_forms.py
+$ cd /testbed; python - <<'EOF'
+p='django/forms/boundfield.py'
+s=open(p).read()
+s=s.replace("""    def id_for_label(self):
+        return self.data['attrs'].get('id')""","""    def id_for_label(self):
+        id_ = self.data['attrs'].get('id')
+        if id_ is not None:
+            return id_
+        return 'id_%s_%s' % (self.data['name'], self.data['index'])""")
+open(p,'w').write(s)
+EOF
+cat > /tmp/t.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+class F(forms.Form):
+    name = forms.MultipleChoiceField(choices=[('a','A'),('b','B')], widget=forms.CheckboxSelectMultiple)
+f = F(auto_id='x_%s')
+print([ (w.id_for_label, str(w)) for w in f['name']])
+EOF
+python /tmp/t.py; cd tests; python runtests.py forms_tests model_forms 2>&1 | grep -E "^(Ran|OK|FAILED|FAIL:|ERROR:)"
+The fix is in place and the forms and model_forms suites pass (870 tests, 1 skipped).
+
+`BoundWidget.id_for_label` in `django/forms/boundfield.py` now returns the id from `self.data['attrs']['id']`, so a custom `auto_id` such as `'x_%s'` shows up in the labels of `CheckboxSelectMultiple` subwidgets. When no id is set, for example with `auto_id=False`, it falls back to the old `id_<name>_<index>` format. I kept that fallback because an existing test depends on it, so this is slightly more than the one-line change the issue suggests.
+
+I did not add a regression test for the custom `auto_id` case.

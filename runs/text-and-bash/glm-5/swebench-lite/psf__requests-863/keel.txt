@@ -1,0 +1,405 @@
+$ find . -type f -name "*.py" | head -20
+$ ls -la
+$ ls -la requests/
+$ cat requests/hooks.py
+$ grep -n "register_hook\|class Request\|def __init__\|hooks" requests/models.py | head -50
+$ sed -n '463,480p' requests/models.py
+$ sed -n '43,170p' requests/models.py
+$ grep -r "register_hook\|hooks" tests/ | head -30
+$ grep -n -A 20 "test_multiple_hooks" tests/test_requests.py
+$ grep -n -A 35 "test_multiple_hooks" tests/test_requests.py
+$ cd /testbed && python -m pytest tests/test_requests.py::RequestsTestCase::test_multiple_hooks -v 2>&1 | head -50
+$ cd /testbed && python -m pytest tests/test_requests.py -k "test_multiple_hooks" -v 2>&1
+$ sed -n '463,480p' requests/models.py
+$ cat requests/hooks.py
+$ cd /testbed && python -c "
+from requests.models import Request
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# Create request with list of hooks
+r = Request(url='http://httpbin.org/get', hooks={'args': [hook1, hook2]})
+print('hooks:', r.hooks)
+print('args hooks:', r.hooks['args'])
+"
+$ cd /testbed && python -c "
+from requests.hooks import dispatch_hook
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# Simulate the nested list situation
+hooks_dict = {'args': [[hook1, hook2]]}
+print('Testing dispatch with nested list...')
+result = dispatch_hook('args', hooks_dict, {'url': 'test'})
+"
+$ cd /testbed && python -c "
+from requests.api import get
+
+# Check what happens when we use the get() function
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# Check how hooks are passed through the API
+import requests.api
+print('Checking api.py...')
+"
+
+grep -n "hooks" requests/api.py
+$ cat requests/api.py
+$ grep -n "hooks" requests/sessions.py
+$ sed -n '160,200p' requests/sessions.py
+$ grep -n "from_key_val_list" requests/sessions.py
+$ grep -n -A 20 "def from_key_val_list" requests/utils.py
+$ cd /testbed && python -c "
+from requests.sessions import Session
+from requests.utils import from_key_val_list
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+s = Session()
+hooks = {'args': [hook1, hook2]}
+
+# What does from_key_val_list return?
+result = from_key_val_list(hooks)
+print('from_key_val_list result:', result)
+
+# What gets passed to request?
+print('Hooks value:', result['args'] if result else None)
+"
+$ cd /testbed && python -c "
+from requests.sessions import Session
+from requests.utils import from_key_val_list
+from requests.hooks import dispatch_hook
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# What happens in request.py line 228?
+hooks_arg = {'args': [hook1, hook2]}
+hooks_ordered = from_key_val_list(hooks_arg)
+
+args_dict = {'url': 'test', 'hooks': hooks_ordered}
+print('args_dict:', args_dict)
+
+# This is what happens on line 228
+result = dispatch_hook('args', args_dict['hooks'], args_dict)
+print('result:', result)
+"
+$ cd /testbed && python -c "
+# Test that the hooks are ALREADY dispatched before Request is created
+# This is what happens in sessions.py
+from requests.hooks import dispatch_hook
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# At sessions.py line 228, hooks are dispatched first
+hooks = {'args': [hook1, hook2]}
+args = {'url': 'test', 'hooks': hooks}
+args = dispatch_hook('args', args['hooks'], args)
+print('After dispatch_hook, args:', args)
+
+# Then the Request is created with the processed hooks
+# But wait - the hooks still have the list value!
+# Let's trace the actual session flow more carefully
+"
+$ cd /testbed && python -c "
+from requests.models import Request
+
+def hook1(args):
+    print('hook1 called')
+    return args
+
+def hook2(args):
+    print('hook2 called')
+    return args
+
+# Create a Request directly with list hooks
+r = Request(url='http://httpbin.org/get', hooks={'response': [hook1, hook2]})
+print('Response hooks:', r.hooks['response'])
+
+# Try to send - this should fail because response hooks are NOT dispatched beforehand
+# The send() method dispatches hooks internally at line 646
+"
+$ cd /testbed && python -c "
+from requests.models import Request
+
+def hook1(r):
+    print('hook1 called')
+    return r
+
+def hook2(r):
+    print('hook2 called')
+    return r
+
+# Create a Request directly with list hooks
+r = Request(url='http://httpbin.org/get', hooks={'response': [hook1, hook2]})
+print('Response hooks:', r.hooks['response'])
+
+# The send() method will dispatch hooks - let's simulate the dispatch
+from requests.hooks import dispatch_hook
+try:
+    result = dispatch_hook('response', r.hooks, r.response)
+    print('Dispatched successfully')
+except TypeError as e:
+    print('ERROR:', e)
+" 2>&1
+$ sed -n '463,468p' requests/models.py
+$ cat > /tmp/patch.py << 'EOF'
+import sys
+
+# Read the file
+with open('requests/models.py', 'r') as f:
+    content = f.read()
+
+# Find and replace the register_hook method
+old_method = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        self.hooks[event].append(hook)'''
+
+new_method = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        if isinstance(hook, list):
+            self.hooks[event].extend(hook)
+        else:
+            self.hooks[event].append(hook)'''
+
+if old_method in content:
+    content = content.replace(old_method, new_method)
+    with open('requests/models.py', 'w') as f:
+        f.write(content)
+    print("Successfully patched register_hook method")
+else:
+    print("Could not find the register_hook method to patch")
+    sys.exit(1)
+EOF
+python /tmp/patch.py
+$ sed -n '463,475p' requests/models.py
+$ cd /testbed && python -c "
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+def hook1(r):
+    print('hook1 called')
+    return r
+
+def hook2(r):
+    print('hook2 called')
+    return r
+
+# Create a Request directly with list hooks
+r = Request(url='http://httpbin.org/get', hooks={'response': [hook1, hook2]})
+print('Response hooks:', r.hooks['response'])
+
+# Test dispatch_hook
+try:
+    result = dispatch_hook('response', r.hooks, r.response)
+    print('Dispatched successfully!')
+except TypeError as e:
+    print('ERROR:', e)
+
+# Test with single hook (should still work)
+r2 = Request(url='http://httpbin.org/get', hooks={'response': hook1})
+print('Single hook:', r2.hooks['response'])
+
+# Test registering hooks after creation
+r3 = Request(url='http://httpbin.org/get')
+r3.register_hook('response', hook1)
+r3.register_hook('response', hook2)
+print('Registered separately:', r3.hooks['response'])
+"
+$ cd /testbed && python -m pytest tests/test_requests.py -k "hook" -v 2>&1
+$ cd /testbed && python -m pytest tests/test_requests.py -v 2>&1 | tail -30
+$ cd /testbed && python -c "
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+print('Testing hook lists in Request.__init__')
+
+# Test case 1: List of hooks in __init__
+def setup_hooks():
+    called = []
+    def hook1(r):
+        called.append('hook1')
+        return r
+    def hook2(r):
+        called.append('hook2')
+        return r
+    return called, hook1, hook2
+
+# Test case 1: List of hooks
+called, hook1, hook2 = setup_hooks()
+r = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+assert len(r.hooks['response']) == 2, 'Should have 2 hooks'
+assert r.hooks['response'][0] == hook1, 'First hook should be hook1'
+assert r.hooks['response'][1] == hook2, 'Second hook should be hook2'
+print('✓ List of hooks correctly stored')
+
+# Test case 2: Single hook (should still work)
+called, hook1, hook2 = setup_hooks()
+r = Request(url='http://example.com', hooks={'response': hook1})
+assert len(r.hooks['response']) == 1, 'Should have 1 hook'
+print('✓ Single hook correctly stored')
+
+# Test case 3: Empty hooks
+r = Request(url='http://example.com', hooks={})
+assert len(r.hooks['response']) == 0, 'Should have 0 hooks'
+print('✓ Empty hooks dict works')
+
+# Test case 4: Multiple register_hook calls
+called, hook1, hook2 = setup_hooks()
+r = Request(url='http://example.com')
+r.register_hook('response', hook1)
+r.register_hook('response', hook2)
+assert len(r.hooks['response']) == 2, 'Should have 2 hooks'
+print('✓ Multiple register_hook calls work')
+
+# Test case 5: Register a list after creation
+called, hook1, hook2 = setup_hooks()
+r = Request(url='http://example.com')
+r.register_hook('response', [hook1, hook2])
+assert len(r.hooks['response']) == 2, 'Should have 2 hooks'
+print('✓ Register a list via register_hook works')
+
+# Test case 6: Dispatch actually works
+called, hook1, hook2 = setup_hooks()
+r = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+
+class MockResponse:
+    pass
+mock_response = MockResponse()
+dispatch_hook('response', r.hooks, mock_response)
+print('✓ Dispatch hook works')
+
+print()
+print('All tests passed!')
+"
+$ cd /testbed && python -c "
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+print('Testing args hook (dispatched before request creation)')
+
+called = []
+def hook1(args):
+    called.append('hook1')
+    return args
+def hook2(args):
+    called.append('hook2')
+    return args
+
+# Test args hook with list of hooks
+args = {'url': 'http://example.com', 'hooks': {'args': [hook1, hook2]}}
+result = dispatch_hook('args', args['hooks'], args)
+assert 'hook1' in called, 'hook1 should have been called'
+assert 'hook2' in called, 'hook2 should have been called'
+print('✓ args hook dispatch works with lists')
+
+# Test args hook from Request.__init__ 
+called = []
+r = Request(url='http://example.com', hooks={'args': [hook1, hook2]})
+assert len(r.hooks['args']) == 2, 'Should have 2 hooks'
+print('✓ args hook correctly stored in Request')
+
+print()
+print('All tests passed!')
+"
+$ cd /testbed && python -c "
+from requests.models import Request
+
+print('Testing deregister_hook functionality')
+
+def hook1(r):
+    return r
+def hook2(r):
+    return r
+def hook3(r):
+    return r
+
+# Test deregistering a single hook
+r = Request(url='http://example.com', hooks={'response': [hook1, hook2, hook3]})
+assert len(r.hooks['response']) == 3, 'Should have 3 hooks'
+
+r.deregister_hook('response', hook2)
+assert len(r.hooks['response']) == 2, 'Should have 2 hooks after deregister'
+assert r.hooks['response'] == [hook1, hook3], 'Should have hook1 and hook3'
+print('✓ deregister_hook works')
+
+# Test deregistering a hook that doesn't exist
+result = r.deregister_hook('response', hook2)
+assert result == False, 'Should return False for non-existent hook'
+print('✓ deregister_hook returns False for non-existent hook')
+
+# Test deregistering a hook that exists
+result = r.deregister_hook('response', hook1)
+assert result == True, 'Should return True for existing hook'
+print('✓ deregister_hook returns True for existing hook')
+
+print()
+print('All tests passed!')
+"
+$ diff requests/models.py build/lib/requests/models.py 2>&1 | head -20
+$ cp requests/models.py build/lib/requests/models.py && echo "Build directory updated"
+$ cd /testbed && python -m pytest tests/test_requests.py -k "hook" -v 2>&1
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Excellent! All tests pass. Let me provide a summary and complete the task.
+
+## Summary
+
+I fixed the issue where the `Request` class's `register_hook()` method did not properly handle lists of hook functions in the hooks argument.
+
+**The Problem:**
+When passing a dictionary with list values to the `hooks` argument in `Request.__init__()`, the code at lines 151-152 would call `register_hook()` for each key-value pair, but when the value was a list, `register_hook()` would append the entire list as a single item, resulting in nested lists like `[[hook1, hook2]]` instead of `[hook1, hook2]`. This caused a `TypeError: 'list' object is not callable` when the hooks were dispatched.
+
+**The Fix:**
+I modified the `register_hook()` method in `requests/models.py` (line 463) to check if the `hook` parameter is a list. If it is, the method uses `extend()` to add all hooks to the list; otherwise, it uses `append()` for a single hook:
+
+```python
+def register_hook(self, event, hook):
+    """Properly register a hook."""
+
+    if isinstance(hook, list):
+        self.hooks[event].extend(hook)
+    else:
+        self.hooks[event].append(hook)
+```
+
+This allows users to:
+1. Pass a list of hook functions directly in the `hooks` argument
+2. Use multiple hooks from a session
+3. Register lists of hooks via `register_hook()` after request creation

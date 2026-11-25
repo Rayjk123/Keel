@@ -1,0 +1,154 @@
+$ find . -type f -name "*.py" | head -20
+$ cat ./seaborn/_stats/regression.py
+$ cat > /tmp/test_fix.py << 'EOF'
+# Test script to verify the fix works
+import numpy as np
+import pandas as pd
+
+# Simulate the original problematic data
+x = pd.Series([1, 2, 3, None, 4])
+y = pd.Series([1, 2, 3, 4, 5])
+
+# The problem: NaN values cause np.polyfit to fail
+try:
+    p = np.polyfit(x, y, 2)
+    print("Original np.polyfit succeeded (unexpected)")
+except Exception as e:
+    print(f"Original np.polyfit failed with: {type(e).__name__}: {e}")
+
+# The fix: drop rows with missing values
+not_null = x.notna() & y.notna()
+x_clean = x[not_null]
+y_clean = y[not_null]
+print(f"\nClean x: {x_clean.tolist()}")
+print(f"Clean y: {y_clean.tolist()}")
+
+try:
+    p = np.polyfit(x_clean, y, 2)
+    print("\nFixed np.polyfit succeeded")
+except Exception as e:
+    print(f"Fixed np.polyfit failed with: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_fix.py
+$ cat > /tmp/test_fix.py << 'EOF'
+import numpy as np
+import pandas as pd
+
+# Simulate the original problematic data
+x = pd.Series([1, 2, 3, None, 4])
+y = pd.Series([1, 2, 3, 4, 5])
+
+# The fix: drop rows with missing values
+not_null = x.notna() & y.notna()
+x_clean = x[not_null]
+y_clean = y[not_null]
+print(f"Clean x: {x_clean.tolist()}")
+print(f"Clean y: {y_clean.tolist()}")
+
+try:
+    p = np.polyfit(x_clean, y_clean, 2)
+    print("\nFixed np.polyfit succeeded")
+    print(f"Coefficients: {p}")
+except Exception as e:
+    print(f"Fixed np.polyfit failed with: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_fix.py
+$ cat > /tmp/fix_regression.py << 'EOF'
+import re
+
+# Read the file
+with open('./seaborn/_stats/regression.py', 'r') as f:
+    content = f.read()
+
+# Find and replace the _fit_predict method
+old_method = '''    def _fit_predict(self, data):
+
+        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:
+            # TODO warn?
+            xx = yy = []
+        else:
+            p = np.polyfit(x, y, self.order)
+            xx = np.linspace(x.min(), x.max(), self.gridsize)
+            yy = np.polyval(p, xx)
+
+        return pd.DataFrame(dict(x=xx, y=yy))'''
+
+new_method = '''    def _fit_predict(self, data):
+
+        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:
+            # TODO warn?
+            xx = yy = []
+        else:
+            # Drop rows with missing values
+            mask = x.notna() & y.notna()
+            x = x[mask]
+            y = y[mask]
+            p = np.polyfit(x, y, self.order)
+            xx = np.linspace(x.min(), x.max(), self.gridsize)
+            yy = np.polyval(p, xx)
+
+        return pd.DataFrame(dict(x=xx, y=yy))'''
+
+content = content.replace(old_method, new_method)
+
+# Write the file back
+with open('./seaborn/_stats/regression.py', 'w') as f:
+    f.write(content)
+
+print("File updated successfully")
+EOF
+python /tmp/fix_regression.py
+$ cat ./seaborn/_stats/regression.py
+$ cd /home/user && python -c "
+import seaborn.objects as so
+# Test the original failing case
+so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with missing data in x')
+
+# Test with missing data in y
+so.Plot([1, 2, 3, 4, 5], [1, 2, None, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with missing data in y')
+
+# Test with no missing data (regression test)
+so.Plot([1, 2, 3, 4, 5], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with complete data')
+"
+$ python -c "
+import seaborn.objects as so
+# Test the original failing case
+so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with missing data in x')
+
+# Test with missing data in y
+so.Plot([1, 2, 3, 4, 5], [1, 2, None, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with missing data in y')
+
+# Test with no missing data (regression test)
+so.Plot([1, 2, 3, 4, 5], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+print('Test passed: No error with complete data')
+"
+$ find . -name "*test*" -type f -name "*.py" | xargs grep -l "PolyFit" 2>/dev/null
+$ python -m pytest ./tests/_stats/test_regression.py -v
+$ cat ./tests/_stats/test_regression.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+All existing tests pass. The fix correctly handles missing data by filtering out rows where either x or y has NaN values before performing the polynomial fit.
+
+Let me provide a summary of the fix:
+
+**Summary:**
+The issue was in `seaborn/_stats/regression.py` in the `PolyFit._fit_predict` method. When the input data contained `None` or `NaN` values in either the x or y columns, `np.polyfit` would fail with a `LinAlgError: SVD did not converge` because NumPy's polynomial fitting functions cannot handle NaN values.
+
+**Fix applied:**
+Added code to filter out rows with missing values in either x or y before calling `np.polyfit`:
+```python
+# Drop rows with missing values
+mask = x.notna() & y.notna()
+x = x[mask]
+y = y[mask]
+```
+
+This ensures that only valid data points are used for the polynomial fit, preventing the error while maintaining the expected behavior for complete data.

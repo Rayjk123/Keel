@@ -1,0 +1,140 @@
+$ cd /app && ls -la . src data && cat src/program.cbl && echo ---- && head -50 src/INPUT.DAT && wc -l src/INPUT.DAT
+$ cd /app && for f in data/*.DAT src/INPUT.DAT; do echo "== $f"; xxd $f; done; which cobc; cobc --version 2>/dev/null | head -1
+$ cd /app && for f in data/*.DAT src/INPUT.DAT; do echo "== $f"; od -c $f; done
+$ cd /app && mkdir -p /tmp/orig && cp -r data src /tmp/orig/ && cp -r data /tmp/bak_data && cobc -x -o /tmp/prog src/program.cbl && /tmp/prog; echo rc=$?; for f in data/*.DAT; do echo "== $f"; od -c $f; done
+$ cd /app && diff -r data /tmp/bak_data && echo unchanged && cat > /app/program.py <<'EOF'
+#!/usr/bin/env python3
+"""Python re-implementation of src/program.cbl (BOOKFORUM).
+
+Must be run from /app (paths are relative, as in the COBOL original).
+"""
+import os
+import sys
+
+ACCOUNTS = "data/ACCOUNTS.DAT"
+BOOKS = "data/BOOKS.DAT"
+TRANSACTIONS = "data/TRANSACTIONS.DAT"
+INPUT = "src/INPUT.DAT"
+
+ACC_LEN = 4 + 20 + 10   # ACCOUNT-ID, ACCOUNT-NAME, ACCOUNT-BALANCE
+BOOK_LEN = 4 + 20 + 4   # BOOK-ID, BOOK-TITLE, BOOK-OWNER
+TRANS_LEN = 4 + 10 + 4 + 4  # TRANS-BOOK, TRANS-AMOUNT, TRANS-SELLER, TRANS-BUYER
+IN_LEN = 4 + 4 + 4 + 10  # INPUT-BUYER-ID, INPUT-SELLER-ID, INPUT-BOOK-ID, INPUT-AMOUNT
+MOD = 10 ** 10
+
+
+def read_records(path, reclen):
+    with open(path, "rb") as f:
+        data = f.read()
+    recs = []
+    for i in range(0, len(data), reclen):
+        chunk = data[i:i + reclen]
+        if len(chunk) < reclen:
+            chunk = chunk + b" " * (reclen - len(chunk))
+        recs.append(chunk)
+    return recs
+
+
+def write_records(path, recs):
+    with open(path, "wb") as f:
+        f.write(b"".join(recs))
+
+
+def num(b):
+    """Interpret a PIC 9 display field; spaces count as zero."""
+    s = b.decode("latin-1").replace(" ", "0")
+    return int(s) if s.isdigit() else 0
+
+
+def fmt10(n):
+    """Store into unsigned PIC 9(10): drop sign, keep low 10 digits."""
+    return "%010d" % (abs(int(n)) % MOD)
+
+
+def main():
+    # Read the single input record
+    recs = read_records(INPUT, IN_LEN)
+    if not recs:
+        print("Error: Input file is empty")
+        return
+    rec = recs[0]
+    buyer = rec[0:4].decode("latin-1")
+    seller = rec[4:8].decode("latin-1")
+    book = rec[8:12].decode("latin-1")
+    amount = num(rec[12:22]) * 100  # WS-AMOUNT is 9(10)V99, held in hundredths
+
+    buyer_found = seller_found = book_found = valid_owner = False
+
+    # VALIDATE-USERS-AND-BOOK
+    for r in read_records(ACCOUNTS, ACC_LEN):
+        aid = r[0:4].decode("latin-1")
+        if aid == buyer:
+            buyer_found = True
+        if aid == seller:
+            seller_found = True
+
+    for r in read_records(BOOKS, BOOK_LEN):
+        bid = r[0:4].decode("latin-1")
+        if bid == book:
+            book_found = True
+            if r[24:28].decode("latin-1") == seller:
+                valid_owner = True
+    print(" ")
+
+    if buyer_found and seller_found and book_found and valid_owner:
+        process_transaction(buyer, seller, book, amount)
+    else:
+        print("Transaction failed due to validation errors")
+
+
+def process_transaction(buyer, seller, book, amount):
+    # Amount is held as whole units + cents; balances are whole units.
+    whole = amount // 100
+
+    # ACCOUNTS: sequential pass, buyer debited then seller credited
+    recs = read_records(ACCOUNTS, ACC_LEN)
+    out = []
+    for r in recs:
+        aid = r[0:4].decode("latin-1")
+        bal = num(r[24:34])
+        name = r[4:24]
+        if aid == buyer:
+            bal = abs(bal - whole) % MOD
+        if aid == seller:
+            bal = (bal + whole) % MOD
+        out.append(r[0:4] + name + fmt10(bal).encode("ascii"))
+    write_records(ACCOUNTS, out)
+
+    # BOOKS: owner of the book becomes the buyer
+    recs = read_records(BOOKS, BOOK_LEN)
+    out = []
+    for r in recs:
+        if r[0:4].decode("latin-1") == book:
+            r = r[0:24] + buyer.encode("latin-1")
+        out.append(r)
+    write_records(BOOKS, out)
+
+    # TRANSACTIONS: append
+    rec = (book.encode("latin-1") + fmt10(whole).encode("ascii")
+           + seller.encode("latin-1") + buyer.encode("latin-1"))
+    with open(TRANSACTIONS, "ab") as f:
+        f.write(rec)
+
+    print("Transaction completed successfully")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+python3 program.py; diff -r data /tmp/bak_data && echo same
+$ rm -rf /tmp/t && mkdir -p /tmp/t && cd /tmp/t && cp -r /tmp/bak_data data && mkdir src && printf 'U001U002B0020000000050' > src/INPUT.DAT && cp /app/src/program.cbl src/ && cp -r /tmp/t /tmp/t_cob && cd /tmp/t_cob && cobc -x -o p src/program.cbl && ./p && cd /tmp/t && cp /app/program.py . && python3 program.py && for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp data/$f.DAT /tmp/t_cob/data/$f.DAT && echo "$f identical"; done; cat -A data/TRANSACTIONS.DAT | tail -c 60
+# also test short (15-byte) input record, as in the real INPUT.DAT, with a valid book
+printf 'U001U002B0022000' > src/INPUT.DAT; cp src/INPUT.DAT /tmp/t_cob/src/; cp /tmp/bak_data/* /tmp/t_cob/data/; cp /tmp/bak_data/* data/; cd /tmp/t_cob && ./p; cd /tmp/t && python3 program.py; for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp data/$f.DAT /tmp/t_cob/data/$f.DAT && echo "$f identical"; done
+`/app/program.py` is written and matches the COBOL output for the cases I could run, but two parts of the logic are untested.
+
+- **Real input:** `INPUT.DAT` names book `B007`, which isn't in `BOOKS.DAT`. Both programs print "Transaction failed due to validation errors" and leave `/app/data/` unchanged.
+- **Successful transactions:** I ran two valid whole-unit transactions in scratch copies against GnuCOBOL 3.1.2. `ACCOUNTS.DAT`, `BOOKS.DAT` and `TRANSACTIONS.DAT` came out byte-identical both times, including one with the short 15-byte input record.
+
+Two things I did not verify:
+- **Negative balances:** the script takes the absolute value when a debit would go negative. I inferred this from how GnuCOBOL stores unsigned fields and never tested it against the COBOL program.
+- **Cents:** the script drops the cents when it applies an amount to whole-unit balances. My tests only used whole-unit amounts, so this is also unconfirmed.

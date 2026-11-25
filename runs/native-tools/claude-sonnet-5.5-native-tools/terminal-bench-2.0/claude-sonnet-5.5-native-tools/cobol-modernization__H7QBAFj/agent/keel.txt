@@ -1,0 +1,144 @@
+$ cd /app; ls -la . src data; cat src/program.cbl; xxd src/INPUT.DAT | head; which cobc
+$ cd /app; for f in src/INPUT.DAT data/*; do echo $f; od -c $f; done; cp -r data /tmp/data0
+$ cd /app; cobc -x -o /tmp/prog src/program.cbl && /tmp/prog; od -c data/TRANSACTIONS.DAT | tail -4; cp /tmp/data0/* data/
+$ cd /app; printf 'U001U002B0010000000200' > /tmp/in1; cp src/INPUT.DAT /tmp/inorig; cp /tmp/in1 src/INPUT.DAT; /tmp/prog; od -c data/ACCOUNTS.DAT; od -c data/TRANSACTIONS.DAT|tail -3; cp /tmp/data0/* data/; cp /tmp/inorig src/INPUT.DAT
+$ cd /app; t(){ printf "$1" > src/INPUT.DAT; /tmp/prog; od -An -c data/ACCOUNTS.DAT | tr -d ' \n'; echo; od -An -c data/BOOKS.DAT | tr -d ' \n';echo; cp /tmp/data0/* data/; }
+t 'U001U002B0010000000500'   # underflow
+t 'U001U001B0010000000500'
+t 'U002U001B0029999999999'
+t 'U003U002B0020000000020'
+t 'U001U002B001'
+t 'U001U002B00100000002'
+cp /tmp/inorig src/INPUT.DAT
+$ cd /app; t(){ printf "$1" > src/INPUT.DAT; /tmp/prog; od -An -c data/ACCOUNTS.DAT | tr -d ' \n'; echo; od -An -c data/TRANSACTIONS.DAT | tail -3|tr -d ' \n'; echo; cp /tmp/data0/* data/; }
+t 'U001U002B0010000002000'
+t 'U001U002B001'
+t 'U001U002B001000000A200'
+t 'U001U002B0019999999999'
+t 'U001U001B0030000000010'
+t ''
+cp /tmp/inorig src/INPUT.DAT
+$ cd /app; t(){ printf "$1" > src/INPUT.DAT; /tmp/prog; od -An -c data/ACCOUNTS.DAT | tr -d ' \n'; echo; od -An -c data/TRANSACTIONS.DAT | tail -3|tr -d ' \n'; echo; cp /tmp/data0/* data/; }
+t 'U001U002B001200'
+t 'U001U002B001  5'
+t 'U001U002B0010000000a5'
+t 'U001U002B001000000-5'
+t 'U001U002B0010000000 5'
+t 'U001U002B001000000005\n'
+t 'U001U002B001000000005XXXXX'
+cp /tmp/inorig src/INPUT.DAT
+$ cd /app; cat > program.py <<'EOF'
+#!/usr/bin/env python3
+import os, sys
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+ACC = os.path.join(BASE, "data", "ACCOUNTS.DAT")
+BOOKS = os.path.join(BASE, "data", "BOOKS.DAT")
+TRANS = os.path.join(BASE, "data", "TRANSACTIONS.DAT")
+INP = os.path.join(BASE, "src", "INPUT.DAT")
+
+
+def digval(ch):
+    if ch == 0x20:
+        return 0
+    return ch - 0x30
+
+
+def num(b):
+    v = 0
+    for c in b:
+        v = v * 10 + digval(c)
+    return v
+
+
+def read_records(path, size):
+    with open(path, "rb") as f:
+        data = f.read()
+    recs = [bytearray(data[i:i + size]) for i in range(0, len(data), size)]
+    return recs
+
+
+def write_records(path, recs):
+    with open(path, "wb") as f:
+        for r in recs:
+            f.write(bytes(r))
+
+
+def main():
+    with open(INP, "rb") as f:
+        raw = f.read(22)
+    if len(raw) == 0:
+        print("Error: Input file is empty")
+        return
+    raw = raw.ljust(22, b" ")
+    buyer, seller, book = raw[0:4], raw[4:8], raw[8:12]
+    amt_raw = raw[12:22]
+    amount = num(amt_raw)
+    amt_out = bytes(0x30 if c == 0x20 else c for c in amt_raw)
+
+    accounts = read_records(ACC, 34)
+    books = read_records(BOOKS, 28)
+    buyer_found = seller_found = book_found = valid_owner = False
+    for r in accounts:
+        if bytes(r[0:4]) == buyer:
+            buyer_found = True
+        if bytes(r[0:4]) == seller:
+            seller_found = True
+    for r in books:
+        if bytes(r[0:4]) == book:
+            book_found = True
+            if bytes(r[24:28]) == seller:
+                valid_owner = True
+    print(" ")
+    if not (buyer_found and seller_found and book_found and valid_owner):
+        print("Transaction failed due to validation errors")
+        return
+
+    for r in accounts:
+        if len(r) < 34:
+            continue
+        if bytes(r[0:4]) == buyer:
+            bal = abs(num(r[24:34]) - amount) % 10**10
+            r[24:34] = b"%010d" % bal
+        if bytes(r[0:4]) == seller:
+            bal = (num(r[24:34]) + amount) % 10**10
+            r[24:34] = b"%010d" % bal
+    write_records(ACC, accounts)
+
+    for r in books:
+        if len(r) >= 28 and bytes(r[0:4]) == book:
+            r[24:28] = buyer
+    write_records(BOOKS, books)
+
+    with open(TRANS, "ab") as f:
+        f.write(book + amt_out + seller + buyer)
+    print("Transaction completed successfully")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+cp -r data /tmp/dpy_init
+for inp in 'U001U002B0010000000200' 'U001U002B0010000000500' 'U001U002B0019999999999' 'U003U002B0020000000020' 'U001U002B00100000002' 'U001U002B0010000000a5' 'U001U002B001' 'U001U002B0010000000500'; do
+printf "$inp" > src/INPUT.DAT
+/tmp/prog >/tmp/o1; cp data/* /tmp/c/ 2>/dev/null || { mkdir -p /tmp/c; cp data/* /tmp/c/; }
+cp /tmp/data0/* data/; python3 program.py >/tmp/o2; diff /tmp/o1 /tmp/o2 && for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp /tmp/c/$f.DAT data/$f.DAT; done; cp /tmp/data0/* data/; echo "$inp ok"; done
+cp /tmp/inorig src/INPUT.DAT; python3 program.py; cmp /tmp/data0/ACCOUNTS.DAT data/ACCOUNTS.DAT
+$ cd /app; printf 'U003U002B0030000005000' > src/INPUT.DAT; /tmp/prog; cp data/* /tmp/c/; cp /tmp/data0/* data/; python3 program.py; for f in ACCOUNTS BOOKS TRANSACTIONS; do cmp /tmp/c/$f.DAT data/$f.DAT; done; od -c data/ACCOUNTS.DAT|tail -3; cp /tmp/data0/* data/; cp /tmp/inorig src/INPUT.DAT
+`/app/program.py` is written, and its output matched the GnuCOBOL build on every test input I tried. I compiled `program.cbl` with `cobc` and ran both programs on the same inputs, starting from the original data each time. In every case `ACCOUNTS.DAT`, `BOOKS.DAT` and `TRANSACTIONS.DAT` were identical, and so were the printed messages.
+
+- **Validation:** the script checks that the buyer, the seller and the book exist, and that the seller currently owns the book.
+- **On success:** it subtracts the amount from the buyer's balance and adds it to the seller's. It then makes the buyer the book's owner and appends a record to `TRANSACTIONS.DAT`.
+- **On failure:** it prints "Transaction failed due to validation errors" and leaves the data files unchanged.
+- **Empty input:** it prints "Error: Input file is empty".
+- **Odd amounts:** short input is padded with spaces, which COBOL reads as zeros. Other non-digit characters in the amount field are converted the way GnuCOBOL does it.
+
+The comparison runs covered:
+- ordinary sales;
+- a buyer's balance going negative, where the program stores the absolute value;
+- a balance overflowing 10 digits;
+- a short amount field;
+- a non-digit character in the amount;
+- a failed validation.
+
+The original data files and `INPUT.DAT` are back in their starting state. The shipped `INPUT.DAT` fails validation, because the seller U002 does not own book B002 as the input assumes. So a plain run of `program.py` on it changes no data.

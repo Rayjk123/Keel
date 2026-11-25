@@ -1,0 +1,76 @@
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..d24533d6 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -610,11 +610,16 @@ class PyLinter(
+                         skip_subtrees.append(root)
+                         yield root
+                     else:
+-                        yield from (
+-                            os.path.join(root, file)
+-                            for file in files
+-                            if file.endswith(".py")
+-                        )
++                        for file in files:
++                            if file.endswith(".py"):
++                                full_path = os.path.join(root, file)
++                                if not _is_ignored_file(
++                                    full_path,
++                                    self.config.ignore,
++                                    self.config.ignore_patterns,
++                                    self.config.ignore_paths,
++                                ):
++                                    yield full_path
+             else:
+                 yield something
+ 
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..d8e439f6 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -931,3 +931,45 @@ print(submodule1)
+         with fix_import_path([tmpdir]):
+             linter.check(["submodule2.py"])
+     assert not linter.stats.by_msg
++
++
++def test_recursive_ignore_paths_for_files_in_non_package_directory():
++    """Test that ignore-paths correctly ignores files in directories without __init__.py.
++    
++    This is a regression test for https://github.com/PyCQA/pylint/issues/5962
++    When running recursively, ignore-paths should be respected for individual files,
++    not just for directories.
++    """
++    with tempdir() as tmpdir:
++        # Create a structure like:
++        # src/main.py
++        # src/gen/test.py (should be ignored via ignore-paths)
++        gen_dir = os.path.join(tmpdir, "src", "gen")
++        os.makedirs(gen_dir)
++        
++        with open(os.path.join(tmpdir, "src", "main.py"), "w") as f:
++            f.write("# main file\n")
++        
++        with open(os.path.join(gen_dir, "test.py"), "w") as f:
++            f.write("# generated file\n")
++        
++        run = Run(
++            [
++                "--recursive",
++                "y",
++                "--ignore-paths",
++                ".*/gen/.*",  # Match any path containing /gen/
++                os.path.join(tmpdir, "src"),
++            ],
++            exit=False,
++        )
++        
++        linted_files = list(run.linter._discover_files([os.path.join(tmpdir, "src")]))
++        
++        # src/gen/test.py should be ignored
++        gen_test_file = os.path.join(tmpdir, "src", "gen", "test.py")
++        assert gen_test_file not in linted_files, f"{gen_test_file} should be ignored"
++        
++        # src/main.py should be included
++        main_file = os.path.join(tmpdir, "src", "main.py")
++        assert main_file in linted_files, f"{main_file} should be included"

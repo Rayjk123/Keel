@@ -1,0 +1,295 @@
+$ cat /app/src/program.cbl
+$ cat /app/src/INPUT.DAT && echo "---" && cat /app/data/ACCOUNTS.DAT && echo "---" && cat /app/data/BOOKS.DAT && echo "---" && cat /app/data/TRANSACTIONS.DAT
+$ echo "INPUT.DAT:" && wc -c /app/src/INPUT.DAT && echo "ACCOUNTS.DAT:" && wc -c /app/data/ACCOUNTS.DAT && echo "BOOKS.DAT:" && wc -c /app/data/BOOKS.DAT && echo "TRANSACTIONS.DAT:" && wc -c /app/data/TRANSACTIONS.DAT
+$ cd /app && cobc -x -o program src/program.cbl && ./program && echo "--- After execution ---" && cat /app/data/ACCOUNTS.DAT && echo "---" && cat /app/data/BOOKS.DAT && echo "---" && cat /app/data/TRANSACTIONS.DAT
+$ echo "Account record: 4+20+10=34 bytes, 102/34 = 3 records" && echo "Book record: 4+20+4=28 bytes, 84/28 = 3 records" && echo "Transaction record: 4+10+4+4=22 bytes, 66/22 = 3 records" && echo "Input record: 4+4+4+10=18 bytes (but file is only 15 bytes)"
+$ cd /app && hexdump -C src/INPUT.DAT && echo "---" && cobc --version
+$ cd /app && od -c src/INPUT.DAT && echo "---" && cobc --version
+$ ls -la /app/ && echo "---" && od -c /app/data/ACCOUNTS.DAT && echo "---" && od -c /app/data/BOOKS.DAT && echo "---" && od -c /app/data/TRANSACTIONS.DAT
+$ ls -la /app/data/ && ls -la /app/src/
+$ cd /app && find . -name "*.bak" -o -name "*.dat" -o -name "*.DAT" 2>/dev/null | head -20
+$ cd /app && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.bak && cp data/BOOKS.DAT data/BOOKS.DAT.bak && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.bak && od -An -tx1 src/INPUT.DAT
+$ cd /app && ls -la data/*.bak && cat data/ACCOUNTS.DAT.bak && echo "---" && cat data/BOOKS.DAT.bak && echo "---" && cat data/TRANSACTIONS.DAT.bak
+$ cd /app && cp data/ACCOUNTS.DAT.bak data/ACCOUNTS.DAT && cp data/BOOKS.DAT.bak data/BOOKS.DAT && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.bak && cat data/ACCOUNTS.DAT && echo "---" && cat data/BOOKS.DAT && echo "---" && cat data/TRANSACTIONS.DAT
+$ cd /app && cat > /tmp/save_state.py << 'EOF'
+# Save current state of data files
+import shutil
+for f in ['ACCOUNTS.DAT', 'BOOKS.DAT', 'TRANSACTIONS.DAT']:
+    shutil.copy(f'data/{f}', f'data/{f}.initial')
+print("Saved initial state")
+EOF
+python3 /tmp/save_state.py
+$ cd /app && cat > program.py << 'EOF'
+#!/usr/bin/env python3
+"""
+Python reimplementation of BOOKFORUM COBOL program.
+This program processes book transactions between users.
+"""
+
+import os
+
+# Record sizes (based on COBOL PIC clauses)
+ACCOUNT_RECORD_SIZE = 4 + 20 + 10  # 34 bytes: ID(4) + NAME(20) + BALANCE(10)
+BOOK_RECORD_SIZE = 4 + 20 + 4      # 28 bytes: ID(4) + TITLE(20) + OWNER(4)
+TRANSACTION_RECORD_SIZE = 4 + 10 + 4 + 4  # 22 bytes: BOOK(4) + AMOUNT(10) + SELLER(4) + BUYER(4)
+INPUT_RECORD_SIZE = 4 + 4 + 4 + 10 # 18 bytes: BUYER(4) + SELLER(4) + BOOK(4) + AMOUNT(10)
+
+
+def read_input_file(filepath):
+    """
+    Read INPUT.DAT file.
+    Returns buyer_id, seller_id, book_id, amount.
+    """
+    with open(filepath, 'rb') as f:
+        content = f.read()
+    
+    # Parse the input - handle files that may be shorter than expected
+    buyer_id = content[0:4].decode('ascii') if len(content) >= 4 else ''
+    seller_id = content[4:8].decode('ascii') if len(content) >= 8 else ''
+    book_id = content[8:12].decode('ascii') if len(content) >= 12 else ''
+    
+    # Amount field: COBOL reads 10 digits, but may be shorter
+    # The field is WS-AMOUNT which is 9(10)V99 - but INPUT-AMOUNT is just 9(10)
+    amount_str = content[12:22].decode('ascii') if len(content) >= 22 else content[12:].decode('ascii')
+    amount_str = amount_str.ljust(10, '0')[:10]  # Pad with zeros if needed
+    
+    return buyer_id, seller_id, book_id, amount_str
+
+
+def read_accounts(filepath):
+    """Read all account records from ACCOUNTS.DAT."""
+    accounts = []
+    with open(filepath, 'rb') as f:
+        while True:
+            record = f.read(ACCOUNT_RECORD_SIZE)
+            if len(record) < ACCOUNT_RECORD_SIZE:
+                break
+            account_id = record[0:4].decode('ascii')
+            account_name = record[4:24].decode('ascii')
+            balance = record[24:34].decode('ascii')
+            accounts.append({
+                'id': account_id,
+                'name': account_name,
+                'balance': balance,
+                'record': record
+            })
+    return accounts
+
+
+def read_books(filepath):
+    """Read all book records from BOOKS.DAT."""
+    books = []
+    with open(filepath, 'rb') as f:
+        while True:
+            record = f.read(BOOK_RECORD_SIZE)
+            if len(record) < BOOK_RECORD_SIZE:
+                break
+            book_id = record[0:4].decode('ascii')
+            title = record[4:24].decode('ascii')
+            owner = record[24:28].decode('ascii')
+            books.append({
+                'id': book_id,
+                'title': title,
+                'owner': owner,
+                'record': record
+            })
+    return books
+
+
+def read_transactions(filepath):
+    """Read all transaction records from TRANSACTIONS.DAT."""
+    transactions = []
+    if not os.path.exists(filepath):
+        return transactions
+    with open(filepath, 'rb') as f:
+        while True:
+            record = f.read(TRANSACTION_RECORD_SIZE)
+            if len(record) < TRANSACTION_RECORD_SIZE:
+                break
+            trans_book = record[0:4].decode('ascii')
+            trans_amount = record[4:14].decode('ascii')
+            trans_seller = record[14:18].decode('ascii')
+            trans_buyer = record[18:22].decode('ascii')
+            transactions.append({
+                'book': trans_book,
+                'amount': trans_amount,
+                'seller': trans_seller,
+                'buyer': trans_buyer,
+                'record': record
+            })
+    return transactions
+
+
+def write_accounts(filepath, accounts):
+    """Write all account records to ACCOUNTS.DAT."""
+    with open(filepath, 'wb') as f:
+        for acc in accounts:
+            record = acc['id'].encode('ascii') + acc['name'].encode('ascii') + acc['balance'].encode('ascii')
+            f.write(record)
+
+
+def write_books(filepath, books):
+    """Write all book records to BOOKS.DAT."""
+    with open(filepath, 'wb') as f:
+        for book in books:
+            record = book['id'].encode('ascii') + book['title'].encode('ascii') + book['owner'].encode('ascii')
+            f.write(record)
+
+
+def append_transaction(filepath, trans):
+    """Append a transaction record to TRANSACTIONS.DAT."""
+    record = (trans['book'].encode('ascii') + 
+              trans['amount'].encode('ascii') + 
+              trans['seller'].encode('ascii') + 
+              trans['buyer'].encode('ascii'))
+    with open(filepath, 'ab') as f:
+        f.write(record)
+
+
+def main():
+    # File paths (relative to /app directory)
+    input_file = 'src/INPUT.DAT'
+    accounts_file = 'data/ACCOUNTS.DAT'
+    books_file = 'data/BOOKS.DAT'
+    transactions_file = 'data/TRANSACTIONS.DAT'
+    
+    # Read input
+    buyer_id, seller_id, book_id, amount = read_input_file(input_file)
+    
+    # Validate users and book
+    # Read accounts
+    accounts = read_accounts(accounts_file)
+    
+    buyer_found = False
+    seller_found = False
+    
+    for acc in accounts:
+        if acc['id'] == buyer_id:
+            buyer_found = True
+        if acc['id'] == seller_id:
+            seller_found = True
+    
+    # Read books
+    books = read_books(books_file)
+    
+    book_found = False
+    valid_owner = False
+    
+    for book in books:
+        if book['id'] == book_id:
+            book_found = True
+            if book['owner'] == seller_id:
+                valid_owner = True
+    
+    # Process transaction if all validations pass
+    if buyer_found and seller_found and book_found and valid_owner:
+        # Update accounts - subtract from buyer, add to seller
+        for acc in accounts:
+            if acc['id'] == buyer_id:
+                # Subtract amount (integer arithmetic for COBOL 9(10)V99)
+                # WS-AMOUNT is 9(10)V99, amount string is 10 chars
+                # We need to handle it as COBOL would - the amount in input 
+                # is 9(10), but WS-AMOUNT is 9(10)V99
+                # When we read INPUT-AMOUNT into WS-AMOUNT, COBOL aligns left
+                # So "200" becomes "000000020000" in the V99 field
+                # Actually, INPUT-AMOUNT is 9(10) and WS-AMOUNT is 9(10)V99
+                # COBOL moves left-to-right for numeric moves
+                # So input "0000000200" -> WS-AMOUNT "000000020000" (with V99 = 00)
+                
+                # The input amount from file may be partial (like "200")
+                # It gets padded to 10 chars "2000000000" when read
+                # Wait, the issue is in the input file content
+                
+                # Based on hex dump: 55 30 30 31 55 30 30 32 42 30 30 37 32 30 30
+                # That's: U001 U002 B007 200 (15 bytes total, amount is "200")
+                
+                # When COBOL reads an 18-byte record from a 15-byte file,
+                # it will only get what's there. The amount field gets partial data.
+                # Let's trace this more carefully...
+                
+                # INPUT-RECORD is 18 bytes total
+                # INPUT-BUYER-ID: 4 bytes
+                # INPUT-SELLER-ID: 4 bytes
+                # INPUT-BOOK-ID: 4 bytes
+                # INPUT-AMOUNT: 10 bytes
+                
+                # When we read "U001U002B007200" (15 bytes), we get:
+                # INPUT-BUYER-ID = "U001"
+                # INPUT-SELLER-ID = "U002"
+                # INPUT-BOOK-ID = "B007"
+                # INPUT-AMOUNT = "200" (only 3 bytes, rest is padding or undefined)
+                
+                # But the COBOL file read behavior with sequential files
+                # when record size doesn't match may vary...
+                
+                # For now, let's use the amount string directly with proper padding
+                amount_val = int(amount)  # The 10-digit amount field
+                
+                balance_val = int(acc['balance'])
+                new_balance = balance_val - amount_val
+                acc['balance'] = f'{new_balance:010d}'
+                
+            if acc['id'] == seller_id:
+                amount_val = int(amount)
+                balance_val = int(acc['balance'])
+                new_balance = balance_val + amount_val
+                acc['balance'] = f'{new_balance:010d}'
+        
+        # Write updated accounts
+        write_accounts(accounts_file, accounts)
+        
+        # Update book owner
+        for book in books:
+            if book['id'] == book_id:
+                book['owner'] = buyer_id
+        
+        # Write updated books
+        write_books(books_file, books)
+        
+        # Add transaction record
+        new_trans = {
+            'book': book_id,
+            'amount': amount,
+            'seller': seller_id,
+            'buyer': buyer_id
+        }
+        append_transaction(transactions_file, new_trans)
+        
+        print("Transaction completed successfully.")
+    else:
+        print("Transaction failed due to validation errors")
+
+
+if __name__ == '__main__':
+    main()
+EOF
+cat program.py
+$ cd /app && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running Python script ===" && python3 program.py && echo "=== Data files after Python ===" && cat data/ACCOUNTS.DAT && echo "---" && cat data/BOOKS.DAT && echo "---" && cat data/TRANSACTIONS.DAT
+$ cd /app && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running COBOL program ===" && ./program && echo "=== Saving COBOL output ===" && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && cp data/BOOKS.DAT data/BOOKS.DAT.cobol && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running Python script ===" && python3 program.py && echo "=== Comparing results ===" && diff data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && diff data/BOOKS.DAT data/BOOKS.DAT.cobol && diff data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && echo "All files match!"
+$ cd /app && ls -la data/*.initial && echo "=== Testing with valid input: Buyer U001, Seller U002, Book B001 ===" && echo -n "U001U002B0010000000100" > /tmp/test_input.dat && cat /tmp/test_input.dat && echo ""
+$ cd /app && echo -n "U001U002B0010000000100" > src/INPUT.DAT && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running COBOL program ===" && ./program && echo "=== Saving COBOL output ===" && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && cp data/BOOKS.DAT data/BOOKS.DAT.cobol && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running Python script ===" && python3 program.py && echo "=== Comparing results ===" && diff data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && diff data/BOOKS.DAT data/BOOKS.DAT.cobol && diff data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && echo "All files match!" && echo "=== ACCOUNTS.DAT content ===" && od -c data/ACCOUNTS.DAT && echo "=== BOOKS.DAT content ===" && od -c data/BOOKS.DAT && echo "=== TRANSACTIONS.DAT content ===" && od -c data/TRANSACTIONS.DAT
+$ cd /app && echo -n "U001U002B007200" > src/INPUT.DAT && od -c src/INPUT.DAT && echo "=== Restoring initial data files ===" && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Final test with original INPUT.DAT ===" && echo "=== Running COBOL ===" && ./program && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && cp data/BOOKS.DAT data/BOOKS.DAT.cobol && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && echo "=== Running Python ===" && python3 program.py && echo "=== Comparing ===" && diff data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && diff data/BOOKS.DAT data/BOOKS.DAT.cobol && diff data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && echo "All files match!"
+$ cd /app && echo "=== Test with book B002 (owned by U002) sold to U003 for 50 ===" && echo -n "U003U002B0020000000050" > src/INPUT.DAT && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && ./program && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && cp data/BOOKS.DAT data/BOOKS.DAT.cobol && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && python3 program.py && echo "=== Comparing ===" && diff data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && diff data/BOOKS.DAT data/BOOKS.DAT.cobol && diff data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && echo "All files match!"
+$ cd /app && echo -n "U001U002B007200" > src/INPUT.DAT && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT && cp data/BOOKS.DAT.initial data/BOOKS.DAT && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT && rm -f data/*.initial data/*.cobol data/*.bak && ls -la data/ && ls -la src/ && ls -la program.py
+$ cd /app && echo "=== Final verification: Running both programs with original INPUT.DAT ===" && cat src/INPUT.DAT && echo " <== INPUT.DAT content" && echo "=== Running COBOL ===" && ./program && cp data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && cp data/BOOKS.DAT data/BOOKS.DAT.cobol && cp data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && cp data/ACCOUNTS.DAT.initial data/ACCOUNTS.DAT 2>/dev/null || true && cp data/BOOKS.DAT.initial data/BOOKS.DAT 2>/dev/null || true && cp data/TRANSACTIONS.DAT.initial data/TRANSACTIONS.DAT 2>/dev/null || true && echo "=== Running Python ===" && python3 program.py && echo "=== Comparing all files ===" && diff data/ACCOUNTS.DAT data/ACCOUNTS.DAT.cobol && echo "ACCOUNTS.DAT: match" && diff data/BOOKS.DAT data/BOOKS.DAT.cobol && echo "BOOKS.DAT: match" && diff data/TRANSACTIONS.DAT data/TRANSACTIONS.DAT.cobol && echo "TRANSACTIONS.DAT: match" && rm -f data/*.cobol && echo "=== SUCCESS: Python implementation matches COBOL output ==="
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The Python implementation is complete and verified. Let me provide a final summary.
+
+**Summary:**
+
+I have successfully created `/app/program.py` that re-implements the COBOL program `program.cbl`. The Python script:
+
+1. **Reads INPUT.DAT**: Parses buyer ID (4 bytes), seller ID (4 bytes), book ID (4 bytes), and amount (10 bytes)
+2. **Validates users**: Checks if buyer and seller exist in ACCOUNTS.DAT
+3. **Validates book**: Checks if book exists in BOOKS.DAT and is owned by the seller
+4. **Processes transaction**: 
+   - Deducts amount from buyer's balance
+   - Adds amount to seller's balance
+   - Updates book ownership
+   - Appends transaction record to TRANSACTIONS.DAT
+
+The implementation was tested with:
+- **Validation failure case**: Book B007 doesn't exist - both programs correctly output "Transaction failed due to validation errors"
+- **Successful transaction cases**: Book B001 and B002 transfers - both programs produce identical file outputs
+
+All tests confirmed that the Python script produces identical output to the COBOL program.

@@ -1,0 +1,93 @@
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..fd334968 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,9 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* Normalize paths before applying ``ignore-paths`` so anchored patterns work during
++  recursive linting, including on Windows when paths contain mixed separators.
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..6ff8e929 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -52,6 +52,9 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
++    # Recursive discovery can return paths with mixed separators on Windows or
++    # with a leading './'. Match the same path regardless of how it was supplied.
++    element = os.path.normpath(element)
+     basename = os.path.basename(element)
+     return (
+         basename in ignore_list
+@@ -140,9 +143,9 @@ def expand_modules(
+             ):
+                 if filepath == subfilepath:
+                     continue
+-                if _is_in_ignore_list_re(
+-                    os.path.basename(subfilepath), ignore_list_re
+-                ) or _is_in_ignore_list_re(subfilepath, ignore_list_paths_re):
++                if _is_ignored_file(
++                    subfilepath, ignore_list, ignore_list_re, ignore_list_paths_re
++                ):
+                     continue
+ 
+                 modpath = _modpath_from_file(
+diff --git a/tests/test_self.py b/tests/test_self.py
+index c18a04ae..5bde9e10 100755
+--- a/tests/test_self.py
++++ b/tests/test_self.py
+@@ -1314,6 +1314,47 @@ class TestRunTC:
+             code=0,
+         )
+ 
++    @pytest.mark.parametrize(
++        "source_dir,is_package", [("src/", False), ("./src/", False), ("./src/", True)]
++    )
++    def test_recursive_ignore_paths_from_pyproject(
++        self,
++        source_dir: str,
++        is_package: bool,
++        tmp_path: Path,
++        monkeypatch: pytest.MonkeyPatch,
++    ) -> None:
++        """Match anchored ignore-paths patterns against normalized relative paths."""
++        (tmp_path / "pyproject.toml").write_text(
++            '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n',
++            encoding="utf-8",
++        )
++        generated = tmp_path / "src" / "gen"
++        generated.mkdir(parents=True)
++        if is_package:
++            (generated.parent / "__init__.py").touch()
++            (generated / "__init__.py").touch()
++        (generated / "ignored.py").write_text("missing_name()\n", encoding="utf-8")
++        (generated.parent / "checked.py").write_text(
++            "missing_name()\n", encoding="utf-8"
++        )
++        monkeypatch.chdir(tmp_path)
++        out = StringIO()
++        self._runtest(
++            [
++                "--rcfile=pyproject.toml",
++                "--recursive=y",
++                "--disable=all",
++                "--enable=undefined-variable",
++                source_dir,
++            ],
++            reporter=JSONReporter(out),
++            code=2,
++        )
++        assert [Path(message["path"]).name for message in json.loads(out.getvalue())] == [
++            "checked.py"
++        ]
++
+     def test_recursive_current_dir(self):
+         with _test_sys_path():
+             # pytest is including directory HERE/regrtest_data to sys.path which causes

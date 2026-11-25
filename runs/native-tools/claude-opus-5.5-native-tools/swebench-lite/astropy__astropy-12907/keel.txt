@@ -1,0 +1,29 @@
+$ grep -n "= 1$" astropy/modeling/separable.py; grep -n "def _cstack" -A 35 astropy/modeling/separable.py | tail -12
+$ sed -i '245s/= 1$/= right/' astropy/modeling/separable.py && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+cm = m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(m.Pix2Sky_TAN() & cm))
+print(separability_matrix(cm & m.Pix2Sky_TAN()))"; python -m pytest -q astropy/modeling/tests/test_separable.py 2>&1 | tail -2
+$ cd astropy/modeling/tests && cat >> test_separable.py <<'EOF'
+
+
+def test_nested_compound_model_separability():
+    cm = models.Linear1D(10) & models.Linear1D(5)
+    expected = np.array([[True, True, False, False],
+                         [True, True, False, False],
+                         [False, False, True, False],
+                         [False, False, False, True]])
+    assert_allclose(separability_matrix(models.Pix2Sky_TAN() & cm), expected)
+    assert_allclose(separability_matrix(models.Pix2Sky_TAN() & models.Linear1D(10)
+                                        & models.Linear1D(5)), expected)
+EOF
+grep -n "^from\|^import" test_separable.py; cd ../../.. && python -m pytest -q astropy/modeling/tests/test_separable.py 2>&1 | tail -2
+`separability_matrix` now gives the right answer for nested compound models, and all 12 tests in `astropy/modeling/tests/test_separable.py` pass.
+
+- **Cause:** `_cstack` in `astropy/modeling/separable.py` handles the `&` operator. When the right-hand side was a nested compound model, it filled that model's block with all `1`s. That threw away the inner separability, so `Linear1D & Linear1D` came out fully coupled.
+- **Fix:** one line, so the block now takes the right side's actual matrix:
+  ```python
+  cright[-right.shape[0]:, -right.shape[1]:] = right
+  ```
+- **Test:** I added `test_nested_compound_model_separability`. It checks that `Pix2Sky_TAN() & (Linear1D & Linear1D)` gives the same matrix as the flat version: a coupled 2×2 block for `Pix2Sky_TAN`, then two independent diagonal entries for the linear models. I also ran the reversed nesting by hand and it gave the correct matrix, but that case isn't in the test.

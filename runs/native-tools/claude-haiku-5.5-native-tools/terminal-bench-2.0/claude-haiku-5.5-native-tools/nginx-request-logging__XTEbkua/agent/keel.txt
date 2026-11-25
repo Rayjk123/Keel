@@ -1,0 +1,66 @@
+$ cat /etc/os-release | head -2; whoami; which nginx; nginx -v 2>&1; ls /etc/nginx 2>/dev/null; ls /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null; cat /etc/nginx/nginx.conf 2>/dev/null
+$ export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq nginx >/tmp/apt.log 2>&1; echo "exit $?"; nginx -v 2>&1; ls /etc/nginx; ls /etc/nginx/sites-enabled; cat /etc/nginx/nginx.conf
+$ set -e
+mkdir -p /var/www/html
+echo -n "Welcome to the benchmark webserver" > /var/www/html/index.html
+echo -n "Page not found - Please check your URL" > /var/www/html/404.html
+
+python3 - <<'EOF'
+p='/etc/nginx/nginx.conf'
+s=open(p).read()
+add='''	# Benchmark rate limiting: 10 r/s per client IP, 10MB zone
+	limit_req_zone $binary_remote_addr zone=benchmark_limit:10m rate=10r/s;
+
+	# Benchmark detailed log format
+	log_format benchmark '$remote_addr - $remote_user [$time_local] "$request_method $request_uri $server_protocol" '
+	                     '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+
+	include /etc/nginx/conf.d/*.conf;'''
+assert 'benchmark_limit' not in s
+s=s.replace('\tinclude /etc/nginx/conf.d/*.conf;',add,1)
+open(p,'w').write(s)
+EOF
+
+cat > /etc/nginx/conf.d/benchmark-site.conf <<'EOF'
+server {
+    listen 8080;
+    server_name localhost;
+
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+    error_log  /var/log/nginx/benchmark-error.log warn;
+
+    limit_req zone=benchmark_limit burst=10;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+}
+EOF
+
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl restart nginx 2>/dev/null || service nginx restart || nginx
+sleep 1
+echo "--- index:"; curl -s http://localhost:8080/; echo
+echo "--- 404:"; curl -s -w " [%{http_code}]" http://localhost:8080/nope; echo
+echo "--- log:"; tail -n 2 /var/log/nginx/benchmark-access.log
+The Nginx setup is complete and running on localhost:8080. The config test passed, and the index page and custom 404 both responded correctly.
+
+- **Install:** Nginx 1.22.1 from Debian's packages.
+- **Server config:** `/etc/nginx/conf.d/benchmark-site.conf` listens on 8080 and serves `/var/www/html`. It logs to `/var/log/nginx/benchmark-access.log` and `/var/log/nginx/benchmark-error.log`, and sends missing pages to `/404.html`.
+- **Rate limiting:** `/etc/nginx/nginx.conf` defines the 10MB `benchmark_limit` zone at 10 requests/s per IP. The server block applies it with `burst=10`.
+- **Log format:** I added a `benchmark` format to `nginx.conf` because none existed. It logs `$time_local`, `$request_method`, `$status`, and the quoted `$http_user_agent`, along with the client IP, request line, body size and referer.
+- **Content:** `index.html` and `404.html` in `/var/www/html` have the requested text.
+- **Default site:** `/etc/nginx/sites-enabled/default` has been removed.
+
+Access log location for debugging: `/var/log/nginx/benchmark-access.log`
+
+The global `access_log` in `nginx.conf` still points to `access.log`. Requests to port 8080 are written only to the benchmark log.

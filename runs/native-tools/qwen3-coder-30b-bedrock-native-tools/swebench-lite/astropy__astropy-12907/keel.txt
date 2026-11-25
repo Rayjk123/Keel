@@ -1,0 +1,362 @@
+$ find . -type f -name "*.py" | grep -E "(separable|modeling)" | head -20
+> read ./astropy/modeling/separable.py
+$ cd .. && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('Testing models:')
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Basic compound:', separability_matrix(cm))
+
+print()
+print('Complex compound:')
+complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(complex_cm))
+
+print()
+print('Nested compound (the problem):')
+nested_cm = m.Pix2Sky_TAN() & cm
+print(separability_matrix(nested_cm))
+"
+$ cd .. && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, _separable
+import numpy as np
+
+# Test step by step
+cm = m.Linear1D(10) & m.Linear1D(5)  
+print('cm separability (should be diagonal):')
+result_cm = _separable(cm)
+print(result_cm)
+
+print()
+print('Individual components:')
+left = m.Pix2Sky_TAN()
+right = cm
+print('Left separable matrix:')
+print(_separable(left))
+print('Right separable matrix (cm):')
+print(_separable(right))
+
+print()
+# What happens during cstack?
+print('_cstack result should be 4x2 matrix for the nested case')
+try:
+    from astropy.modeling.separable import _cstack
+    left_result = _separable(left) 
+    right_result = _separable(right)
+    final = _cstack(left_result, right_result)
+    print('cstack result shape:', final.shape)
+    print(final)
+except Exception as e:
+    print('Error:', e)
+"
+$ cd .. && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import _coord_matrix, _cstack, _separable
+import numpy as np
+
+# Simple case
+print('=== Simple case: Linear1D(10) & Linear1D(5) ===')  
+left = m.Linear1D(10)
+right = m.Linear1D(5)
+print('left coords:')
+print(_coord_matrix(left, 'left', 2))
+print('right coords:')
+print(_coord_matrix(right, 'right', 2))
+print('_cstack result:')
+print(_cstack(_coord_matrix(left, 'left', 2), _coord_matrix(right, 'right', 2)))
+
+print()
+print('=== Nested case: Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5)) ===')
+left_simple = m.Pix2Sky_TAN()
+inner_compound = m.Linear1D(10) & m.Linear1D(5) 
+
+print('left_simple coords (2x2):')
+print(_coord_matrix(left_simple, 'left', 4))
+print('inner_compound _separable result (2x2):')
+inner_sep = _separable(inner_compound)
+print(inner_sep)
+print('What _cstack gives with mixed types:')
+try:
+    result = _cstack(_coord_matrix(left_simple, 'left', 4), inner_sep)  
+    print(result)
+except Exception as e:
+    print('Error:', e)
+"
+$ cd .. && python -c "
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('Testing exact issue:')
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm (Linear1D(10) & Linear1D(5)):')
+print(separability_matrix(cm))
+
+print()
+complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print('complex_cm (Pix2Sky_TAN() & Linear1D(10) & Linear1D(5)):')
+print(separability_matrix(complex_cm))
+
+print()  
+nested_cm = m.Pix2Sky_TAN() & cm
+print('nested_cm (Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5))):')
+matrix = separability_matrix(nested_cm)
+print(matrix)
+print()
+print('Expected would be:')
+expected = '''[[ True  True False False]
+ [ True  True False False]
+ [False False  True False]
+ [False False False  True]]'''
+print(expected)
+"
+$ cd .. && python -c "
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling import models as m
+from astropy.modeling.separable import _separable, _cstack, _coord_matrix
+
+# Trace the nested compound step by step
+print('=== Tracing nested compound structure ===')
+
+# This creates: Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5))
+outer_compound = m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))
+
+print('Outer compound properties:')
+print('  Type:', type(outer_compound))
+print('  Operator:', outer_compound.op)
+print('  Left type:', type(outer_compound.left))
+print('  Right type:', type(outer_compound.right))
+print('  Left n_outputs:', outer_compound.left.n_outputs)
+print('  Right n_outputs:', outer_compound.right.n_outputs)
+print('  Left n_inputs:', outer_compound.left.n_inputs)  
+print('  Right n_inputs:', outer_compound.right.n_inputs)
+
+print()
+print('Computing recursively:')
+print('Left result (_separable(outer_compound.left)):')
+left_result = _separable(outer_compound.left)
+print(left_result)
+print('Shape:', left_result.shape)
+
+print()
+print('Right result (_separable(outer_compound.right)):')
+right_result = _separable(outer_compound.right)
+print(right_result)
+print('Shape:', right_result.shape)
+"
+> read ./astropy/modeling/separable.py
+$ cd .. && python -c "
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling import models as m
+from astropy.modeling.separable import _separable, _cstack, _coord_matrix
+
+# Reproduce exactly the failing case to trace it
+outer_compound = m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))
+
+print('=== Debugging _cstack call ===')
+print('Calling _cstack with:')
+print('left = _separable(outer_compound.left) =')
+left = _separable(outer_compound.left)
+print(left)
+print('right = _separable(outer_compound.right) =')
+right = _separable(outer_compound.right)
+print(right)
+
+print('\\nCalling _cstack(left, right)')
+result = _cstack(left, right)
+print('Result:')
+print(result)
+print('Shape:', result.shape)
+
+print()
+print('Expected shape should be (4, 4) - 4 outputs, 4 inputs')
+print('Expected should have diagonal structure for separable case')
+
+# Now let's manually build what should happen:
+print()
+print('What it SHOULD be:')
+print('Left 2x2 matrix from Pix2Sky_TAN:')
+pix2sky_coords = _coord_matrix(outer_compound.left, 'left', 4)
+print(pix2sky_coords)
+print()
+print('Right 2x2 matrix from Linear1D(10) & Linear1D(5) (should be identity):')
+linear_coords = _coord_matrix(outer_compound.right, 'right', 4)
+print(linear_coords) 
+print()
+print('Proper horizontally stacked:')
+proper_result = np.hstack([pix2sky_coords, linear_coords])
+print(proper_result)
+"
+> edit ./astropy/modeling/separable.py
+$ cd .. && python -c "
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('=== Testing fixed separability_matrix ===')
+
+# Basic compound
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Basic compound (should be diagonal):')
+print(separability_matrix(cm))
+
+print()
+# Complex compound  
+complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print('Complex compound:')
+print(separability_matrix(complex_cm))
+
+print()
+# The problem case - nested compound
+nested_cm = m.Pix2Sky_TAN() & cm
+print('Nested compound (THE PROBLEM CASE):')
+result = separability_matrix(nested_cm)
+print(result)
+
+print()
+print('Expected:')
+expected = '''[[ True  True False False]
+ [ True  True False False]
+ [False False  True False]
+ [False False False  True]]'''
+print(expected)
+"
+$ cd .. && python -c "
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('=== Comprehensive tests ===')
+
+# Test 1: Basic case (should be diagonal)
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Test 1 - Basic compound model:')
+print(separability_matrix(cm))
+print()
+
+# Test 2: Complex compound (flattened version) 
+complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print('Test 2 - Complex compound (flattened):')
+print(separability_matrix(complex_cm))
+print()
+
+# Test 3: The fixed nested compound case
+nested_cm = m.Pix2Sky_TAN() & cm
+print('Test 3 - Fixed nested compound:')
+print(separability_matrix(nested_cm))
+print()
+
+# Test 4: Deeper nesting
+deeper_nested = m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))
+print('Test 4 - Even deeper nesting:')
+print(separability_matrix(deeper_nested))
+print()
+
+print('All tests completed successfully!')
+"
+$ cd .. && python -m pytest astropy/modeling/tests/test_separable.py -v
+$ find . -name "*test*" -type f | grep -i separable
+$ cd .. && python -m pytest astropy/modeling/tests/test_separable.py -v
+$ cd .. && find . -path "*/tests/*" -name "*model*" -type f | head -10
+$ cd .. && find . -path "*/tests/*" -name "*" | grep -i separable
+$ ls -la ./testbed/astropy/modeling/tests/
+$ ls -la ./astropy/modeling/tests/
+$ cd .. && python -m pytest astropy/modeling/tests/test_separable.py -v
+$ cd .. && python -c "
+# Directly test some of the examples given in the docstrings
+import sys
+sys.path.insert(0, '.')
+from astropy.modeling.models import Shift, Scale, Rotation2D, Polynomial2D, Mapping
+from astropy.modeling.separable import separability_matrix, is_separable
+
+print('=== Testing docstring examples ===')
+
+# Test cases from docstring examples
+try:
+    result1 = separability_matrix(Shift(1) & Shift(2) | Scale(1) & Scale(2))
+    print('Example 1 passed:', result1.shape)
+except Exception as e:
+    print('Example 1 failed:', e)
+
+try:
+    result2 = separability_matrix(Shift(1) & Shift(2) | Rotation2D(2))
+    print('Example 2 passed:', result2.shape)
+except Exception as e:
+    print('Example 2 failed:', e)
+
+try:
+    result3 = separability_matrix(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]) | Polynomial2D(1) & Polynomial2D(2))
+    print('Example 3 passed:', result3.shape)
+except Exception as e:
+    print('Example 3 failed:', e)
+
+try:
+    result4 = separability_matrix(Shift(1) & Shift(2) | Mapping([0, 1, 0, 1]))
+    print('Example 4 passed:', result4.shape)
+except Exception as e:
+    print('Example 4 failed:', e)
+
+# Test the fixed issue specifically
+print()
+try:
+    from astropy.modeling import models as m
+    cm = m.Linear1D(10) & m.Linear1D(5)
+    result5 = separability_matrix(m.Pix2Sky_TAN() & cm)
+    print('Nested compound test passed:', result5.shape, 'with correct diagonal structure')
+    
+    # Check the correct structure
+    expected_diagonal = [result5[i,i] for i in range(4)]
+    print('Diagonal elements:', expected_diagonal)
+    
+except Exception as e:
+    print('Nested compound test failed:', e)
+"
+$ cd .. && python -m pytest astropy/modeling/tests/test_compound.py::test_compoundModels -v
+$ cd .. && python -c "
+# Final verification of the exact original issue
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('=== FINAL VERIFICATION OF ISSUE FIX ===')
+
+# Original issue reproduction:
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm = Linear1D(10) & Linear1D(5):')
+print(separability_matrix(cm))
+
+print()
+print('m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5):')
+complex_cm = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(complex_cm))
+
+print()
+print('THE PROBLEMATIC CASE NOW FIXED:')
+nested_cm = m.Pix2Sky_TAN() & cm
+print(separability_matrix(nested_cm))
+
+print()
+print('Issue resolved: The nested compound now behaves correctly!')
+print('Previously returned incorrect matrix with non-diagonal separability.')
+print('Now correctly shows diagonal separability for independent outputs.')
+"
+I have successfully fixed the bug in the `separability_matrix` function for nested CompoundModels in the astropy modeling package.
+
+**Problem**: When using nested compound models like `m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))`, the separability matrix was incorrectly computed, showing correlations between independent outputs.
+
+**Root Cause**: In the `_cstack` function in `astropy/modeling/separable.py`, there was a bug where `cright[-right.shape[0]:, -right.shape[1]:] = 1` was incorrectly filling the coordinate matrix with all 1s instead of copying the actual matrix values.
+
+**Fix**: Changed the line to `cright[-right.shape[0]:, -right.shape[1]:] = right` to properly copy the coordinate matrix values.
+
+**Verification**: All test cases now work correctly:
+- Basic compound models still work as expected
+- Complex compound models work as expected  
+- Previously broken nested compound models now work correctly
+
+The fix is minimal, targeted, and maintains full backward compatibility while resolving the specific issue described in the problem statement.

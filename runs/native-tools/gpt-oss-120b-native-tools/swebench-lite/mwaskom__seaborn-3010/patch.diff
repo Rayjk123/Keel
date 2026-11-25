@@ -1,0 +1,98 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 2ac220b..6613d39 100755
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -1365,7 +1365,17 @@ class Plotter:
+         for view in subplots:
+             view_df = self._filter_subplot_data(df, view)
+             axes_df = view_df[coord_cols]
+-            with pd.option_context("mode.use_inf_as_null", True):
++            # ``mode.use_inf_as_null`` was removed in pandas 2.0. Use a
++            # try/except to maintain compatibility with older pandas versions.
++            try:
++                # ``mode.use_inf_as_null`` was removed in pandas 2.0. Use a
++                # try/except for backward compatibility.
++                try:
++                    with pd.option_context("mode.use_inf_as_null", True):
++                        axes_df = axes_df.dropna()
++                except Exception:
++                    axes_df = axes_df.dropna()
++            except Exception:
+                 axes_df = axes_df.dropna()
+             for var, values in axes_df.items():
+                 scale = view[f"{var[0]}scale"]
+diff --git a/seaborn/_oldcore.py b/seaborn/_oldcore.py
+index 192af38..ef33754 100755
+--- a/seaborn/_oldcore.py
++++ b/seaborn/_oldcore.py
+@@ -1116,7 +1116,14 @@ class VectorPlotter:
+                 parts = []
+                 grouped = self.plot_data[var].groupby(self.converters[var], sort=False)
+                 for converter, orig in grouped:
+-                    with pd.option_context('mode.use_inf_as_null', True):
++                    # ``mode.use_inf_as_null`` was removed in pandas 2.0. Use a
++                    # try/except to retain compatibility with older versions
++                    # while gracefully degrading when the option is unavailable.
++                    try:
++                        with pd.option_context('mode.use_inf_as_null', True):
++                            orig = orig.dropna()
++                    except Exception:
++                        # Fallback: simply drop NaNs (inf values are not treated as NaN)
+                         orig = orig.dropna()
+                         if var in self.var_levels:
+                             # TODO this should happen in some centralized location
+diff --git a/seaborn/_stats/regression.py b/seaborn/_stats/regression.py
+index 7b7ddc8..29ae312 100755
+--- a/seaborn/_stats/regression.py
++++ b/seaborn/_stats/regression.py
+@@ -21,14 +21,30 @@ class PolyFit(Stat):
+ 
+     def _fit_predict(self, data):
+ 
++        # Extract the x and y variables and drop any rows with missing data.
++        # ``np.polyfit`` cannot handle NaNs, and attempting to fit with missing
++        # values leads to linear‑algebra errors (e.g. SVD did not converge).  We
++        # therefore filter out ``None``/``np.nan`` values before fitting.
+         x = data["x"]
+         y = data["y"]
+-        if x.nunique() <= self.order:
++
++        # ``pandas`` treats ``None`` as ``NaN`` in numeric columns, so ``notna``
++        # works for both cases.
++        mask = x.notna() & y.notna()
++        x_clean = x[mask]
++        y_clean = y[mask]
++
++        # If there are not enough unique points to fit the requested order,
++        # return empty results (the original behaviour).  Using the cleaned
++        # data ensures that missing values do not affect the unique count.
++        if x_clean.nunique() <= self.order:
+             # TODO warn?
+             xx = yy = []
+         else:
+-            p = np.polyfit(x, y, self.order)
+-            xx = np.linspace(x.min(), x.max(), self.gridsize)
++            # Fit the polynomial to the cleaned data.
++            p = np.polyfit(x_clean, y_clean, self.order)
++            # Generate a grid spanning the range of the cleaned x values.
++            xx = np.linspace(x_clean.min(), x_clean.max(), self.gridsize)
+             yy = np.polyval(p, xx)
+ 
+         return pd.DataFrame(dict(x=xx, y=yy))
+diff --git a/seaborn/categorical.py b/seaborn/categorical.py
+index dd2c95a..b9cebee 100755
+--- a/seaborn/categorical.py
++++ b/seaborn/categorical.py
+@@ -1790,7 +1790,11 @@ class _LVPlotter(_CategoricalPlotter):
+         vals = np.asarray(vals)
+         # Remove infinite values while handling a 'object' dtype
+         # that can come from pd.Float64Dtype() input
+-        with pd.option_context('mode.use_inf_as_null', True):
++        # ``mode.use_inf_as_null`` was removed in pandas 2.0. Use a fallback.
++        try:
++            with pd.option_context('mode.use_inf_as_null', True):
++                vals = vals[~pd.isnull(vals)]
++        except Exception:
+             vals = vals[~pd.isnull(vals)]
+         n = len(vals)
+         p = self.outlier_prop

@@ -1,0 +1,425 @@
+$ cat /app/src/program.cbl
+$ ls -la /app/data/ && xxd /app/src/INPUT.DAT
+$ od -c /app/src/INPUT.DAT && echo "---ACCOUNTS---" && od -c /app/data/ACCOUNTS.DAT && echo "---BOOKS---" && od -c /app/data/BOOKS.DAT && echo "---TRANSACTIONS---" && od -c /app/data/TRANSACTIONS.DAT
+$ python3 -c "
+import struct
+with open('/app/src/INPUT.DAT', 'rb') as f:
+    data = f.read()
+    print(f'Total bytes: {len(data)}')
+    print(f'Hex: {data.hex()}')
+    print(f'Bytes repr: {repr(data)}')
+"
+$ python3 -c "
+import struct
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+    print(f'Total bytes: {len(data)}')
+    # Each record is 4 + 26 + 10 = 40? Let me check
+    print(f'Hex: {data.hex()}')
+"
+$ python3 -c "
+import struct
+with open('/app/data/BOOKS.DAT', 'rb') as f:
+    data = f.read()
+    print(f'Total bytes: {len(data)}')
+    print(f'Hex: {data.hex()}')
+    # Each record should be 4 + 20 + 4 = 28 bytes
+    print(f'Books (84/28 = {84//28} records)')
+"
+$ python3 -c "
+with open('/app/data/TRANSACTIONS.DAT', 'rb') as f:
+    data = f.read()
+    print(f'Total bytes: {len(data)}')
+    print(f'Hex: {data.hex()}')
+    # COBOL: TRANS-BOOK PIC X(4) + TRANS-AMOUNT PIC 9(10) + TRANS-SELLER PIC X(4) + TRANS-BUYER PIC X(4)
+    # = 4 + 10 + 4 + 4 = 22 bytes
+    # But might be padded to 28?
+    print(f'Records (22 bytes each): {len(data)//22}')
+    print(f'Records (28 bytes each): {len(data)//28}')
+"
+$ cd /app && cobc -x src/program.cbl -o src/program && ./src/program && echo "---ACCOUNTS after---" && od -c /app/data/ACCOUNTS.DAT && echo "---BOOKS after---" && od -c /app/data/BOOKS.DAT && echo "---TRANSACTIONS after---" && od -c /app/data/TRANSACTIONS.DAT
+$ cat > /app/program.py << 'EOF'
+#!/usr/bin/env python3
+
+import os
+
+def read_input(filename="/app/src/INPUT.DAT"):
+    """Read input transaction from INPUT.DAT"""
+    with open(filename, 'rb') as f:
+        data = f.read()
+    
+    # COBOL reads PIC X(4), PIC X(4), PIC X(4), PIC 9(10)
+    # But INPUT.DAT might be shorter, so we need to handle fixed width reading
+    buyer_id = data[0:4].decode('ascii')
+    seller_id = data[4:8].decode('ascii')
+    book_id = data[8:12].decode('ascii')
+    
+    # Amount is PIC 9(10) - 10 digits
+    # If file is shorter, read what's available and pad to 10 digits
+    amount_str = data[12:22].decode('ascii') if len(data) >= 22 else data[12:].decode('ascii').ljust(10, '0')[:10]
+    amount = int(amount_str)
+    
+    return buyer_id, seller_id, book_id, amount
+
+def read_accounts(filename="/app/data/ACCOUNTS.DAT"):
+    """Read accounts from ACCOUNTS.DAT"""
+    # Each record: 4 (ID) + 20 (Name) + 10 (Balance) = 34 bytes
+    accounts = []
+    with open(filename, 'rb') as f:
+        data = f.read()
+    
+    record_size = 34
+    for i in range(0, len(data), record_size):
+        record = data[i:i+record_size]
+        if len(record) < record_size:
+            break
+        
+        account_id = record[0:4].decode('ascii')
+        account_name = record[4:24].decode('ascii').rstrip()
+        balance = int(record[24:34].decode('ascii'))
+        
+        accounts.append({
+            'id': account_id,
+            'name': account_name,
+            'balance': balance
+        })
+    
+    return accounts
+
+def write_accounts(accounts, filename="/app/data/ACCOUNTS.DAT"):
+    """Write accounts to ACCOUNTS.DAT"""
+    # Each record: 4 (ID) + 20 (Name) + 10 (Balance) = 34 bytes
+    with open(filename, 'wb') as f:
+        for acc in accounts:
+            record = acc['id'].encode('ascii')  # 4 bytes
+            record += acc['name'].ljust(20)[:20].encode('ascii')  # 20 bytes
+            record += str(acc['balance']).zfill(10).encode('ascii')  # 10 bytes
+            f.write(record)
+
+def read_books(filename="/app/data/BOOKS.DAT"):
+    """Read books from BOOKS.DAT"""
+    # Each record: 4 (ID) + 20 (Title) + 4 (Owner) = 28 bytes
+    books = []
+    with open(filename, 'rb') as f:
+        data = f.read()
+    
+    record_size = 28
+    for i in range(0, len(data), record_size):
+        record = data[i:i+record_size]
+        if len(record) < record_size:
+            break
+        
+        book_id = record[0:4].decode('ascii')
+        title = record[4:24].decode('ascii').rstrip()
+        owner = record[24:28].decode('ascii')
+        
+        books.append({
+            'id': book_id,
+            'title': title,
+            'owner': owner
+        })
+    
+    return books
+
+def write_books(books, filename="/app/data/BOOKS.DAT"):
+    """Write books to BOOKS.DAT"""
+    # Each record: 4 (ID) + 20 (Title) + 4 (Owner) = 28 bytes
+    with open(filename, 'wb') as f:
+        for book in books:
+            record = book['id'].encode('ascii')  # 4 bytes
+            record += book['title'].ljust(20)[:20].encode('ascii')  # 20 bytes
+            record += book['owner'].encode('ascii')  # 4 bytes
+            f.write(record)
+
+def read_transactions(filename="/app/data/TRANSACTIONS.DAT"):
+    """Read transactions from TRANSACTIONS.DAT"""
+    # Each record: 4 (Book) + 10 (Amount) + 4 (Seller) + 4 (Buyer) = 22 bytes
+    transactions = []
+    try:
+        with open(filename, 'rb') as f:
+            data = f.read()
+    except FileNotFoundError:
+        return []
+    
+    record_size = 22
+    for i in range(0, len(data), record_size):
+        record = data[i:i+record_size]
+        if len(record) < record_size:
+            break
+        
+        trans_book = record[0:4].decode('ascii')
+        amount = int(record[4:14].decode('ascii'))
+        seller = record[14:18].decode('ascii')
+        buyer = record[18:22].decode('ascii')
+        
+        transactions.append({
+            'book': trans_book,
+            'amount': amount,
+            'seller': seller,
+            'buyer': buyer
+        })
+    
+    return transactions
+
+def append_transaction(trans, filename="/app/data/TRANSACTIONS.DAT"):
+    """Append a transaction to TRANSACTIONS.DAT"""
+    # Each record: 4 (Book) + 10 (Amount) + 4 (Seller) + 4 (Buyer) = 22 bytes
+    with open(filename, 'ab') as f:
+        record = trans['book'].encode('ascii')  # 4 bytes
+        record += str(trans['amount']).zfill(10).encode('ascii')  # 10 bytes
+        record += trans['seller'].encode('ascii')  # 4 bytes
+        record += trans['buyer'].encode('ascii')  # 4 bytes
+        f.write(record)
+
+def validate_users_and_book(buyer_id, seller_id, book_id, accounts, books):
+    """Validate that buyer, seller, and book exist, and seller owns the book"""
+    buyer_found = False
+    seller_found = False
+    book_found = False
+    valid_owner = False
+    
+    # Validate buyers and sellers
+    for acc in accounts:
+        if acc['id'] == buyer_id:
+            buyer_found = True
+        if acc['id'] == seller_id:
+            seller_found = True
+    
+    # Validate book and owner
+    for book in books:
+        if book['id'] == book_id:
+            book_found = True
+            if book['owner'] == seller_id:
+                valid_owner = True
+    
+    print()  # Match COBOL DISPLAY " "
+    
+    return buyer_found, seller_found, book_found, valid_owner
+
+def process_transaction(buyer_id, seller_id, book_id, amount, accounts, books):
+    """Process the transaction by updating balances, transferring ownership, and logging"""
+    
+    # Update account balances
+    for acc in accounts:
+        if acc['id'] == buyer_id:
+            acc['balance'] -= amount
+        if acc['id'] == seller_id:
+            acc['balance'] += amount
+    
+    # Update book owner
+    for book in books:
+        if book['id'] == book_id:
+            book['owner'] = buyer_id
+    
+    return accounts, books
+
+def main():
+    # Read input
+    buyer_id, seller_id, book_id, amount = read_input()
+    
+    # Read accounts and books
+    accounts = read_accounts()
+    books = read_books()
+    
+    # Validate
+    buyer_found, seller_found, book_found, valid_owner = validate_users_and_book(
+        buyer_id, seller_id, book_id, accounts, books)
+    
+    if buyer_found and seller_found and book_found and valid_owner:
+        # Process transaction
+        accounts, books = process_transaction(buyer_id, seller_id, book_id, amount, accounts, books)
+        
+        # Write updated data
+        write_accounts(accounts)
+        write_books(books)
+        
+        # Append transaction record
+        trans = {
+            'book': book_id,
+            'amount': amount,
+            'seller': seller_id,
+            'buyer': buyer_id
+        }
+        append_transaction(trans)
+        
+        print("Transaction completed successfully")
+    else:
+        print("Transaction failed due to validation errors")
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod +x /app/program.py
+$ cd /app && mkdir -p /tmp/test_data && cp /app/data/*.DAT /tmp/test_data/ && cp /app/src/INPUT.DAT /tmp/test_input.DAT
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && echo "EXIT CODE: $?"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 program.py && echo "EXIT CODE: $?"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && cp /app/data/ACCOUNTS.DAT /tmp/cobol_accounts.dat && cp /app/data/BOOKS.DAT /tmp/cobol_books.dat && cp /app/data/TRANSACTIONS.DAT /tmp/cobol_transactions.dat
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 program.py && echo "-- ACCOUNTS --" && diff /app/data/ACCOUNTS.DAT /tmp/cobol_accounts.dat && echo "-- BOOKS --" && diff /app/data/BOOKS.DAT /tmp/cobol_books.dat && echo "-- TRANSACTIONS --" && diff /app/data/TRANSACTIONS.DAT /tmp/cobol_transactions.dat && echo "ALL FILES MATCH"
+$ python3 -c "
+# Create a valid transaction input
+# U001 buys B001 from U002 for 100
+buyer = b'U001'
+seller = b'U002'
+book = b'B001'
+amount = b'100'
+with open('/app/src/INPUT.DAT', 'wb') as f:
+    f.write(buyer + seller + book + amount)
+print('Created new INPUT.DAT for U001 buying B001 from U002 for 100')
+"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program && echo "-- ACCOUNTS --" && od -c /app/data/ACCOUNTS.DAT && echo "-- BOOKS --" && od -c /app/data/BOOKS.DAT && echo "-- TRANSACTIONS --" && od -c /app/data/TRANSACTIONS.DAT
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && cp /app/data/TRANSACTIONS.DAT /tmp/ && python3 program.py && echo "-- ACCOUNTS --" && od -c /app/data/ACCOUNTS.DAT && echo "-- BOOKS --" && od -c /app/data/BOOKS.DAT && echo "-- TRANSACTIONS --" && od -c /app/data/TRANSACTIONS.DAT
+$ python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('Python ACCOUNTS:')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    print(f'  Record {i//34}: ID={record[0:4]}, Name={record[4:24]}, Balance={record[24:34]}')
+"
+$ cd /app && cp /tmp/test_input.DAT /app/src/INPUT.DAT && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('COBOL ACCOUNTS after failed transaction:')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    print(f'  Record {i//34}: ID={record[0:4]}, Name={record[4:24]}, Balance={record[24:34]}')
+"
+$ python3 -c "
+# Create a valid transaction input - U001 buys B001 from U002 for 100
+buyer = b'U001'
+seller = b'U002'
+book = b'B001'
+amount = b'100'  # Just 3 chars, COBOL PIC 9(10) will read and interpret
+with open('/app/src/INPUT.DAT', 'wb') as f:
+    f.write(buyer + seller + book + amount)
+" && cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('COBOL ACCOUNTS after successful transaction:')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    print(f'  Record {i//34}: ID={record[0:4]}, Balance={record[24:34]}')
+" && cp /app/data/ACCOUNTS.DAT /tmp/cobol_acc.dat && cp /app/data/BOOKS.DAT /tmp/cobol_book.dat && cp /app/data/TRANSACTIONS.DAT /tmp/cobol_trans.dat
+$ python3 -c "
+with open('/app/src/INPUT.DAT', 'rb') as f:
+    data = f.read()
+print(f'INPUT.DAT hex: {data.hex()}')
+print(f'INPUT.DAT bytes: {data}')
+print(f'Length: {len(data)}')
+# Try to parse as COBOL would
+if len(data) >= 4:
+    buyer = data[0:4].decode('ascii')
+    print(f'Buyer: {buyer}')
+if len(data) >= 8:
+    seller = data[4:8].decode('ascii')
+    print(f'Seller: {seller}')
+if len(data) >= 12:
+    book = data[8:12].decode('ascii')
+    print(f'Book: {book}')
+if len(data) >= 12:
+    # COBOL PIC 9(10) reads 10 characters starting at position 12
+    # But input only has 15 bytes total
+    amount_raw = data[12:22]
+    print(f'Amount raw (next 10 bytes): {amount_raw}')
+    # The input file has '100' as 3 bytes
+    # COBOL might read more data or interpret it differently
+"
+$ cd /app && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print(f'Raw hex: {data.hex()}')
+print(f'Balance U001 (bytes 24-34): {data[24:34].hex()}')
+print(f'Balance U001 decoded: {data[24:34]}')
+print(f'As int: {int(data[24:34])}')
+"
+$ python3 -c "
+# Create properly formatted input with 10-digit amount padded
+buyer = b'U001'
+seller = b'U002'
+book = b'B001'
+amount = b'100'.ljust(10, b'0')  # amount as 100 = '0000000100'
+with open('/app/src/INPUT.DAT', 'wb') as f:
+    f.write(buyer + seller + book + amount)
+print(f'New INPUT.DAT length: {4+4+4+10}')
+print(f'Content hex: {(buyer + seller + book + amount).hex()}')
+" && cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('COBOL (padded amount):')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    balance = int(record[24:34])
+    print(f'  {record[0:4].decode()}: Balance={record[24:34]}, Int={balance}')
+"
+$ python3 -c "
+# Create properly formatted input with 10-digit amount - 100 padded to 10 digits
+buyer = b'U001'
+seller = b'U002'
+book = b'B001'
+amount = str(100).zfill(10).encode('ascii')  # '0000000100'
+with open('/app/src/INPUT.DAT', 'wb') as f:
+    f.write(buyer + seller + book + amount)
+print(f'INPUT.DAT: {(buyer + seller + book + amount)}')
+print(f'Length: {len(buyer + seller + book + amount)}')
+" && cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('COBOL:')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    balance = int(record[24:34])
+    print(f'  {record[0:4].decode()}: Balance={record[24:34]}, Int={balance}')
+"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 program.py && python3 -c "
+with open('/app/data/ACCOUNTS.DAT', 'rb') as f:
+    data = f.read()
+print('Python:')
+for i in range(0, len(data), 34):
+    record = data[i:i+34]
+    balance = int(record[24:34])
+    print(f'  {record[0:4].decode()}: Balance={record[24:34]}, Int={balance}')
+"
+$ python3 -c "
+with open('/app/data/BOOKS.DAT', 'rb') as f:
+    data = f.read()
+print('Python BOOKS:')
+for i in range(0, len(data), 28):
+    record = data[i:i+28]
+    print(f'  {record[0:4].decode()}: Title={record[4:24]}, Owner={record[24:28]}')
+"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && cp /app/data/ACCOUNTS.DAT /tmp/cobol_acc.dat && cp /app/data/BOOKS.DAT /tmp/cobol_books.dat && cp /app/data/TRANSACTIONS.DAT /tmp/cobol_trans.dat && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 program.py 2>&1 && echo "---Comparing files---" && diff /app/data/ACCOUNTS.DAT /tmp/cobol_acc.dat && diff /app/data/BOOKS.DAT /tmp/cobol_books.dat && diff /app/data/TRANSACTIONS.DAT /tmp/cobol_trans.dat && echo "SUCCESS: All files match!"
+$ cd /app && cp /tmp/test_input.DAT /app/src/INPUT.DAT && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && cp /app/data/ACCOUNTS.DAT /tmp/cobol_acc.dat && cp /app/data/BOOKS.DAT /tmp/cobol_books.dat && cp /app/data/TRANSACTIONS.DAT /tmp/cobol_trans.dat && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 program.py 2>&1 && diff /app/data/ACCOUNTS.DAT /tmp/cobol_acc.dat && diff /app/data/BOOKS.DAT /tmp/cobol_books.dat && diff /app/data/TRANSACTIONS.DAT /tmp/cobol_trans.dat && echo "SUCCESS: Failed transaction also matches!"
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 /app/program.py && ls -la /app/data/
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cp /app/data/$f /tmp/cobol_$f; done && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 /app/program.py 2>&1 && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do diff /app/data/$f /tmp/cobol_$f && echo "$f matches"; done
+$ python3 -c "
+# Create valid transaction: U001 buys B001 from U002 for 100
+buyer = b'U001'
+seller = b'U002'
+book = b'B001'
+amount = str(100).zfill(10).encode('ascii')
+with open('/app/src/INPUT.DAT', 'wb') as f:
+    f.write(buyer + seller + book + amount)
+" && cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && ./src/program 2>&1 && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cp /app/data/$f /tmp/cobol_$f; done && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && python3 /app/program.py 2>&1 && echo "---FILE COMPARISON---" && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do diff /app/data/$f /tmp/cobol_$f && echo "$f: IDENTICAL"; done
+$ cp /tmp/test_input.DAT /app/src/INPUT.DAT && cd /app && echo "Original INPUT.DAT restored" && cat /app/program.py | head -50
+$ cd /app && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && echo "=== COBOL RUN ===" && ./src/program && echo "COBOL exit code: $?" && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do cp /app/data/$f /tmp/cobol_$f; done && rm -f /app/data/*.DAT && cp /tmp/test_data/*.DAT /app/data/ && echo "=== PYTHON RUN ===" && python3 /app/program.py && echo "Python exit code: $?" && echo "=== FILE COMPARISON ===" && for f in ACCOUNTS.DAT BOOKS.DAT TRANSACTIONS.DAT; do if diff -q /app/data/$f /tmp/cobol_$f > /dev/null 2>&1; then echo "$f: MATCH"; else echo "$f: DIFFER"; fi; done && echo "=== FINAL STATUS ===" && diff /app/data/ACCOUNTS.DAT /tmp/cobol_ACCOUNTS.DAT && diff /app/data/BOOKS.DAT /tmp/cobol_BOOKS.DAT && diff /app/data/TRANSACTIONS.DAT /tmp/cobol_TRANSACTIONS.DAT && echo "ALL TESTS PASSED!"
+$ ls -la /app/program.py && echo "--- First 20 lines ---" && head -20 /app/program.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The Python script is in place and working correctly. Let me provide a final summary:
+
+I have successfully re-implemented the COBOL program's functionality in Python. The program:
+
+1. **Reads inputs** from `/app/src/INPUT.DAT` - parsing buyer ID, seller ID, book ID, and transaction amount
+2. **Validates** that the buyer and seller exist in ACCOUNTS.DAT, the book exists in BOOKS.DAT, and the seller owns the book
+3. **Processes the transaction** if validation passes:
+   - Subtracts amount from buyer's balance
+   - Adds amount to seller's balance
+   - Transfers book ownership from seller to buyer
+   - Appends transaction record to TRANSACTIONS.DAT
+4. **Produces identical output** - both for successful transactions and failed validations
+
+The data file formats match exactly:
+- ACCOUNTS.DAT: 34 bytes per record (4 + 20 + 10)
+- BOOKS.DAT: 28 bytes per record (4 + 20 + 4)
+- TRANSACTIONS.DAT: 22 bytes per record (4 + 10 + 4 + 4)
+
+All tests pass with identical output between COBOL and Python implementations.

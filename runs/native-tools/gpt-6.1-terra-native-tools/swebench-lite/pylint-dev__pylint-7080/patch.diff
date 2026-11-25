@@ -1,0 +1,141 @@
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..586ca9be 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,9 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* Fix ``ignore-paths`` matching paths with mixed separators on Windows, including
++  paths discovered when running with ``--recursive=y``.
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..5863110b 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -46,6 +46,19 @@ def _is_in_ignore_list_re(element: str, ignore_list_re: list[Pattern[str]]) -> b
+     return any(file_pattern.match(element) for file_pattern in ignore_list_re)
+ 
+ 
++def _is_in_ignore_list_paths(
++    element: str, ignore_list_paths_re: list[Pattern[str]]
++) -> bool:
++    """Match both the supplied path and its normalized form.
++
++    Paths assembled during discovery can contain mixed separators on Windows,
++    particularly when the starting directory ends in a forward slash.
++    """
++    return _is_in_ignore_list_re(element, ignore_list_paths_re) or (
++        _is_in_ignore_list_re(os.path.normpath(element), ignore_list_paths_re)
++    )
++
++
+ def _is_ignored_file(
+     element: str,
+     ignore_list: list[str],
+@@ -56,7 +69,7 @@ def _is_ignored_file(
+     return (
+         basename in ignore_list
+         or _is_in_ignore_list_re(basename, ignore_list_re)
+-        or _is_in_ignore_list_re(element, ignore_list_paths_re)
++        or _is_in_ignore_list_paths(element, ignore_list_paths_re)
+     )
+ 
+ 
+@@ -142,7 +155,7 @@ def expand_modules(
+                     continue
+                 if _is_in_ignore_list_re(
+                     os.path.basename(subfilepath), ignore_list_re
+-                ) or _is_in_ignore_list_re(subfilepath, ignore_list_paths_re):
++                ) or _is_in_ignore_list_paths(subfilepath, ignore_list_paths_re):
+                     continue
+ 
+                 modpath = _modpath_from_file(
+diff --git a/tests/lint/unittest_expand_modules.py b/tests/lint/unittest_expand_modules.py
+index 15f72d0c..cffdce85 100755
+--- a/tests/lint/unittest_expand_modules.py
++++ b/tests/lint/unittest_expand_modules.py
+@@ -4,13 +4,20 @@
+ 
+ from __future__ import annotations
+ 
++import ntpath
+ import re
+ from pathlib import Path
++from unittest.mock import patch
+ 
+ import pytest
+ 
+ from pylint.checkers import BaseChecker
+-from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules
++from pylint.config.argument import _regexp_paths_csv_transfomer
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+ from pylint.testutils import CheckerTestCase, set_config
+ from pylint.typing import MessageDefinitionTuple
+ 
+@@ -26,6 +33,16 @@ def test__is_in_ignore_list_re_match() -> None:
+     assert _is_in_ignore_list_re("src/tests/whatever.xml", patterns)
+ 
+ 
++def test_ignore_paths_with_mixed_windows_separators() -> None:
++    patterns = _regexp_paths_csv_transfomer("^src/gen/.*$")
++    with patch("pylint.lint.expand_modules.os.path.normpath", ntpath.normpath):
++        assert _is_ignored_file(r"src/gen\about.py", [], [], patterns)
++        assert not _is_ignored_file(r"src/other\about.py", [], [], patterns)
++        # Preserve patterns that intentionally match an unnormalized path.
++        raw_patterns = [re.compile(r"^\./src/gen")]
++        assert _is_ignored_file("./src/gen/about.py", [], [], raw_patterns)
++
++
+ TEST_DIRECTORY = Path(__file__).parent.parent
+ INIT_PATH = str(TEST_DIRECTORY / "lint/__init__.py")
+ EXPAND_MODULES = str(TEST_DIRECTORY / "lint/unittest_expand_modules.py")
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..14b5aae6 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -909,7 +909,36 @@ def test_recursive_ignore(ignore_parameter, ignore_parameter_value) -> None:
+         ("directory", "package", "subpackage", "module.py"),
+     ):
+         module = os.path.abspath(join(REGRTEST_DATA_DIR, *regrtest_data_module))
+-    assert module in linted_file_paths
++        assert module in linted_file_paths
++
++
++@pytest.mark.parametrize("jobs", [1, 2])
++def test_recursive_ignore_paths_from_pyproject(tmp_path, monkeypatch, jobs) -> None:
++    """Ignored paths must be respected for standalone files and packages."""
++    monkeypatch.chdir(tmp_path)
++    Path("pyproject.toml").write_text(
++        '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$", '
++        '"^src/pkg/ignored.py$"]\n',
++        encoding="utf-8",
++    )
++    for filename in (
++        "src/keep.py",
++        "src/gen/ignored.py",
++        "src/gen/nested/ignored.py",
++        "src/pkg/__init__.py",
++        "src/pkg/keep.py",
++        "src/pkg/ignored.py",
++    ):
++        path = Path(filename)
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_text('"""Test module."""\n', encoding="utf-8")
++
++    run = Run(
++        ["--rcfile=pyproject.toml", "--recursive=y", f"--jobs={jobs}", "src/"],
++        reporter=text.TextReporter(StringIO()),
++        exit=False,
++    )
++    assert set(run.linter.stats.by_module) == {"keep", "pkg", "pkg.keep"}
+ 
+ 
+ def test_import_sibling_module_from_namespace(initialized_linter: PyLinter) -> None:

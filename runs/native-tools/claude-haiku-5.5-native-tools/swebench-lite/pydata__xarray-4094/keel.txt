@@ -1,0 +1,53 @@
+$ cd /repo 2>/dev/null || cd .; pwd; grep -n "def to_stacked_array" -A80 xarray/core/dataset.py | head -5; grep -n "def _unstack_once\|def to_unstacked_dataset\|def to_stacked_array" xarray/core/*.py
+$ cd /testbed; sed -n 1895,1950p xarray/core/dataarray.py; sed -n 3370,3460p xarray/core/dataset.py
+$ cd /testbed; sed -n 1950,1975p xarray/core/dataarray.py; sed -n 3460,3490p xarray/core/dataset.py
+$ cd /testbed; python -c "
+import xarray as xr, numpy as np
+arr = xr.DataArray(np.arange(3), coords=[('x',[0,1,2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+print(stacked.indexes['y'])
+print(stacked.sel(variable='a').squeeze(drop=True))
+"
+$ cd /testbed; python - <<'EOF'
+p='xarray/core/dataarray.py'
+s=open(p).read()
+old="""        for k in variables:
+            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
+"""
+new="""        for k in variables:
+            data_arr = self.sel({variable_dim: k}).squeeze(drop=True)
+            # For a single-level MultiIndex, selecting one label leaves the
+            # stacked coordinate as a scalar tuple which conflicts across
+            # variables when merged; drop it.
+            if dim in data_arr.coords and dim not in data_arr.dims:
+                data_arr = data_arr.drop_vars(dim)
+            data_dict[k] = data_arr
+"""
+assert s.count(old)==1
+open(p,'w').write(s.replace(old,new))
+EOF
+python -c "
+import xarray as xr, numpy as np
+arr = xr.DataArray(np.arange(3), coords=[('x',[0,1,2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(data.identical(stacked.to_unstacked_dataset('y')))
+arr2 = xr.DataArray(np.arange(6).reshape(2,3), coords=[('x',['a','b']),('y',[0,1,2])])
+d2 = xr.Dataset({'a': arr2, 'b': arr2.isel(y=0)})
+print(d2.identical(d2.to_stacked_array('z',['y']).to_unstacked_dataset('z')))
+"
+python -m pytest -q xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -k "stack" 2>&1 | tail -3
+$ cd /testbed; python -c "
+import xarray as xr, numpy as np
+arr2 = xr.DataArray(np.arange(6).reshape(2,3), coords=[('x',['a','b']),('y',[0,1,2])])
+d2 = xr.Dataset({'a': arr2, 'b': arr2.isel(y=0)})
+print(d2.identical(d2.to_stacked_array('z',['x']).to_unstacked_dataset('z')))
+"; python -m pytest -q xarray/tests/test_dataset.py xarray/tests/test_dataarray.py 2>&1 | tail -2
+$ cd /testbed; git stash -q; python -m pytest -q xarray/tests/test_dataset.py xarray/tests/test_dataarray.py 2>&1 | tail -1; git stash pop -q; git status --short
+The roundtrip from the issue now works. `to_unstacked_dataset` was failing for single-dimension variables because selecting one variable from a one-level stacked index left a scalar `y` coordinate behind, and those leftovers conflicted when the arrays were merged. The fix in `xarray/core/dataarray.py` drops that scalar stacked coordinate after each selection.
+
+The MCVE returns a dataset identical to the original, and the multi-dimensional docstring example still roundtrips. The stacking tests pass. The full `test_dataset.py` and `test_dataarray.py` run has 5 failures both with and without my change, so they predate it. I did not investigate them.
+
+I did not add a regression test for the single-dimension case, so that is still missing.

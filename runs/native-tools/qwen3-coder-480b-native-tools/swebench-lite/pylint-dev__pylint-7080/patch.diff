@@ -1,0 +1,101 @@
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..1f93254b 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -610,11 +610,16 @@ class PyLinter(
+                         skip_subtrees.append(root)
+                         yield root
+                     else:
+-                        yield from (
+-                            os.path.join(root, file)
+-                            for file in files
+-                            if file.endswith(".py")
+-                        )
++                        for file in files:
++                            if file.endswith(".py"):
++                                filepath = os.path.join(root, file)
++                                if not _is_ignored_file(
++                                    filepath,
++                                    self.config.ignore,
++                                    self.config.ignore_patterns,
++                                    self.config.ignore_paths,
++                                ):
++                                    yield filepath
+             else:
+                 yield something
+ 
+diff --git a/tests/lint/unittest_expand_modules.py b/tests/lint/unittest_expand_modules.py
+index 15f72d0c..4342b590 100755
+--- a/tests/lint/unittest_expand_modules.py
++++ b/tests/lint/unittest_expand_modules.py
+@@ -11,6 +11,7 @@ import pytest
+ 
+ from pylint.checkers import BaseChecker
+ from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules
++from pylint.lint.pylinter import PyLinter
+ from pylint.testutils import CheckerTestCase, set_config
+ from pylint.typing import MessageDefinitionTuple
+ 
+@@ -130,6 +131,62 @@ class TestExpandModules(CheckerTestCase):
+         assert modules == expected
+         assert not errors
+ 
++    def test_discover_files_with_ignore_paths(self, tmp_path):
++        """Test that _discover_files respects ignore_paths when recursive=True."""
++        # Create directory structure:
++        # tmp_path/
++        #   ├── regular.py
++        #   └── gen/
++        #       └── generated.py
++        
++        import re
++        from pylint.lint.pylinter import PyLinter
++        from pylint.lint.expand_modules import _is_ignored_file
++        
++        gen_dir = tmp_path / "gen"
++        gen_dir.mkdir()
++        
++        regular_file = tmp_path / "regular.py"
++        regular_file.write_text("print('regular')")
++        
++        generated_file = gen_dir / "generated.py"
++        generated_file.write_text("print('generated')")
++        
++        # Test without ignore_paths - should find both files
++        linter = PyLinter()
++        linter.config.recursive = True
++        linter.config.ignore_paths = []  # No ignore patterns
++        linter.config.ignore = []
++        linter.config.ignore_patterns = []
++        
++        discovered_files = list(linter._discover_files([str(tmp_path)]))
++        regular_files = [f for f in discovered_files if "regular.py" in f]
++        gen_files = [f for f in discovered_files if "gen" in f]
++        
++        assert len(regular_files) == 1  # regular.py should be found
++        assert len(gen_files) == 1      # gen/generated.py should be found
++        
++        # Test with _is_ignored_file function directly  
++        # Check that our ignore pattern works with individual files
++        ignore_paths_patterns = [re.compile(r"^.*gen/.*$")]
++        assert _is_ignored_file(str(generated_file), [], [], ignore_paths_patterns) == True
++        assert _is_ignored_file(str(regular_file), [], [], ignore_paths_patterns) == False
++        
++        # Test with ignore_paths for gen directory - should only find regular.py
++        linter2 = PyLinter()
++        linter2.config.recursive = True
++        linter2.config.ignore_paths = [re.compile(r"^.*gen/.*$")]  # Ignore gen directory
++        linter2.config.ignore = []
++        linter2.config.ignore_patterns = []
++        
++        discovered_files2 = list(linter2._discover_files([str(tmp_path)]))
++        regular_files2 = [f for f in discovered_files2 if "regular.py" in f]
++        gen_files2 = [f for f in discovered_files2 if "gen" in f]
++        
++        assert len(regular_files2) == 1   # regular.py should be found
++        assert len(gen_files2) == 0       # gen/generated.py should NOT be found
++        assert len(discovered_files2) == 1  # Only regular.py should be found
++
+     @pytest.mark.parametrize(
+         "files_or_modules,expected",
+         [

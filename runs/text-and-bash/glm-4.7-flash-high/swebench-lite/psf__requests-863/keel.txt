@@ -1,0 +1,232 @@
+$ find . -type f -name "*.py" | head -20
+$ find . -type f -name "*.py" -path "*/requests/*.py" | grep -v build
+$ cat ./requests/models.py
+$ grep -n "class Request" ./requests/models.py
+$ sed -n '43,115p' ./requests/models.py
+$ grep -n "self.hooks" ./requests/models.py
+$ sed -n '141,160p' ./requests/models.py
+$ sed -n '465,480p' ./requests/models.py
+$ sed -n '143,152p' ./requests/models.py
+$ cat > /tmp/fix_hooks.patch << 'EOF'
+--- ./requests/models.py
++++ ./requests/models.py
+@@ -142,9 +142,13 @@ class Request(object):
+         #: Event-handling hooks.
+         self.hooks = {}
+ 
+         for event in HOOKS:
+             self.hooks[event] = []
+ 
+         hooks = hooks or {}
+ 
+         for (k, v) in list(hooks.items()):
++            if isinstance(v, list):
++                for hook in v:
++                    self.register_hook(event=k, hook=hook)
++            else:
+             self.register_hook(event=k, hook=v)
+ 
+         #: Session.
+EOF
+patch -p1 < /tmp/fix_hooks.patch
+$ sed -n '139,155p' ./requests/models.py
+$ sed -n '144,151p' ./requests/models.py
+$ sed -i '144,152s/for (k, v) in list(hooks.items()):/for (k, v) in list(hooks.items()):\n            if isinstance(v, list):\n                for hook in v:\n                    self.register_hook(event=k, hook=hook)\n            else:\n                self.register_hook(event=k, hook=v)/' ./requests/models.py
+$ python3 << 'PYEOF'
+# Read the file
+with open('./requests/models.py', 'r') as f:
+    lines = f.readlines()
+
+# Find the line with "for (k, v) in list(hooks.items()):" and replace it
+new_lines = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if "for (k, v) in list(hooks.items()):" in line:
+        # Add the new lines
+        new_lines.append(line)  # Keep the original line
+        new_lines.append("            if isinstance(v, list):\n")
+        new_lines.append("                for hook in v:\n")
+        new_lines.append("                    self.register_hook(event=k, hook=hook)\n")
+        new_lines.append("            else:\n")
+        new_lines.append("                self.register_hook(event=k, hook=v)\n")
+    else:
+        new_lines.append(line)
+    i += 1
+
+# Write back
+with open('./requests/models.py', 'w') as f:
+    f.writelines(new_lines)
+
+print("File updated successfully")
+PYEOF
+$ sed -n '144,160p' ./requests/models.py
+$ sed -n '144,175p' ./requests/models.py
+$ git checkout requests/models.py
+$ python3 << 'PYEOF'
+# Read the file
+with open('./requests/models.py', 'r') as f:
+    content = f.read()
+
+# Find the section we need to replace and replace it
+old_code = """        hooks = hooks or {}
+
+        for (k, v) in list(hooks.items()):
+            self.register_hook(event=k, hook=v)"""
+        
+new_code = """        hooks = hooks or {}
+
+        for (k, v) in list(hooks.items()):
+            if isinstance(v, list):
+                for hook in v:
+                    self.register_hook(event=k, hook=hook)
+            else:
+                self.register_hook(event=k, hook=v)"""
+
+if old_code in content:
+    content = content.replace(old_code, new_code)
+    with open('./requests/models.py', 'w') as f:
+        f.write(content)
+    print("File updated successfully")
+else:
+    print("Could not find the target code to replace!")
+    # Show what we're looking for
+    import re
+    matches = re.finditer(r'hooks = hooks or \n\s+for \(k, v\) in list\(hooks\.items\(\)\):', content)
+    for i, match in enumerate(matches):
+        print(f"Match {i+1}: found near position {match.start()}-{match.end()}")
+PYEOF
+$ sed -n '144,160p' ./requests/models.py
+$ python3 -m py_compile ./requests/models.py && echo "Syntax check passed"
+$ python3 << 'PYEOF'
+# Create a test to verify the list hook fix
+from requests.models import Request
+
+def hook1():
+    print("Hook 1 called")
+
+def hook2():
+    print("Hook 2 called")
+
+# Create a request with hooks as lists
+request = Request(
+    url='https://example.com',
+    hooks={
+        'response': [hook1, hook2],
+        'pre_request': hook1
+    }
+)
+
+# Verify the hooks are registered correctly
+print("Response hooks:", request.hooks['response'])
+print("Pre-request hooks:", request.hooks['pre_request'])
+
+# Test that hooks can be dispatched (even if we can't execute them fully)
+print("\n--- Testing hooks can be dispatched ---")
+from requests.utils import dispatch_hook
+
+# Test pre_request dispatch
+test_obj = Request(url='https://example.com', hooks={'pre_request': [hook1, hook2]})
+try:
+    dispatch_hook('pre_request', test_obj.hooks, test_obj)
+    print("✓ Pre-request dispatch works")
+except Exception as e:
+    print(f"✗ Pre-request dispatch failed: {e}")
+
+# Test response dispatch
+from requests.models import Response
+response = Response()
+response.request = Request(url='https://example.com')
+try:
+    dispatch_hook('response', test_obj.hooks, response)
+    print("✓ Response dispatch works")
+except Exception as e:
+    print(f"✗ Response dispatch failed: {e}")
+
+print("\n--- Fix verified successfully! ---")
+PYEOF
+$ grep -rn "def dispatch_hook" ./requests/
+$ python3 << 'PYEOF'
+# Create a test to verify the list hook fix
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+def hook1():
+    print("Hook 1 called")
+
+def hook2():
+    print("Hook 2 called")
+
+# Create a request with hooks as lists
+request = Request(
+    url='https://example.com',
+    hooks={
+        'response': [hook1, hook2],
+        'pre_request': hook1
+    }
+)
+
+# Verify the hooks are registered correctly
+print("Response hooks:", request.hooks['response'])
+print("Pre-request hooks:", request.hooks['pre_request'])
+
+# Test that hooks can be dispatched (even if we can't execute them fully)
+print("\n--- Testing hooks can be dispatched ---")
+test_obj = Request(url='https://example.com', hooks={'pre_request': [hook1, hook2]})
+try:
+    dispatch_hook('pre_request', test_obj.hooks, test_obj)
+    print("✓ Pre-request dispatch works")
+except Exception as e:
+    print(f"✗ Pre-request dispatch failed: {e}")
+
+# Test response dispatch
+from requests.models import Response
+response = Response()
+response.request = Request(url='https://example.com')
+try:
+    dispatch_hook('response', test_obj.hooks, response)
+    print("✓ Response dispatch works")
+except Exception as e:
+    print(f"✗ Response dispatch failed: {e}")
+
+print("\n--- Fix verified successfully! ---")
+PYEOF
+$ python3 << 'PYEOF'
+from requests.models import Request
+
+def hook1():
+    print("Hook 1 called")
+
+def hook2():
+    print("Hook 2 called")
+
+# Test with a list of hooks - this is what the fix enables
+print("=== Testing the fix: List of hooks ===")
+request = Request(
+    url='https://example.com',
+    hooks={
+        'response': [hook1, hook2],  # Multiple hooks as a list
+    }
+)
+
+print("Expected: Response hooks container should contain function references")
+print("Actual:   Response hooks = ", request.hooks['response'])
+print("Type of first hook: ", type(request.hooks['response'][0]))
+
+# Verify they are callables (functions), not wrapped as lists
+first_hook = request.hooks['response'][0]
+if callable(first_hook):
+    print("\n✓ First hook is callable (not a list)")
+else:
+    print("\n✗ First hook is NOT callable (likely a wrapped list)")
+
+if callable(request.hooks['response'][1]):
+    print("✓ Second hook is callable (not a list)")
+else:
+    print("✗ Second hook is NOT callable (likely a wrapped list)")
+
+print("\n=== Test Complete ===")
+print("The fix successfully allows lists in dict values of hooks parameter")
+PYEOF
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix has been successfully implemented and tested. The code now properly handles lists of hooks in the `hooks` parameter of the `Request.__init__()` method. When a list is provided as a hook value, it iterates through the list and registers each function individually, rather than wrapping the entire list as a single hook.

@@ -1,0 +1,781 @@
+$ ls -la /app/
+$ file /app/vulnerable
+$ which readelf && /app/vulnerable
+$ readelf -h /app/vulnerable
+$ readelf -S /app/vulnerable | grep -E "name|FLAGS|ADDRESS"
+$ readelf -S /app/vulnerable
+$ strings -t x /app/vulnerable | grep -E "FLAG|secret|key|hidden|input"
+$ hexdump -C /app/vulnerable | grep -A 5 -B 5 "FLAG" 2>/dev/null || strings /app/vulnerable | grep FLAG
+$ strace /app/vulnerable 2>&1
+$ strings /app/vulnerable
+$ strings /app/vulnerable > /app/stripped_strings.txt && cat /app/stripped_strings.txt
+$ echo "flag" | /app/vulnerable
+$ echo -e "\x00" | /app/vulnerable
+$ python3 -c "print('A' * 100)" | /app/vulnerable
+$ objdump -d /app/vulnerable | head -n 200
+$ od -A x -t x1z /app/vulnerable | grep -A 2 "4040"
+$ objdump -s -j .rodata /app/vulnerable | head -n 30
+$ python3 << 'EOF'
+# The XOR key
+xor_key = 0x42
+
+# Read the binary
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Find the XOR data starting point
+start = 0x402138
+
+# IEEE 754 float format for the string "AI" at 0x402138
+# AI as IEEE 754 double is: 0x402921f5c5d1cf5d
+# Let me calculate this properly...
+
+# According to the disassembly, the decryption starts at 0x401274
+# and the XOR key is 0x42 at address 0x404060
+
+# Let me just try XORing the relevant section
+xor_data = data[start:start+40]
+# This won't work because the bytes are already decoded, let me examine what's at the XOR key location
+EOF
+$ env -i /app/vulnerable
+$ python3 << 'EOF'
+# Let me analyze the disassembly more carefully
+# The program decrypts the input at 0x401274 using XOR
+
+# Looking at the code structure:
+# 1. It checks stdout at 0x404090 to see if it's been initialized
+# 2. If not, it does C string deletion at 0x401218
+# 3. The XOR decryption happens at 0x401250 with key 0x42
+
+# The string "AI" at 0x402138 is decrypted using XOR with 0x42
+# AI XOR 0x42 = 0x41 (A) XOR 0x49 (I) XOR 0x42 = 0x? Let me calculate:
+# 0x41 = 'A', 0x49 = 'I', 0x42 = 'B'
+# 0x41 ^ 0x49 ^ 0x42 = 0x01 ^ 0x42 = 0x43 = 'C' - doesn't make sense
+
+# Let me try to understand the decryption better
+# The code at 0x401250-0x401256 does:
+# xor_byte = input[i] ^ 0x42
+# So input_byte ^ 0x42 = decrypted_byte
+
+# This means the input should already be XORed with 0x42 to decrypt it
+
+print("The program is waiting for input and XOR decrypts it with key 0x42")
+EOF
+$ python3 << 'EOF'
+import sys
+
+# I need to figure out what the real secret key is
+# The program reads input at gets@plt, then XORs it with 0x42
+
+# Let me try to brute force a valid FLAG{...} format
+# Or better yet, let me try to understand the structure better
+
+# Looking at the output, the decrypted string is "Access granted! Secret: %s"
+# The secret information is likely somewhere in memory
+
+# Let me try sending some interesting patterns
+
+test_cases = [
+    # Try simple values
+    b'\x00\x01\x02\x03\x04\x05\x06\x07',
+    # Try what might be "NOTE" or related strings
+    b'\x3d\x2e\x36\x0c',
+    # Try NULL bytes and patterns
+    b'\x00\x00\x00\x00',
+]
+
+# The XOR with 0x42
+for test in test_cases:
+    encrypted = bytes([b ^ 0x42 for b in test])
+    print(f"Testing: {test.hex()} -> encrypted: {encrypted.hex()}")
+EOF
+$ objdump -d /app/vulnerable | grep -A 20 "401274"
+$ objdump -d /app/vulnerable | grep -B 5 -A 15 "xor.*0x42"
+$ python3 << 'EOF'
+# Looking at the disassembly more carefully:
+# 1. stdout is initialized at 0x401184
+# 2. If stdout is not initialized, "Authentication bypassed!" is printed at 0x40128f
+# 3. The XOR decryption happens at 0x401200 with stdin as input
+
+# The key at 0x404060 is 0x42 ('B')
+
+# The output shows "Authentication bypassed!" when stdout is not initialized
+# This happens when you set environment variables or use certain inputs
+
+# Let me check if there's a way to trigger the secret output
+
+# The printf at 0x401278 uses the decrypted data
+# And it's formatted at 0x4020ae which we saw as "Access granted! Secret: "
+
+# So the secret must be at "%s" which should be at RCX
+
+# Let me try sending NULL bytes or special values
+
+
+# Let me try different inputs with known patterns
+for i in range(256):
+    input_byte = i
+    # The code does: output = input ^ 0x42
+    # So if input is NULL (0x00), output is 0x42
+    # If input is 'A' (0x41), output is 0x43
+    pass
+EOF
+$ python3 -c "print('\x42' * 10)" | /app/vulnerable 2>/dev/null
+$ python3 -c "print('\x00' * 10)" | /app/vulnerable 2>/dev/null
+$ python3 << 'EOF'
+# Let me examine the rodata section for any hidden patterns
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Look for arrays or patterns
+# The interesting strings we saw:
+# "Access granted! Secret: %s" at 0x4020b0
+# This doesn't have the hidden key in rodata
+
+# Let me check if there's a hardcoded string or key in the binary
+
+# Search for common patterns in the binary
+interesting_sections = []
+for i in range(0, len(data), 16):
+    section = data[i:i+32]
+    # Look for ASCII printable characters
+    if all(b >= 32 and b <= 126 for b in section):
+        interesting_sections.append((i, section))
+
+print(f"Found {len(interesting_sections)} ASCII-only sections")
+print("Interesting one-byte patterns:")
+from collections import Counter
+counts = Counter(data)
+for byte, count in counts.most_common(20):
+    print(f"0x{byte:02x}: {count}")
+EOF
+$ strings -10 /app/vulnerable | grep -i "flag\|secret\|key\|password"
+$ python3 << 'EOF'
+# Let's analyze this more carefully
+# The program's main flow:
+# 1. Check stdout (0x401184) - if not initialized, print "Authentication bypassed!"
+# 2. If stdout initialized, do C string deletion
+# 3. The XOR decryption happens
+
+# The printf at 0x401278 outputs the decrypted input
+
+# The "Authentication bypassed!" message is printed at 0x40128f
+# which means the stdout check failed
+
+# Let me try to see if I can make the stdout check pass
+# The check looks at offset 0x404090 for stdout
+
+# Maybe I need to force a specific input length or type
+
+print("The program handles input decryption with XOR key 0x42")
+print("Needs to figure out what input format triggers the secret output")
+EOF
+$ python3 << 'EOF'
+# Let me try different input lengths and patterns
+# The program stack size is large (0x108), so doesn't seem to be a buffer overflow
+
+# Let me try to bypass the stdout initialization issue
+# The stdout check is at offset 0x404090
+
+import subprocess
+import os
+
+# Try with different environment settings
+envs = [
+    {},
+    {"_": "/app/vulnerable"},  # Try to pass as command line
+]
+
+for env in envs:
+    try:
+        result = subprocess.run(
+            ['/app/vulnerable'],
+            input=b'',
+            env=env,
+            capture_output=True,
+            timeout=2
+        )
+        print(f"Output: {result.stdout.decode()}")
+        print(f"Error: {result.stderr.decode()}")
+        print("---")
+    except Exception as e:
+        print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+# Let me try to manually decode what's happening
+# Looking at the disassembly, the key insight is:
+# 1. The signature check at 0x40122e-0x401237 checks byte at 0x404060
+# 2. If it equals 0x42, it continues to XOR decryption
+# 3. The XOR decryption happens byte by byte
+
+# The message at 0x4020ae is "Access granted! Secret: "
+# So we need to find what value for RCX (the counter) makes printf print our secret
+
+# The printf at 0x401278 has format string at 0x4020ae
+# The argument is at (%rsp, %rcx, 1) which is at RCX offset from stack pointer
+
+# So if we can control RCX, we can print different memory locations!
+
+# Let me try to figure out what RCX should be
+
+# The C string thread check at 0x401218 may give us a clue
+# It uses C string deletion on stdin if thread check fails
+
+# Let me try to send input that makes the pattern 0x42 0x42 0x42...
+# That would make the comparison at 0x401261 always true
+
+# Actually, looking at line 401261, it checks if the byte is 0x42
+# This is the terminator for the XOR loop
+
+# So the input termination is NULL bytes encrypted as 0x42
+# This means the input should be 0x00 bytes encrypted as 0x42
+# So {byte ^ 0x42} until we hit the terminator
+
+# But wait, the comparison at 0x401261 resets the AL register without using it
+# The loop continues until %esi (which is RCX) reaches the end
+
+# Let me trace through this more carefully
+EOF
+$ python3 << 'EOF'
+import sys
+
+# The input should be a series of bytes XORed with 0x42
+# The loop continues until it encounters a byte that equals 0x42 (which would be NULL when decoded)
+
+# Let me construct input that might trigger special behavior
+# The format string format is "Access granted! Secret: %s"
+
+# If RCX is 1, it prints %s (just the argument)
+# If RCX is 2, it shows the secret part
+
+# Let me try to figure out what RCX should be
+
+test_inputs = [
+    # Try empty input with proper terminator
+    b'\x42',  # This is NULL encrypted as 0x42
+]
+
+for test in test_inputs:
+    try:
+        process = subprocess.Popen(
+            ['/app/vulnerable'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate(input=test, timeout=2)
+        print(f"Input: {test.hex()}")
+        print(f"Output: {stdout.decode()}")
+        print(f"Error: {stderr.decode()}")
+        print("---")
+    except Exception as e:
+        print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# The input should be a series of bytes XORed with 0x42
+# The loop continues until it encounters a byte that equals 0x42 (which would be NULL when decoded)
+
+# Let me construct input that might trigger special behavior
+test_inputs = [
+    # Try empty input with proper terminator
+    b'\x42',  # This is NULL encrypted as 0x42
+]
+
+for test in test_inputs:
+    try:
+        process = subprocess.Popen(
+            ['/app/vulnerable'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate(input=test, timeout=2)
+        print(f"Input: {test.hex()}")
+        print(f"Output: {stdout.decode()}")
+        print(f"Error: {stderr.decode()}")
+        print("---")
+    except Exception as e:
+        print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# Let me try different inputs to understand how RCX is set
+# RCX is incremented in the loop, and its value determines what %s prints
+
+# The loop structure:
+# RCX starts at 0 (from larger registers being preserved)
+# Each iteration XORs one byte
+# RCX is incremented
+# Loop ends when it finds 0x42 byte (which is NULL encrypted)
+
+# If I can make RCX equal to 1, printf at offset 1 will print one argument
+# If RCX equals 2, it prints the second argument
+
+# Let me try to trace the loop more carefully by sending more bytes
+test_inputs = [
+    b'\x42\x42',  # Two NULL bytes encrypted
+    b'\x42\x00',  # NULL followed by...
+]
+
+for test in test_inputs:
+    try:
+        process = subprocess.Popen(
+            ['/app/vulnerable'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate(input=test, timeout=2)
+        print(f"Input: {test.hex()}")
+        print(f"Output: {stdout.decode()}")
+        print(f"Error: {stderr.decode()}")
+        print("---")
+    except Exception as e:
+        print(f"Error: {e}")
+        break
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# Send a long pattern to see where the secret might be in memory
+test = b'\x42' * 200  # Mix of NULL and other values encrypted
+
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    print(f"Output preview: {stdout.decode()[:200]}")
+    print(f"Length: {len(stdout)}")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# The format string is at 0x4020ae: "Access granted! Secret: "
+# This is in rodata, so it's fixed
+
+# The printf at 0x401278: e8 c3 fd ff ff call 401040 <printf@plt>
+# It has format at 0x4020ae (%rsp,%rcx,1)
+# RCX is the value decremented as loop proceeds
+
+# If I could have RCX be 1, it would just print the argument
+# The argument at RCX=1 depends on the stack layout
+
+# Let me try to send a specific character and see
+
+test = b'\x43'  # 0x43 is 'C' XOR 0x42 = input[0]
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    print(f"Input: {test.hex()}")
+    print(f"Output: {stdout.decode()}")
+    print(f"Error: {stderr.decode()}")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# The "AI" string at 0x402138
+# The decryption key is 0x42 (at 0x404060)
+# So AI decrypted = (0x41 XOR 0x42, 0x49 XOR 0x42) = (0x43, 0x4B) = "C,K"
+
+test = b'\x43\x4b'  # C,K - what "AI" decrypts to
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    print(f"Input: {test.hex()} ('{test.decode()}')")
+    print(f"Output: {stdout.decode()}")
+    print(f"Error: {stderr.decode()}")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+# Let me examine the binary for suspicious patterns or xrefs
+# Looking for the key 0x42 reference flow with cross-referencing
+
+# The XOR loop doesn't use the XORED byte value for any purpose
+# It just saves the result and continues
+
+# The SMAP (Supervisor Mode Access Prevention) check at 0x401128 might be bypassable
+# Let me try to find how the authentication system works
+
+print("Analyzing the binary for hidden patterns...")
+print("The program uses XOR decryption but the output isn't used directly")
+print("Need to find what memory location should be printed as the secret")
+EOF
+$ python3 << 'EOF'
+import re
+
+# Read the binary as text and look for patterns that might be encrypted
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Look for bytes that might form XOR-encoded text
+# Try to find repeating patterns that could be XOR keys
+
+# Count byte pairs
+from collections import defaultdict
+pairs = defaultdict(int)
+for i in range(len(data) - 1):
+    pairs[bytes([data[i], data[i+1]])] += 1
+
+print("Top 10 byte pairs:")
+for pair, count in sorted(pairs.items(), key=lambda x: -x[1])[:10]:
+    if all(32 <= b <= 126 for b in pair):
+        try:
+            print(f"{pair}: {count} - '{pair.decode()}'")
+        except:
+            pass
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# If the XOR decryption is supposed to reveal a string,
+# send encrypted version of "flag"
+# Using simple XOR with varying keys
+
+test_cases = [
+    b'flag',
+    b'FLAG', 
+    b'key',
+    b'password',
+]
+
+for test in test_cases:
+    # Try plaintext (no encryption)
+    encrypted = test
+    try:
+        process = subprocess.Popen(
+            ['/app/vulnerable'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate(input=encrypted, timeout=2)
+        output_str = stdout.decode()
+        if 'flag' in output_str.lower() or 'secret' in output_str.lower():
+            print(f"Found it! Input: {test.decode()}")
+            print(f"Output: {output_str}")
+        else:
+            pass
+    except Exception as e:
+        pass
+
+# Try encrypted version of common flag formats
+flag_encrypted = bytes([b ^ 0x42 for b in b'FLAG{test}'])
+print(f"Trying encrypted FLAG: {flag_encrypted}")
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=flag_encrypted, timeout=2)
+    output_str = stdout.decode()
+    if 'secret' in output_str:
+        print(f"SUCCESS! Output: {output_str}")
+        print(f"Secret key found!")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# Let's try sending just the NULL terminator and see what happens
+test = b''  # Empty
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    print(f"Input: EMPTY")
+    print(f"Output: {repr(stdout.decode())}")
+    print(f"Error: {stderr.decode()}")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# Let me try sending input that ends with the XOR of a pointer
+# Or try to understand what RCX should be
+
+# If RCX is 0, it prints nothing (or the printf format)
+# If RCX is 1, it prints one argument
+# RCX is the loop counter
+
+# Let me try to send many bytes to see if the loop processes any of them
+test = b'\x42' * 500
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    output = stdout.decode()
+    print(f"Output length: {len(output)}")
+    if 'secret' in output.lower():
+        print(f"SUCCESS! Secret found: {output}")
+    else:
+        print(f"Output starts with: {output[:200]}")
+except Exception as e:
+    print(f"Error: {e}")
+EOF
+$ python3 << 'EOF'
+# Let me search for the value 0x42 or strings that might be encoded
+# The XOR key is 0x42 but that's already found
+
+# Looking at the binary structure again:
+# The "Access granted! Secret: %s" is at 0x4020b0
+# The "%s" is where the secret would be printed
+
+# The RCX counter determines what gets printed by %s
+# RCX = 1 means the first argument after the format string
+
+# In the stack layout at .text section 401200-401284:
+# The input buffer is at RSP (stack pointer)
+# RCX is incremented in the loop
+
+# If I understand correctly:
+# RCX starts at 0
+# Loop continues while char != 0x42
+# After loop, RCX remains as the loop counter
+
+# So if the string has length n, RCX = n at the end of the loop
+# Then printf uses RCX as offset into the stack
+
+# Let me test by sending different length inputs
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# Try different lengths of NULL-encoded input
+for length in range(1, 10):
+    # Send 'length' NULL bytes encrypted as 0x42
+    test = b'\x42' * length
+    try:
+        process = subprocess.Popen(
+            ['/app/vulnerable'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = process.communicate(input=test, timeout=2)
+        # Check if the output contains anything interesting
+        output = stdout.decode()
+        if length > 2:  # Skip very short inputs
+            print(f"Length {length}: {output[:100]}")
+    except Exception as e:
+        print(f"Error for length {length}: {e}")
+        break
+EOF
+$ python3 << 'EOF'
+import subprocess
+
+# The XOR with 0x42 transforms each byte
+# Let me try different character values to see if any triggers special behavior
+
+# Try all printable ASCII characters
+test = bytes(range(32, 127))
+print(f"Testing input: {test[:20]}...")
+
+try:
+    process = subprocess.Popen(
+        ['/app/vulnerable'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    stdout, stderr = process.communicate(input=test, timeout=2)
+    output = stdout.decode()
+    print(f"Output length: {len(output)}")
+    print(f"Output: {output[:300]}")
+finally:
+    pass
+EOF
+$ python3 << 'EOF'
+# Let me examine the binary data structure more systematically
+import re
+
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Search for potential flag patterns (even if encoded)
+flag_pattern = br'flag\{[^}]+\}'
+
+# Search for base64 URLs or other encodings
+# Look for AA AA patterns (common in XOR)
+aa_count = data.count(b'\xAA\xAA')
+print(f"Found {aa_count} AA AA pairs")
+
+# Look for repeated short patterns
+for length in range(2, 20):
+    pattern = data[:length]
+    if data.count(pattern) > 1 and pattern.isascii() and all(33 <= b < 127 for b in pattern):
+        print(f"Found repeat pattern length {length}: {pattern}")
+
+# Look for something between the known strings
+# The program strings are spread across rodata and data
+# The secret might be in .data at 0x404040 (4 bytes) or .bss at 0x404088
+print("\nChecking .data section 0x404040:")
+data_bytes = data[0x404040:0x404046]
+print(f"Raw bytes: {data_bytes.hex()}")
+print(f"ASCII: {' '.join(chr(b) if 32 <= b < 127 else '.' for b in data_bytes)}")
+
+print("\nChecking .bss section 0x404088:")
+bss_bytes = data[0x404088:0x404098]
+print(f"Raw bytes: {bss_bytes.hex()}")
+print(f"ASCII: {' '.join(chr(b) if 32 <= b < 127 else '.' for b in bss_bytes)}")
+EOF
+$ python3 << 'EOF'
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# The actual offset in the file
+file_off_data = 0x30040  # 0x404040 - (0x402000 - 0x2000) = virtual - base
+file_off_bss = 0x30086  # Let me recalculate
+
+print(f"File offset for .data (virtual 0x404040): {hex(0x404040 - 0x402000 + 0x2000)}")
+print(f"File offset for .bss (virtual 0x404088): {hex(0x404088 - 0x402000 + 0x2000)}")
+
+# Let me get the actual file offsets from readelf
+print("\nChecking actual file offsets:")
+print(f".data section size: 0x46 (70 bytes), offset: 0x3040 (12288)")
+data_section = data[0x3040:0x3040+0x46]
+print(f"First 20 bytes: {data_section[:20].hex()}")
+
+print(f"\n.bss section size: 0x10 (16 bytes), offset: 0x3086 (12326)")
+bss_section = data[0x3086:0x3086+0x10]
+print(f"First 16 bytes: {bss_section.hex()}")
+
+# Let me decode these properly
+print("\nAttempted decoding paths:")
+print(f"Step 1: Encode each byte as printable ASCII")
+print(f"Step 2: Try XOR with known keys")
+EOF
+$ python3 << 'EOF'
+import base64
+
+# Found in .bss section: 4743433a202844656269616e2031322e
+data = bytes.fromhex("4743433a202844656269616e2031322e")
+print(f"Raw bytes: {data}")
+print(f"ASCII: {data}")
+
+# Try to decode as base64
+try:
+    decoded = base64.b64decode(data)
+    print(f"Base64 decoded: {decoded.decode('ascii')}")
+except Exception as e:
+    print(f"Standard base64 failed: {e}")
+
+# Maybe it's base64 with padding
+try:
+    decoded = base64.b64decode(data + b'==')
+    print(f"With padding: {decoded.decode('ascii')}")
+except Exception as e:
+    print(f"With padding failed: {e}")
+
+# Maybe it's XOR encrypted with the key 0x42
+xor_key = 0x42
+xor_decoded = bytes([b ^ xor_key for b in data])
+print(f"\nXOR with 0x42: {xor_decoded}")
+print(f"XOR ASCII: {xor_decoded}")
+
+# XOR then base64
+try:
+    xor_then_base64 = base64.b64decode(xor_decoded + b'==')
+    print(f"XOR then base64: {xor_then_base64.decode('ascii')}")
+except Exception as e:
+    print(f"This failed: {e}")
+EOF
+$ python3 << 'EOF'
+# Let me search for the flag pattern more thoroughly
+# The format should be FLAG{...}
+# Let me search for any pattern that might contain it
+
+import re
+
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Search for patterns that might be XOR encoded
+# Try different XOR keys
+possible_keys = range(256)
+
+suspicious_sequences = []
+for key in range(256):
+    # XOR each byte and see if we get recognizable patterns
+    xored = bytes([b ^ key for b in data])
+    
+    # Look for ASCII text after XORing
+    # Skip the known string sections
+    text_segments = []
+    in_seq = False
+    seq = []
+    
+    for b in xored:
+        if 32 <= b <= 126:
+            if not in_seq:
+                in_seq = True
+                seq = [b]
+            else:
+                seq.append(b)
+        else:
+            if in_seq and len(seq) > 10:
+                text_segments.append((key, bytes(seq)))
+            in_seq = False
+            seq = []
+    
+    if len(text_segments) > 0:
+        suspicious_sequences.append((key, text_segments[:5]))
+
+print(f"Found {len(suspect) if 'suspect' in locals() else 0} potential encodings")
+EOF
+$ python3 << 'EOF'
+# Search systematically for patterns that might be the flag
+import re
+
+with open('/app/vulnerable', 'rb') as f:
+    data = f.read()
+
+# Known patterns from the program
+known_strings = b"Welcome to the Security Challenge!\nFind a way to extract the hidden information.\nEnter your input: \nAuthentication bypassed!\nInput processed successfully.\n"
+
+# Search for flag pattern
+flag_pattern = rb'FLAG\{[^}]+\}'
+
+matches = list(re.finditer(flag_pattern, data))
+print(f"Found {len(matches)} literal FLAG{...} patterns")
+
+# Normalize output for easier searching
+norm_data = data.lower()
+flag_lower = b'flag{'
+flag_matches = list(re.finditer(flag_lower, norm_data))
+print(f"Found {len(flag_matches)} references to 'flag'")
+EOF
+stopped: step limit reached

@@ -1,0 +1,274 @@
+diff --git a/debug_cstack.py b/debug_cstack.py
+new file mode 100644
+index 000000000..948aed25e
+--- /dev/null
++++ b/debug_cstack.py
+@@ -0,0 +1,48 @@
++"""Debug _cstack specifically"""
++from astropy.modeling import models as m
++from astropy.modeling.core import CompoundModel, Model
++from astropy.modeling.separable import _separable, _coord_matrix, _cstack
++
++print("=" * 60)
++print("Debugging _cstack behavior")
++print("=" * 60)
++
++# Test the two cases
++cm = m.Linear1D(10) & m.Linear1D(5)
++
++print("\n1. Testing with Model and CompoundModel:")
++print("cul = ", cm.left)
++print("cur = ", cm.right)
++print("cul isinstance Model:", isinstance(cm.left, Model))
++print("cur isinstance Model:", isinstance(cm.right, Model))
++cleft_full = _cstack(cm.left, cm.right)
++print(f"_cstack result:\n{cleft_full}")
++
++print("\n2. Now testing _coord_matrix:")
++cm_nested = m.Pix2Sky_TAN() & cm
++print(f"Model to analyze: {cm_nested}")
++print(f"Left: {cm_nested.left}, type: {type(cm_nested.left).__name__}")
++print(f"Right: {cm_nested.right}, type: {type(cm_nested.right).__name__}")
++
++# Check what _coord_matrix does for each
++cleft = _coord_matrix(cm_nested.left, 'left', cm_nested.n_outputs)
++print(f"\n_coord_matrix(left, left, noutp={cm_nested.n_outputs}):\n{cleft}")
++
++cright = _coord_matrix(cm_nested.right, 'right', cm_nested.n_outputs)
++print(f"\n_coord_matrix(right, right, noutp={cm_nested.n_outputs}):\n{cright}")
++
++result = _cstack(cm_nested.left, cm_nested.right)
++print(f"\n_cstack result:\n{result}")
++
++assert np.array_equal(cleft, result[:cm_nested.left.n_outputs, :cm_nested.left.n_inputs]), "Left part doesn't match!"
++assert np.array_equal(cright, result[cm_nested.left.n_outputs:, cm_nested.left.n_inputs:]), "Right part doesn't match!"
++
++# Check separately
++print("\n3. Checking why separately: right part should be identity 2x2 matrix but isn't")
++print("If cm has 2 outputs (y0, y1) and 2 inputs (x0, x1), after nesting with Pix2Sky (outputs=2, inputs=2):")
++print("  We should get right part that maps from (x0, x1) to last 2 columns of result")
++print("  The Matrix should be [[1, 0], [0, 1]] (identity)")
++print(f"\nBut cright actually is:\n{cright}")
++print(f"where right is {cm_nested.right}")
++print(f"right.n_inputs={cm_nested.right.n_inputs}, right.n_outputs={cm_nested.right.n_outputs}")
++print(f"noutp={cm_nested.n_outputs}")
+diff --git a/debug_separable.py b/debug_separable.py
+new file mode 100644
+index 000000000..61272d3cc
+--- /dev/null
++++ b/debug_separable.py
+@@ -0,0 +1,60 @@
++"""Debug script to trace separability matrix calculation"""
++from astropy.modeling import models as m
++from astropy.modeling.core import CompoundModel
++from astropy.modeling.separable import _separable, _coord_matrix
++
++print("=" * 60)
++print("Debugging separability matrix calculation")
++print("=" * 60)
++
++# Test with non-nested model
++print("\n1. Non-nested model: Pix2Sky_TAN() & Linear1D(10) & Linear1D(5)")
++model = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++print(f"Model type: {type(model)}")
++print(f"Is CompoundModel: {isinstance(model, CompoundModel)}")
++print(f"n_inputs: {model.n_inputs}, n_outputs: {model.n_outputs}")
++
++# Get the tree structure
++def print_tree(node, indent=0):
++    if hasattr(node, 'left'):
++        print_tree(node.left, indent + 2)
++        print(" " * indent + f"op: {node.op}")
++        print_tree(node.right, indent + 2)
++    elif hasattr(node, 'n_inputs'):
++        print(" " * indent + f"leaf: {type(node).__name__} (separable={getattr(node, 'separable', 'N/A')})")
++
++print("\nModel tree:")
++print_tree(model)
++
++# Calculate separability
++result = _separable(model)
++print(f"\nSeparability matrix:\n{result}")
++
++# Test with nested model
++print("\n" + "=" * 60)
++print("\n2. Nested model: Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5))")
++cm = m.Linear1D(10) & m.Linear1D(5)
++print(f"Inner compound model type: {type(cm)}")
++print(f"Is CompoundModel: {isinstance(cm, CompoundModel)}")
++print(f"n_inputs: {cm.n_inputs}, n_outputs: {cm.n_outputs}")
++
++nested = m.Pix2Sky_TAN() & cm
++print(f"\nOuter model type: {type(nested)}")
++print(f"Is CompoundModel: {isinstance(nested, CompoundModel)}")
++print(f"n_inputs: {nested.n_inputs}, n_outputs: {nested.n_outputs}")
++
++print("\nModel tree:")
++print_tree(nested)
++
++# Calculate separability
++result2 = _separable(nested)
++print(f"\nSeparability matrix:\n{result2}")
++
++# Let's see what flat_coordinate_matrix returns (this is likely the real implementation)
++print("\n3. Checking _calculate_separability_matrix:")
++if hasattr(nested, '_calculate_separability_matrix'):
++    try:
++        result3 = nested._calculate_separability_matrix()
++        print(f"Result: {result3}")
++    except Exception as e:
++        print(f"Error: {e}")
+diff --git a/test_separable.py b/test_separable.py
+new file mode 100644
+index 000000000..b8a412d1a
+--- /dev/null
++++ b/test_separable.py
+@@ -0,0 +1,46 @@
++"""Test script to reproduce the separability matrix issue with nested CompoundModels"""
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix
++
++print("=" * 60)
++print("Testing separability matrix with nested CompoundModels")
++print("=" * 60)
++
++# Test 1: Basic compound model
++print("\n1. Basic compound model:")
++cm = m.Linear1D(10) & m.Linear1D(5)
++print(f"Model: {cm}")
++result = separability_matrix(cm)
++print(f"Separability matrix:\n{result}")
++print("Expected: diagonal matrix = [[True, False], [False, True]]")
++
++# Test 2: Compound model with separate components
++print("\n2. Compound model with separate components:")
++result2 = separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))
++print(f"Model: {m.Pix2Sky_TAN()} & {m.Linear1D(10)} & {m.Linear1D(5)}")
++print(f"Separability matrix:\n{result2}")
++print("Expected: separable between components, but diagonal within Linear1D")
++
++# Test 3: Nested compound model (the problematic case)
++print("\n3. Nested compound model:")
++result3 = separability_matrix(m.Pix2Sky_TAN() & cm)
++print(f"Model: {m.Pix2Sky_TAN()} & {cm}")
++print(f"Separability matrix:\n{result3}")
++print("Expected: Should be the same as test 2 (separable between components)")
++print(f"Difference from test 2: {result2 != result3}")
++
++# Test 4: More nesting
++print("\n4. Double nested compound model:")
++double_nested = m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))
++result4 = separability_matrix(double_nested)
++print(f"Model: {m.Pix2Sky_TAN()} & ({cm})")
++print(f"Separability matrix:\n{result4}")
++print(f"Difference from test 2: {result2 != result4}")
++
++# Test 5: Alternative nesting order
++print("\n5. Reversed nesting:")
++reversed_nested = cm & m.Pix2Sky_TAN()
++result5 = separability_matrix(reversed_nested)
++print(f"Model: {cm} & {m.Pix2Sky_TAN()}")
++print(f"Separability matrix:\n{result5}")
++print(f"Difference from test 2: {result2 != result5}")
+diff --git a/trace_cstack.py b/trace_cstack.py
+new file mode 100644
+index 000000000..54230b24f
+--- /dev/null
++++ b/trace_cstack.py
+@@ -0,0 +1,43 @@
++"""Trace through _cstack to understand the issue"""
++import numpy as np
++from astropy.modeling import models as m
++from astropy.modeling.core import CompoundModel
++from astropy.modeling.separable import _separable, _cstack
++
++# Create nested model
++cm = m.Linear1D(10) & m.Linear1D(5)
++nested = m.Pix2Sky_TAN() & cm
++
++print("Model:", nested)
++print("\nTree structure:")
++for node in ['left', 'right']:
++    child = getattr(nested, node)
++    print(f"\n{node}: {type(child).__name__}")
++    print(f"  type: {type(child)}")
++    print(f"  separable: {getattr(child, 'separable', 'N/A')}")
++    print(f"  n_inputs: {child.n_inputs}")
++    print(f"  n_outputs: {child.n_outputs}")
++    
++    if isinstance(child, CompoundModel):
++        for subnode in ['left', 'right']:
++            subchild = getattr(child, subnode)
++            print(f"  {subnode}: {type(subchild).__name__}")
++            print(f"    type: {type(subchild)}")
++            print(f"    separable: {getattr(subchild, 'separable', 'N/A')}")
++            print(f"    n_inputs: {subchild.n_inputs}")
++            print(f"    n_outputs: {subchild.n_outputs}")
++
++# Trace through _separable
++print("\n\n" + "=" * 60)
++print("Tracing _separable recursion:")
++print("=" * 60)
++
++def trace_separable(transform, depth=0, node_type=''):
++    indent = "  " * depth
++    print(f"{indent}{node_type}: {transform.op if hasattr(transform, 'op') else 'leaf: ' + type(transform).__name__}")
++    
++    if isinstance(transform, CompoundModel):
++        trace_separable(transform.left, depth + 1, "left")
++        trace_separable(transform.right, depth + 1, "right")
++
++trace_separable(nested)
+diff --git a/trace_model_eval.py b/trace_model_eval.py
+new file mode 100644
+index 000000000..92769a88f
+--- /dev/null
++++ b/trace_model_eval.py
+@@ -0,0 +1,47 @@
++"""Trace how nested models are evaluated"""
++from astropy.modeling import models as m
++from astropy.modeling.core import CompoundModel, Model
++
++print("=" * 60)
++print("Testing nested model evaluation")
++print("=" * 60)
++
++# Create models
++cm = m.Linear1D(10) & m.Linear1D(5)
++nested = m.Pix2Sky_TAN() & cm
++straight = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++
++print("\n1. Nested model evaluation:")
++print(f"Model: {nested}")
++print(f"\nTree:")
++print(f"  left: {nested.left} ({type(nested.left).__name__}, {nested.left.n_inputs} inputs, {nested.left.n_outputs} outputs)")
++if isinstance(nested.right, CompoundModel):
++    print(f"  right: {nested.right}")
++    print(f"    left: {nested.right.left} ({type(nested.right.left).__name__}, {nested.right.left.n_inputs} inputs, {nested.right.left.n_outputs} outputs)")
++    print(f"    right: {nested.right.right} ({type(nested.right.right).__name__}, {nested.right.right.n_inputs} inputs, {nested.right.right.n_outputs} outputs)")
++
++print("\n2. Straight model evaluation:")
++print(f"Model: {straight}")
++print(f"Expression: {straight._expr}")
++print(f"\nTree:")
++print(f"  left: {straight.left} ({type(straight.left).__name__}, {straight.left.n_inputs} inputs, {straight.left.n_outputs} outputs)")
++if isinstance(straight.right, CompoundModel):
++    print(f"  right: {straight.right}")
++    print(f"    left: {straight.right.left} ({type(straight.right.left).__name__}, {straight.right.left.n_inputs} inputs, {straight.right.left.n_outputs} outputs)")
++    print(f"    right: {straight.right.right} ({type(straight.right.right).__name__}, {straight.right.right.n_inputs} inputs, {straight.right.right.n_outputs} outputs)")
++
++# Test inputs/outputs
++print("\n3. Testing inputs and outputs:")
++print(f"Nested model:")
++print(f"  Inputs: {nested.inputs}")
++print(f"  Outputs: {nested.outputs}")
++print(f"  n_inputs: {nested.n_inputs}")
++print(f"  n_outputs: {nested.n_outputs}")
++print(f"  _submodels: {nested._submodels}")
++
++print(f"\nStraight model:")
++print(f"  Inputs: {straight.inputs}")
++print(f"  Outputs: {straight.outputs}")
++print(f"  n_inputs: {straight.n_inputs}")
++print(f"  n_outputs: {straight.n_outputs}")
++print(f"  _submodels: {straight._submodels}")

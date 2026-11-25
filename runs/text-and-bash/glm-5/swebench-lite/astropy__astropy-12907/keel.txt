@@ -1,0 +1,301 @@
+$ find . -type f -name "*.py" | grep -E "(separable|separability)" | head -20
+$ cat ./astropy/modeling/separable.py
+$ cat ./astropy/modeling/tests/test_separable.py
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Simple compound model:')
+print(separability_matrix(cm))
+
+print('\nNon-nested compound model:')
+print(separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+
+print('\nNested compound model (using cm):')
+print(separability_matrix(m.Pix2Sky_TAN() & cm))
+
+print('\nExpected for nested:')
+print('[[ True,  True, False, False],')
+print(' [ True,  True, False, False],')
+print(' [False, False,  True, False],')
+print(' [False, False, False,  True]]')
+"
+$ cd /tmp && python3 -c "
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import _coord_matrix, _cstack, _separable
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm is a CompoundModel:', type(cm))
+print('cm.n_outputs:', cm.n_outputs)
+print('cm.n_inputs:', cm.n_inputs)
+
+# What does _separable return for cm?
+cm_matrix = _separable(cm)
+print('\nSeparability matrix for cm:')
+print(cm_matrix)
+
+# Now let's look at what _cstack does with Pix2Sky_TAN() and cm
+left = m.Pix2Sky_TAN()
+print('\nleft (Pix2Sky_TAN):')
+print('  n_outputs:', left.n_outputs)
+print('  n_inputs:', left.n_inputs)
+
+# _cstack flow:
+noutp = left.n_outputs + cm.n_outputs
+print('\nnoutp:', noutp)
+
+# When left is a Model:
+cleft = _coord_matrix(left, 'left', noutp)
+print('\ncleft:')
+print(cleft)
+
+# When right is an ndarray (from nested CompoundModel), the bug is here:
+# Looking at _cstack, it does:
+#   cright = np.zeros((noutp, right.shape[1]))
+#   cright[-right.shape[0]:, -right.shape[1]:] = 1  # BUG: sets all to 1!
+# It should copy the actual matrix instead:
+cright_buggy = np.zeros((noutp, cm_matrix.shape[1]))
+cright_buggy[-cm_matrix.shape[0]:, -cm_matrix.shape[1]:] = 1
+print('\ncright (buggy implementation):')
+print(cright_buggy)
+
+cright_correct = np.zeros((noutp, cm_matrix.shape[1]))
+cright_correct[-cm_matrix.shape[0]:, -cm_matrix.shape[1]:] = cm_matrix
+print('\ncright (correct implementation):')
+print(cright_correct)
+"
+$ cd /tmp && cat > fix_test.py << 'EOF'
+# Test the fix
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import _coord_matrix, _compute_n_outputs
+
+# Copy of the fixed _cstack function
+def _cstack_fixed(left, right):
+    """
+    Function corresponding to '&' operation.
+
+    Parameters
+    ----------
+    left, right : `astropy.modeling.Model` or ndarray
+        If input is of an array, it is the output of `coord_matrix`.
+
+    Returns
+    -------
+    result : ndarray
+        Result from this operation.
+
+    """
+    noutp = _compute_n_outputs(left, right)
+
+    if isinstance(left, m.Model):
+        cleft = _coord_matrix(left, 'left', noutp)
+    else:
+        cleft = np.zeros((noutp, left.shape[1]))
+        cleft[: left.shape[0], : left.shape[1]] = left
+    if isinstance(right, m.Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = right  # FIXED: copy the actual matrix
+
+    return np.hstack([cleft, cright])
+
+# Test
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm separability matrix:')
+from astropy.modeling.separable import _separable
+cm_matrix = _separable(cm)
+print(cm_matrix)
+
+left = m.Pix2Sky_TAN()
+print('\nFixed result for Pix2Sky_TAN() & cm:')
+result = _cstack_fixed(left, cm_matrix)
+print(result)
+
+# Compare with expected
+expected = np.array([[1, 1, 0, 0],
+                     [1, 1, 0, 0],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]], dtype=float)
+print('\nExpected:')
+print(expected)
+print('\nMatch:', np.allclose(result, expected))
+EOF
+python3 fix_test.py
+$ cd /tmp && cat > fix_test.py << 'EOF'
+# Test the fix
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.core import Model
+from astropy.modeling.separable import _coord_matrix, _compute_n_outputs, _separable
+
+# Copy of the fixed _cstack function
+def _cstack_fixed(left, right):
+    """
+    Function corresponding to '&' operation.
+
+    Parameters
+    ----------
+    left, right : `astropy.modeling.Model` or ndarray
+        If input is of an array, it is the output of `coord_matrix`.
+
+    Returns
+    -------
+    result : ndarray
+        Result from this operation.
+
+    """
+    noutp = _compute_n_outputs(left, right)
+
+    if isinstance(left, Model):
+        cleft = _coord_matrix(left, 'left', noutp)
+    else:
+        cleft = np.zeros((noutp, left.shape[1]))
+        cleft[: left.shape[0], : left.shape[1]] = left
+    if isinstance(right, Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = right  # FIXED: copy the actual matrix
+
+    return np.hstack([cleft, cright])
+
+# Test
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm separability matrix:')
+cm_matrix = _separable(cm)
+print(cm_matrix)
+
+left = m.Pix2Sky_TAN()
+print('\nFixed result for Pix2Sky_TAN() & cm_matrix:')
+result = _cstack_fixed(left, cm_matrix)
+print(result)
+
+# Compare with expected
+expected = np.array([[1, 1, 0, 0],
+                     [1, 1, 0, 0],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]], dtype=float)
+print('\nExpected:')
+print(expected)
+print('\nMatch:', np.allclose(result, expected))
+EOF
+python3 fix_test.py
+$ sed -i 's/cright\[-right.shape\[0\]:, -right.shape\[1\]:\] = 1/cright[-right.shape[0]:, -right.shape[1]:] = right/' ./astropy/modeling/separable.py
+$ grep -A 5 "else:" ./astropy/modeling/separable.py | grep -A 5 "cright = np.zeros"
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+print('Testing fix for nested CompoundModels:')
+print()
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Simple compound model (cm):')
+print(separability_matrix(cm))
+print()
+
+print('Non-nested compound model:')
+result = separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))
+print(result)
+print()
+
+print('Nested compound model (using cm):')
+result_nested = separability_matrix(m.Pix2Sky_TAN() & cm)
+print(result_nested)
+print()
+
+# Verify fix
+expected = [[ True,  True, False, False],
+            [ True,  True, False, False],
+            [False, False,  True, False],
+            [False, False, False,  True]]
+
+import numpy as np
+if np.array_equal(result_nested, expected):
+    print('SUCCESS: Nested compound model now returns correct separability matrix!')
+else:
+    print('FAILURE: Still not working correctly')
+    print('Expected:')
+    print(expected)
+"
+$ cd /tmp && python3 -m pytest /app/astropy/modeling/tests/test_separable.py -v
+$ cd /app && python3 -m pytest astropy/modeling/tests/test_separable.py -v
+$ pwd && ls -la
+$ python3 -m pytest astropy/modeling/tests/test_separable.py -v
+$ python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+import numpy as np
+
+print('=== Extended tests for nested CompoundModels ===')
+print()
+
+# Original bug case
+print('Test 1: Original bug case')
+cm = m.Linear1D(10) & m.Linear1D(5)
+result = separability_matrix(m.Pix2Sky_TAN() & cm)
+expected = np.array([[ True,  True, False, False],
+                     [ True,  True, False, False],
+                     [False, False,  True, False],
+                     [False, False, False,  True]])
+print('Result:')
+print(result)
+assert np.array_equal(result, expected), 'Test 1 FAILED'
+print('PASSED')
+print()
+
+# Test deeply nested models
+print('Test 2: More deeply nested model')
+nested_cm = m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))
+result = separability_matrix(m.Linear1D(1) & nested_cm)
+print('Result:')
+print(result)
+# Expected: Linear1D(1) separable, Pix2Sky_TAN non-separable, Linear1D(10) & Linear1D(5) each separable
+expected = np.array([[ True, False, False, False, False],
+                     [False,  True,  True, False, False],
+                     [False,  True,  True, False, False],
+                     [False, False, False,  True, False],
+                     [False, False, False, False,  True]])
+assert np.array_equal(result, expected), 'Test 2 FAILED'
+print('PASSED')
+print()
+
+# Test left side nesting
+print('Test 3: Nested model on left side')
+result = separability_matrix(cm & m.Linear1D(3))
+expected = np.array([[ True, False, False],
+                     [False,  True, False],
+                     [False, False,  True]])
+print('Result:')
+print(result)
+assert np.array_equal(result, expected), 'Test 3 FAILED'
+print('PASSED')
+print()
+
+print('All tests passed!')
+"
+$ cat -n ./astropy/modeling/separable.py | sed -n '155,175p'
+$ cat -n ./astropy/modeling/separable.py | sed -n '211,240p'
+$ cat -n ./astropy/modeling/separable.py | sed -n '240,255p'
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is correctly applied on line 245. The original code had `= 1` which was causing the bug, and now it correctly copies the `right` matrix.
+
+Let me provide a summary:
+
+The issue was in the `_cstack` function in `/testbed/astropy/modeling/separable.py`. When combining models with the `&` operator, if the `right` operand was already a computed separability matrix (an ndarray from a nested CompoundModel), the code was incorrectly setting all elements to 1 in the lower-right portion of the combined matrix instead of copying the actual matrix values.
+
+**The fix:**
+Changed line 245 from:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = 1
+```
+to:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = right
+```
+
+This ensures that when nesting CompoundModels, the separability matrix of the nested model is correctly preserved in the combined matrix.

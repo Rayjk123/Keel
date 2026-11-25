@@ -1,0 +1,36 @@
+$ grep -n "def id_for_label" -A3 django/forms/boundfield.py
+$ sed -i "280s/.*/        return self.data['attrs'].get('id')/" django/forms/boundfield.py && sed -n 276,282p django/forms/boundfield.py && cd tests && python runtests.py forms_tests 2>&1 | tail -3
+$ cd tests && python runtests.py forms_tests 2>&1 | grep -E "^(Ran|OK|FAILED)"
+$ cd tests && python runtests.py forms_tests 2>&1 | grep -B5 -A30 "^FAIL:"
+$ cd tests && sed -n 710,730p forms_tests/tests/test_forms.py
+$ cd tests && python - <<'EOF'
+p='forms_tests/tests/test_forms.py'
+s=open(p).read()
+s=s.replace("""        self.assertEqual(fields[0].id_for_label, 'id_name_0')
+        self.assertEqual(fields[0].choice_label, 'John')
+        self.assertHTMLEqual(fields[0].tag(), '<option value="john">John</option>')""","""        self.assertIsNone(fields[0].id_for_label)
+        self.assertEqual(fields[0].choice_label, 'John')
+        self.assertHTMLEqual(fields[0].tag(), '<option value="john">John</option>')""",1)
+s=s.replace("""    def test_form_with_noniterable_boundfield(self):""","""    def test_boundfield_subwidget_id_for_label_custom_auto_id(self):
+        class SomeForm(Form):
+            field = MultipleChoiceField(
+                choices=[('a', 'A'), ('b', 'B')],
+                widget=CheckboxSelectMultiple,
+            )
+
+        form = SomeForm(auto_id='prefix_%s')
+        subwidgets = form['field'].subwidgets
+        self.assertEqual(subwidgets[0].id_for_label, 'prefix_field_0')
+        self.assertEqual(subwidgets[1].id_for_label, 'prefix_field_1')
+
+    def test_form_with_noniterable_boundfield(self):""",1)
+open(p,'w').write(s)
+EOF
+python runtests.py forms_tests model_forms admin_widgets 2>&1 | grep -E "^(Ran|OK|FAILED)"
+I fixed `BoundWidget.id_for_label` in `django/forms/boundfield.py`. It now returns the id that was actually put on the subwidget, `self.data['attrs'].get('id')`, instead of always building `'id_<name>_<index>'`. Labels for subwidgets like `CheckboxSelectMultiple` now follow a custom `auto_id` (for example `auto_id='prefix_%s'`) or an explicit `id` in the widget's attrs. The `forms_tests`, `model_forms` and `admin_widgets` suites pass (957 tests).
+
+**Behaviour change:** with `auto_id=False`, subwidgets have no id, so `id_for_label` now returns `None` instead of the old made-up `'id_name_0'`. That id never appeared on the input, so a label pointing at it didn't work anyway. Code that relied on the old string would notice. One existing test, `test_iterable_boundfield_select`, expected the old value, so I changed it to expect `None`.
+
+I also added `test_boundfield_subwidget_id_for_label_custom_auto_id`, which checks that a custom `auto_id` gives `prefix_field_0` and `prefix_field_1`.
+
+I used `.get('id')` rather than the issue's suggested `['id']` so that a subwidget with no id returns `None` instead of raising `KeyError`.

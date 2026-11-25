@@ -1,0 +1,33 @@
+$ grep -n "def to_unstacked_dataset" -A 70 xarray/core/dataarray.py | grep -n "sel\|squeeze\|data_dict" 
+$ cd xarray/core && sed -i '1964s/self.sel({variable_dim: k}).squeeze(drop=True)/self.sel({variable_dim: k}, drop=True).squeeze(drop=True)/' dataarray.py && sed -n 1960,1967p dataarray.py && cd ../.. && python -c "
+import xarray as xr, numpy as np
+arr = xr.DataArray(np.arange(3),coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+s = data.to_stacked_array('y', sample_dims=['x'])
+u = s.to_unstacked_dataset('y'); print(u); assert u.identical(data)
+"
+$ python -m pytest -q xarray/tests -k "stack" 2>&1 | tail -3
+$ grep -n "def test_to_stacked_array_to_unstacked_dataset\b" -A 14 xarray/tests/test_dataset.py
+$ python - <<'EOF'
+p='xarray/tests/test_dataset.py'
+s=open(p).read()
+anchor='''        d0 = D.isel(x=0)
+        assert_identical(d0, x0)
+'''
+new=anchor+'''
+    def test_to_stacked_array_to_unstacked_dataset_single_dim(self):
+        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+        data = xr.Dataset({"a": arr, "b": arr})
+        stacked = data.to_stacked_array("y", sample_dims=["x"])
+        unstacked = stacked.to_unstacked_dataset("y")
+        assert_identical(unstacked, data)
+'''
+assert s.count(anchor)==1
+open(p,'w').write(s.replace(anchor,new))
+EOF
+python -m pytest -q xarray/tests/test_dataset.py -k "unstacked" 2>&1 | tail -1
+The single-dim roundtrip from the issue now works: `to_unstacked_dataset` returns a dataset identical to the original.
+
+- **Cause:** after selecting one variable, the stacked coordinate `y` was left behind as a scalar with a different value for each variable. Combining the variables into a `Dataset` then raised the `MergeError`.
+- **Fix:** one line in `xarray/core/dataarray.py`. The selection inside `to_unstacked_dataset` is now `self.sel({variable_dim: k}, drop=True)`, which drops that leftover coordinate.
+- **Test:** I added `test_to_stacked_array_to_unstacked_dataset_single_dim` to `xarray/tests/test_dataset.py`, using the example from the issue. It passes, as do the existing stack-related tests; I didn't run the full suite.

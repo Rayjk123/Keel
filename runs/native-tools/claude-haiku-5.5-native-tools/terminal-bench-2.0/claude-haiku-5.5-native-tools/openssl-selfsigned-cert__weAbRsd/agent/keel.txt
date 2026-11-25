@@ -1,0 +1,70 @@
+$ mkdir -p /app/ssl && cd /app/ssl && openssl version && python3 -c "import cryptography; print(cryptography.__version__)" 2>&1; ls -la /app
+$ cd /app/ssl && openssl genrsa -out server.key 2048 && chmod 600 server.key && openssl req -new -x509 -key server.key -out server.crt -days 365 -subj "/O=DevOps Team/CN=dev-internal.company.local" && cat server.key server.crt > server.pem && chmod 600 server.pem && openssl x509 -in server.crt -noout -subject -dates -fingerprint -sha256 && ls -la
+$ cd /app/ssl && { echo "Subject: $(openssl x509 -in server.crt -noout -subject | sed 's/^subject=//')"; echo "Not Before: $(openssl x509 -in server.crt -noout -startdate | cut -d= -f2)"; echo "Not After: $(openssl x509 -in server.crt -noout -enddate | cut -d= -f2)"; echo "SHA-256 Fingerprint: $(openssl x509 -in server.crt -noout -fingerprint -sha256 | cut -d= -f2)"; } > verification.txt && cat verification.txt
+cat > /app/check_cert.py <<'EOF'
+#!/usr/bin/env python3
+"""Verify the self-signed development certificate at /app/ssl/server.crt."""
+import datetime
+import os
+import subprocess
+import sys
+
+CERT_PATH = "/app/ssl/server.crt"
+
+
+def run_openssl(*args):
+    result = subprocess.run(
+        ["openssl", *args], capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def main():
+    if not os.path.isfile(CERT_PATH):
+        print(f"ERROR: certificate not found: {CERT_PATH}")
+        return 1
+
+    try:
+        # Loading via 'openssl x509' validates that the certificate parses.
+        subject = run_openssl("x509", "-in", CERT_PATH, "-noout", "-subject", "-nameopt", "RFC2253")
+        enddate = run_openssl("x509", "-in", CERT_PATH, "-noout", "-enddate")
+        fingerprint = run_openssl("x509", "-in", CERT_PATH, "-noout", "-fingerprint", "-sha256")
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        print(f"ERROR: could not load certificate: {exc}")
+        return 1
+
+    # enddate looks like: notAfter=Nov 25 05:08:35 2027 GMT
+    end_str = enddate.split("=", 1)[1]
+    expires = datetime.datetime.strptime(end_str, "%b %d %H:%M:%S %Y %Z")
+    common_name = None
+    for part in subject.replace("subject=", "").split(","):
+        part = part.strip()
+        if part.startswith("CN="):
+            common_name = part[3:]
+
+    print(f"Certificate file: {CERT_PATH}")
+    print(f"Subject: {subject.replace('subject=', '')}")
+    print(f"Common Name: {common_name}")
+    print(f"Expiration date: {expires.strftime('%Y-%m-%d')}")
+    print(f"SHA-256 fingerprint: {fingerprint.split('=', 1)[1]}")
+
+    if expires < datetime.datetime.utcnow():
+        print("ERROR: certificate has expired")
+        return 1
+
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+python3 /app/check_cert.py; echo "exit=$?"; openssl rsa -in server.key -check -noout; openssl verify -CAfile server.crt server.crt
+$ cd /app && sed -i 's/expires = datetime.datetime.strptime(end_str, "%b %d %H:%M:%S %Y %Z")/expires = datetime.datetime.strptime(end_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=datetime.timezone.utc)/; s/if expires < datetime.datetime.utcnow():/if expires < datetime.datetime.now(datetime.timezone.utc):/' check_cert.py && python3 check_cert.py; echo "exit=$?"; ls -l ssl
+The task is complete, and I'm not making any further changes. All six requirements are in place and were checked in the previous turn:
+
+- **`/app/ssl/server.key`**: 2048-bit RSA key, permissions 600, passes `openssl rsa -check`.
+- **`/app/ssl/server.crt`**: self-signed, valid 365 days (2026-11-25 to 2027-11-25), subject `O = DevOps Team, CN = dev-internal.company.local`.
+- **`/app/ssl/server.pem`**: key and certificate combined, permissions 600.
+- **`/app/ssl/verification.txt`**: subject, validity dates in OpenSSL format, and SHA-256 fingerprint.
+- **`/app/check_cert.py`**: loads the certificate through the `openssl` CLI, prints the Common Name, expiry date (`2027-11-25`) and fingerprint, and prints "Certificate verification successful" with exit code 0. I removed a deprecation warning from it after the first run.

@@ -1,0 +1,58 @@
+$ cd /app && ls -la && file a.out 2>/dev/null; which readelf objdump node gcc python3; readelf -lS a.out 2>/dev/null | head -80
+$ cd /app && cat hi.c; echo ---; readelf -l a.out | sed -n '/Program Headers/,$p'; echo ---; xxd a.out | head -5; echo; xxd -s 0x3000 -l 0x20 a.out; echo; xxd -s 0x3010 -l 0x10 a.out; echo; objdump -d a.out | sed -n '/<main>:/,/^$/p'; nm a.out
+$ cd /app && node -e '
+const b=require("fs").readFileSync("a.out");
+const targets=[1784774249,1718378344];
+for(const t of targets){ const buf=Buffer.alloc(4); buf.writeInt32LE(t|0); console.log(t, t.toString(16), buf.toString("hex"));
+ for(let i=0;i+4<=b.length;i++){ if(b.readUInt32LE(i)===t>>>0) console.log("  LE found at file off",i,"=0x"+i.toString(16)); if(b.readUInt32BE(i)===t>>>0) console.log("  BE found at",i);}
+}
+'; python3 -c "
+import struct
+d=open('/app/a.out','rb').read()
+print(len(d))
+for i in range(0,len(d)-4,4):
+  pass
+"
+$ cd /app && python3 -c "
+d=open('a.out','rb').read()
+for pat in [bytes.fromhex('697e616a'),bytes.fromhex('685f6c66'),(1784774249).to_bytes(4,'big'),(1718378344).to_bytes(4,'big')]:
+  print(pat.hex(), d.find(pat))
+import struct
+# check whether words at 4-byte steps from 0x400000 base map to file offsets
+print(d[0:4])
+"; which gdb strace ltrace; ls /usr/lib/debug 2>/dev/null | head; strings -t x a.out | head -40
+$ cd /app && node -e '
+const b=require("fs").readFileSync("a.out");
+for(let off=0x2db8; off<0x3010; off+=4) console.log((0x400000+off-0x2db8+0x3db8).toString(16), b.readUInt32LE(off), b.readInt32LE(off));
+' | head -80; node -e '
+const b=require("fs").readFileSync("/app/a.out");
+for (const off of [0x3000,0x3004,0x3008,0x300c]) console.log(off.toString(16), b.readInt32LE(off));'
+$ cd /app && (./a.out; sleep 0) ; python3 - <<'EOF'
+import subprocess,struct,re
+p=subprocess.Popen(["/bin/sh","-c","cat > /dev/null"],stdin=subprocess.PIPE)
+pid=p.pid
+# inspect the same program as a child that stays alive
+q=subprocess.Popen(["/bin/sleep","2"])
+import time; time.sleep(0.3)
+pats=[struct.pack("<I",1784774249),struct.pack("<I",1718378344)]
+found=0
+for line in open(f"/proc/{q.pid}/maps"):
+    a,b=[int(x,16) for x in line.split()[0].split("-")]
+    perms=line.split()[1]
+    if "r" not in perms: continue
+    try:
+        with open(f"/proc/{q.pid}/mem","rb") as m:
+            m.seek(a); data=m.read(b-a)
+        for pt in pats:
+            if pt in data: found+=1; print("found in",line.strip())
+    except Exception as e: pass
+print("matches:",found)
+q.wait()
+EOF
+> write /app/extract.js
+$ cd /app && node extract.js a.out > out.json && node -e 'const o=require("/app/out.json");const k=Object.keys(o);console.log(k.length, k.slice(0,4), k.slice(-2).map(x=>[x,o[x]]), Object.values(o).every(Number.isInteger))'
+I wrote `/app/extract.js`, but I could not confirm that its output matches the reference, so the success criteria are unverified.
+
+The script parses the ELF64 program headers and emits each aligned 32-bit little-endian word from the `PT_LOAD` segments, keyed by virtual address, with BSS zero-filled. Running `node extract.js /app/a.out > out.json` produces 700 entries with integer values.
+
+The example values (1784774249, 1718378344) don't appear in `a.out` in either byte order, and the example addresses (0x400000, 0x400004) fall outside this PIE's mappings. They also don't appear in a running process's memory. So I don't know which memory image the reference uses. If you can share how it was generated or the base address it assumes, I can adjust the script.

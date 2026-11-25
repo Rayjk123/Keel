@@ -1,0 +1,49 @@
+$ cd astropy/modeling 2>/dev/null || cd .; pwd; cat separable.py | head -250
+$ cd /testbed/astropy/modeling && sed -n 250,400p separable.py
+$ cd /testbed && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+cm = m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(m.Pix2Sky_TAN() & cm))
+print(separability_matrix(cm & m.Pix2Sky_TAN()))
+"
+$ cd /testbed && sed -i 's/        cright\[-right.shape\[0\]:, -right.shape\[1\]:\] = 1/        cright[-right.shape[0]:, -right.shape[1]:] = right/' astropy/modeling/separable.py && git diff && python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+cm = m.Linear1D(10) & m.Linear1D(5)
+print(separability_matrix(m.Pix2Sky_TAN() & cm))
+print(separability_matrix(cm & m.Pix2Sky_TAN()))
+print(separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+" && python -m pytest -q astropy/modeling/tests/test_separable.py 2>&1 | tail -3
+$ cd /testbed && grep -n "^def test_\|^compound_models\|^import\|^from" astropy/modeling/tests/test_separable.py | head -30 && cat >> astropy/modeling/tests/test_separable.py <<'EOF'
+
+
+def test_nested_compound_separability():
+    # Regression test: nesting a compound model on the right of '&'
+    # must preserve the separability of its inner components.
+    cm = m.Linear1D(10) & m.Linear1D(5)
+    assert (separability_matrix(m.Pix2Sky_TAN() & cm) == np.array(
+        [[True, True, False, False],
+         [True, True, False, False],
+         [False, False, True, False],
+         [False, False, False, True]])).all()
+    assert (separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)) ==
+            separability_matrix(m.Pix2Sky_TAN() & cm)).all()
+EOF
+python -m pytest -q astropy/modeling/tests/test_separable.py 2>&1 | tail -3
+$ cd /testbed && python - <<'EOF'
+p='astropy/modeling/tests/test_separable.py'
+s=open(p).read()
+i=s.index('def test_nested_compound_separability')
+head,tail=s[:i],s[i:]
+tail=tail.replace('m.','models.')
+open(p,'w').write(head+tail)
+EOF
+python -m pytest -q astropy/modeling/tests/test_separable.py 2>&1 | tail -3; python -m pytest -q astropy/modeling 2>&1 | tail -2
+$ cd /testbed && git stash -q && python -m pytest -q astropy/modeling 2>&1 | tail -1; git stash pop -q && git status --short
+The task is finished. Nested compound models now give the correct separability matrix.
+
+- **Cause:** In `_cstack` (`astropy/modeling/separable.py`), a right operand that was already a coordinate matrix (a nested compound) was filled with `1` instead of being copied. The left-operand branch already copied correctly.
+- **Fix:** Changed `= 1` to `= right` in that branch.
+- **Test:** Added `test_nested_compound_separability` to `astropy/modeling/tests/test_separable.py`. All 12 tests in that file pass.
+- **Wider suite:** `astropy/modeling` has 36 failures and 26 errors both before and after the change, so they predate this fix.

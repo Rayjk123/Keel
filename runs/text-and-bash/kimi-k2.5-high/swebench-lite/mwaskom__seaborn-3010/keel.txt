@@ -1,0 +1,217 @@
+$ find . -type f -name "*.py" | grep -E "(regression|stats)" | head -20
+$ cat ./seaborn/_stats/regression.py
+$ cat ./tests/_stats/test_regression.py
+$ cat > ./seaborn/_stats/regression.py << 'EOF'
+from __future__ import annotations
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from seaborn._stats.base import Stat
+
+
+@dataclass
+class PolyFit(Stat):
+    """
+    Fit a polynomial of the given order and resample data onto predicted curve.
+    """
+    # This is a provisional class that is useful for building out functionality.
+    # It may or may not change substantially in form or dissappear as we think
+    # through the organization of the stats subpackage.
+
+    order: int = 2
+    gridsize: int = 100
+
+    def _fit_predict(self, data):
+
+        # Filter out rows with missing values
+        data = data.dropna(subset=["x", "y"])
+
+        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:
+            # TODO warn?
+            xx = yy = []
+        else:
+            p = np.polyfit(x, y, self.order)
+            xx = np.linspace(x.min(), x.max(), self.gridsize)
+            yy = np.polyval(p, xx)
+
+        return pd.DataFrame(dict(x=xx, y=yy))
+
+    # TODO we should have a way of identifying the method that will be applied
+    # and then only define __call__ on a base-class of stats with this pattern
+
+    def __call__(self, data, groupby, orient, scales):
+
+        return groupby.apply(data, self._fit_predict)
+
+
+@dataclass
+class OLSFit(Stat):
+
+    ...
+EOF
+$ cd /current_directory && python3 -c "
+import seaborn.objects as so
+import numpy as np
+
+# Test with None values
+print('Testing with None values...')
+try:
+    plot = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    # Just need to trigger the plot computation
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with None values works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+
+# Test with NaN values
+print('\\nTesting with NaN values...')
+try:
+    plot = so.Plot([1, 2, 3, np.nan, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with NaN values works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+
+# Test with all valid data (regression test)
+print('\\nTesting with all valid data...')
+try:
+    plot = so.Plot([1, 2, 3, 4, 5], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with valid data works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+"
+$ python3 -c "
+import seaborn.objects as so
+import numpy as np
+
+# Test with None values
+print('Testing with None values...')
+try:
+    plot = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    # Just need to trigger the plot computation
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with None values works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+
+# Test with NaN values
+print('\\nTesting with NaN values...')
+try:
+    plot = so.Plot([1, 2, 3, np.nan, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with NaN values works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+
+# Test with all valid data (regression test)
+print('\\nTesting with all valid data...')
+try:
+    plot = so.Plot([1, 2, 3, 4, 5], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+    plot._plot(pyplot=False)
+    print('SUCCESS: Plot with valid data works!')
+except Exception as e:
+    print(f'FAILED: {e}')
+"
+$ python3 -c "
+import sys
+import pandas as pd
+import numpy as np
+from seaborn._stats.regression import PolyFit
+from seaborn._core.groupby import GroupBy
+
+# Test the PolyFit class directly
+print('Testing PolyFit with missing data...')
+
+# Create test data with None/NaN values
+df = pd.DataFrame({'x': [1.0, 2.0, 3.0, float('nan'), 4.0], 'y': [1.0, 2.0, 3.0, 4.0, 5.0]})
+print(f'Input data:\\n{df}')
+
+# Apply PolyFit
+groupby = GroupBy(['group'])
+pf = PolyFit(order=2, gridsize=100)
+try:
+    result = pf._fit_predict(df)
+    print(f'\\nSUCCESS! Result has {len(result)} rows')
+    print(f'First few rows of result:\\n{result.head()}')
+except Exception as e:
+    print(f'FAILED: {e}')
+
+print()
+print('Testing with all NaN in y...')
+df2 = pd.DataFrame({'x': [1.0, 2.0, 3.0, 4.0], 'y': [1.0, 2.0, float('nan'), 4.0]})
+try:
+    result2 = pf._fit_predict(df2)
+    print(f'SUCCESS! Result has {len(result2)} rows')
+except Exception as e:
+    print(f'FAILED: {e}')
+"
+$ python3 -m pytest ./tests/_stats/test_regression.py -v
+$ cat >> ./tests/_stats/test_regression.py << 'EOF'
+
+
+    def test_missing_data(self):
+        """Test that PolyFit handles missing values (None/NaN) gracefully."""
+        # Test with NaN in x
+        df_nan_x = pd.DataFrame({"x": [1.0, 2.0, 3.0, float('nan'), 4.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        groupby = GroupBy(["group"])
+        res = PolyFit(order=2, gridsize=100)._fit_predict(df_nan_x)
+        assert len(res) == 100  # Should produce full grid from valid data
+        
+        # Test with NaN in y
+        df_nan_y = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, float('nan'), 4.0]})
+        res = PolyFit(order=2, gridsize=100)._fit_predict(df_nan_y)
+        assert len(res) == 100  # Should produce full grid from valid data
+        
+        # Test with NaN in both x and y (different rows)
+        df_nan_both = pd.DataFrame({
+            "x": [1.0, 2.0, float('nan'), 4.0],
+            "y": [1.0, float('nan'), 3.0, 4.0]
+        })
+        res = PolyFit(order=1, gridsize=50)._fit_predict(df_nan_both)
+        assert len(res) == 50  # Should produce grid from valid rows
+        
+        # Test that it still produces correct results for clean data (regression check)
+        df_clean = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 3.0, 4.0]})
+        res_clean = PolyFit(order=1, gridsize=100)._fit_predict(df_clean)
+        # For a perfect linear fit, the y values should be very close to x values
+        assert np.allclose(res_clean["x"], res_clean["y"])
+EOF
+$ python3 -m pytest ./tests/_stats/test_regression.py -v
+$ python3 -m pytest ./tests/_stats/ -v
+$ cat ./seaborn/_stats/regression.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+I have fixed the issue with `PolyFit` not being robust to missing data.
+
+## Summary of Changes
+
+**File: `./seaborn/_stats/regression.py`**
+
+Added a single line to filter out missing values before fitting the polynomial:
+
+```python
+def _fit_predict(self, data):
+
+    # Filter out rows with missing values
+    data = data.dropna(subset=["x", "y"])
+
+    x = data["x"]
+    y = data["y"]
+    # ... rest of the method
+```
+
+**File: `./tests/_stats/test_regression.py`**
+
+Added a new test `test_missing_data` to verify the fix handles:
+- NaN in x column
+- NaN in y column  
+- NaN in both x and y (different rows)
+- Regression check to ensure valid data still works correctly
+
+## Explanation
+
+The issue was that `np.polyfit()` fails when there are NaN/None values in the input data because it causes the SVD (Singular Value Decomposition) step to not converge in the linear least squares computation. The fix uses `DataFrame.dropna(subset=["x", "y"])` to remove rows with missing values in either coordinate before attempting to fit the polynomial.

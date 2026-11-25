@@ -1,0 +1,70 @@
+$ pwd; ls -la; ls -l src data; wc -l src/program.cbl; cat src/program.cbl
+$ for f in src/INPUT.DAT data/*; do od -An -t c "$f"; done; which cobc; cobc -V; TMP=/tmp/bookref; mkdir -p $TMP; cp -r src data $TMP/; cd $TMP; cobc -x src/program.cbl -o book; ./book; for f in data/*; do xxd $f; done
+$ cd /tmp/bookref; cobc -C -o book.c src/program.cbl; sed -n '65,390p' book.c | grep -E 'cob_|memcpy|memset'; python - <<'PY'
+import subprocess,shutil,pathlib
+p=pathlib.Path('data');
+for s in [b'200',b'1',b'200\n',b'0000000200',b'0000009999',b'          ',b'0000000abc',b'',b'self']:
+ shutil.copytree('/app/data',p,dirs_exist_ok=True); pathlib.Path('src/INPUT.DAT').write_bytes((b'U002U002B0010000002000' if s==b'self' else b'U001U002B001'+s)); r=subprocess.run('./book',capture_output=True);print(s,r.stdout,r.stderr,(p/'ACCOUNTS.DAT').read_bytes(),(p/'TRANSACTIONS.DAT').read_bytes()[66:])
+PY
+$ cd /tmp/bookref; sed -n '380,459p' book.c; python - <<'PY'
+import subprocess,pathlib,shutil
+p=pathlib.Path('data');
+for s in [b'  1  2    ',b'000000000 ',b'000000000\n',b'00000000 1',b'000000000\x00',b' '*9+b'1',b'1'+b' '*9,b'\x00'*10,b'000000000/',b'000000000A',b'000000000\xff']:
+ shutil.copytree('/app/data',p,dirs_exist_ok=True);pathlib.Path('src/INPUT.DAT').write_bytes(b'U001U002B001'+s);subprocess.run('./book',capture_output=True);print(s,(p/'ACCOUNTS.DAT').read_bytes()[24:34],(p/'ACCOUNTS.DAT').read_bytes()[58:68],(p/'TRANSACTIONS.DAT').read_bytes()[70:80])
+PY
+$ python - <<'PY'
+print((2**64-3800)//100%10**10, (2**64-38)%10**10)
+PY
+cd /tmp/bookref; python - <<'PY'
+import pathlib,shutil,subprocess
+p=pathlib.Path('data'); a=p/'ACCOUNTS.DAT'; b=p/'BOOKS.DAT'; t=p/'TRANSACTIONS.DAT';
+for test in ['shortacc','shortbook','badbal','spacebal','nulbal','missingtrans']:
+ shutil.copytree('/app/data',p,dirs_exist_ok=True);pathlib.Path('src/INPUT.DAT').write_bytes(b'U001U002B0010000000001');
+ if test=='shortacc':a.write_bytes(a.read_bytes()[:34]+b'U002');
+ if test=='shortbook':b.write_bytes(b'B000'+b.read_bytes()[4:28]+b'B001')
+ if test.endswith('bal'): a.write_bytes(a.read_bytes()[:24]+{'badbal':b'000000000\n','spacebal':b' 1    123 ','nulbal':b'\0'*10}[test]+a.read_bytes()[34:]);
+ if test=='missingtrans':t.unlink()
+ r=subprocess.run('./book',capture_output=True);print(test,r.returncode,r.stdout,r.stderr,a.read_bytes(),b.read_bytes());
+PY
+$ find / -name numeric.c -o -name move.c 2>/dev/null | head; python - <<'PY'
+for s in [b' 1    123 ',b'\0'*10,b'1    123 ']:
+ n=0
+ for c in s:n=n*10+c-48
+ print(n,(n%2**64-1)%10**10)
+PY
+cd /tmp/bookref; grep -A75 'Initialize WORKING' book.c
+$ cd /tmp/bookref; python - <<'PY'
+from pathlib import Path
+import subprocess,shutil
+for s in [b'00000 123 ', b'000000000 ',b' '*10,b'\x00'*10,b'\xff'*10,b'00000000\x001',b'P123456789',b'@123456789',b'000000000P',b'00000000:P']:
+ shutil.copytree('/app/data', 'data',dirs_exist_ok=True); a=Path('data/ACCOUNTS.DAT'); a.write_bytes(a.read_bytes()[:24]+s+a.read_bytes()[34:]);Path('src/INPUT.DAT').write_bytes(b'U001U002B0010000000000');subprocess.run('./book',capture_output=True);print(s,a.read_bytes()[24:34]);
+PY
+$ cd /tmp/bookref; python - <<'PY'
+from pathlib import Path
+import subprocess,shutil
+for s in [b'\0'*9+b'1',b'\0'+b'123456789',b'\xff'+b'123456789',b'\0'*9+b' ',b'000000000\0',b'000000000\xff',b'P'*10]:
+ shutil.copytree('/app/data', 'data',dirs_exist_ok=True); a=Path('data/ACCOUNTS.DAT'); a.write_bytes(a.read_bytes()[:24]+s+a.read_bytes()[34:]);Path('src/INPUT.DAT').write_bytes(b'U001U002B001'+s);subprocess.run('./book',capture_output=True);print(s,a.read_bytes()[24:34],a.read_bytes()[58:68],Path('data/TRANSACTIONS.DAT').read_bytes()[70:80]);
+PY
+$ cd /tmp/bookref; python - <<'PY'
+from pathlib import Path
+import subprocess,shutil
+for c in [b'\0',b'\xff']:
+ for account in [b'U001',b'U002']:
+  shutil.copytree('/app/data', 'data',dirs_exist_ok=True); a=Path('data/ACCOUNTS.DAT'); i=24 if account==b'U001' else 58;a.write_bytes(a.read_bytes()[:i]+c+b'123456789'+a.read_bytes()[i+10:]);Path('src/INPUT.DAT').write_bytes(b'U001U002B0010000000100');subprocess.run('./book',capture_output=True);print(c,account,a.read_bytes()[i:i+10]);
+PY
+> write /app/program.py
+$ mkdir -p /tmp/bookpy; cp program.py /tmp/bookpy/; cat >/tmp/bookdiff.py <<'PY'
+from pathlib import Path
+import shutil,subprocess,random
+random.seed(42)
+p,q=map(Path,('/tmp/bookref','/tmp/bookpy')); total=0
+for i in range(100):
+ shutil.copytree('/app/data',p/'data',dirs_exist_ok=True); a=p/'data/ACCOUNTS.DAT';b=p/'data/BOOKS.DAT';s=random.choice([b'0000000001',b'200',b'200\n',random.randbytes(10),str(random.randrange(10**10)).zfill(10).encode()]);buyer=random.choice([b'U001',b'U003',b'U002',b'U001']);book=random.choice([b'B001',b'B002',b'B003',b'Bad!']); (p/'src/INPUT.DAT').write_bytes(buyer+b'U002'+book+s if i else b'');
+ if i%3==0:a.write_bytes(a.read_bytes()[:24]+random.randbytes(10)+a.read_bytes()[34:]);
+ if i%5==0:b.write_bytes(b.read_bytes()+b.read_bytes()[:random.randrange(29)]);
+ for d in ['src','data']:shutil.copytree(p/d,q/d,dirs_exist_ok=True)
+ r=subprocess.run('./book',cwd=p,capture_output=True);t=subprocess.run(['python','program.py'],cwd=q,capture_output=True);assert r.returncode==t.returncode and all(x.read_bytes()==(q/'data'/x.name).read_bytes() for x in (p/'data').glob('*')),(i,s,buyer,book,r,t,[(x.read_bytes(),(q/'data'/x.name).read_bytes()) for x in (p/'data').glob('*')]);total+=1
+print(total,'cases matched')
+PY
+python /tmp/bookdiff.py; python program.py
+Implemented `/app/program.py` and verified it against the compiled GnuCOBOL program. All three `.DAT` files matched byte-for-byte across 100 test cases.

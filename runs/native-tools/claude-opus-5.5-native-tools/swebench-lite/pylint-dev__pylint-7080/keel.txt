@@ -1,0 +1,118 @@
+$ grep -n "_discover_files\|ignore_paths\|def _is_ignored\|_is_in_ignore_list_re" -r pylint/lint/*.py | head -40
+> read pylint/lint/pylinter.py
+$ sed -n 1000,1030p pylint/lint/pylinter.py; grep -n "ignore.paths" -A12 pylint/lint/base_options.py; grep -n "def _regexp_paths_csv_transfomer" -A15 pylint/config/argument.py
+> read pylint/lint/expand_modules.py
+$ cd /tmp && rm -rf rp && mkdir -p rp/src/gen && cd rp && echo "x=1" > src/a.py && echo "import os" > src/gen/b.py && printf '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n' > pyproject.toml && python -m pylint --recursive=y src/ ; python -m pylint --recursive=y src ; python -m pylint --recursive=y --ignore-paths='^src/gen/.*$' src; cd /; git -C $OLDPWD log --oneline -1
+$ cd /testbed 2>/dev/null || cd $(dirname $(python -c "import pylint,os;print(os.path.dirname(pylint.__file__))")); pwd; python - <<'EOF'
+import re
+p='pylint/lint/expand_modules.py'
+s=open(p).read()
+s=s.replace("""    basename = os.path.basename(element)
+    return (
+        basename in ignore_list
+        or _is_in_ignore_list_re(basename, ignore_list_re)
+        or _is_in_ignore_list_re(element, ignore_list_paths_re)
+    )""","""    element = os.path.normpath(element)
+    basename = os.path.basename(element)
+    return (
+        basename in ignore_list
+        or _is_in_ignore_list_re(basename, ignore_list_re)
+        or _is_in_ignore_list_re(element, ignore_list_paths_re)
+        or (
+            os.path.isdir(element)
+            and _is_in_ignore_list_re(element + os.sep, ignore_list_paths_re)
+        )
+    )""")
+open(p,'w').write(s)
+p='pylint/lint/pylinter.py'
+s=open(p).read()
+s=s.replace("""                for root, _, files in os.walk(something):
+                    if any(root.startswith(s) for s in skip_subtrees):""","""                for root, _, files in os.walk(something):
+                    root = os.path.normpath(root)
+                    if any(
+                        root == s or root.startswith(s + os.sep)
+                        for s in skip_subtrees
+                    ):""")
+open(p,'w').write(s)
+EOF
+git diff --stat
+$ cd /tmp/rp && touch src/gen/__init__.py && echo "import sys" > src/gen/__init__.py && git -C /testbed stash -q && python -m pylint --recursive=y src/ | grep Module; python -m pylint --recursive=y ./src | grep Module; git -C /testbed stash pop -q && echo AFTER && python -m pylint --recursive=y src/ | grep Module; python -m pylint --recursive=y ./src | grep Module
+$ cd /testbed && python -m pytest tests/lint tests/test_self.py -q -x 2>&1 | tail -3
+$ cd /testbed && python -m pytest tests/lint/unittest_expand_modules.py -q -x 2>&1 | grep -B5 Error | head -40; git stash -q; python -m pytest tests/lint/unittest_expand_modules.py -q 2>&1|tail -1; git stash pop -q
+$ cd /testbed && sed -n 120,160p tests/lint/unittest_expand_modules.py
+$ cd /testbed && git checkout pylint/lint/expand_modules.py && python - <<'EOF'
+p='pylint/lint/pylinter.py'
+s=open(p).read()
+old="""                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ):"""
+new="""                    if _is_ignored_file(
+                        root,
+                        self.config.ignore,
+                        self.config.ignore_patterns,
+                        self.config.ignore_paths,
+                    ) or _is_in_ignore_list_re(
+                        root + os.sep, self.config.ignore_paths
+                    ):"""
+assert old in s
+s=s.replace(old,new)
+s=s.replace("from pylint.lint.expand_modules import _is_ignored_file, expand_modules","from pylint.lint.expand_modules import (\n    _is_ignored_file,\n    _is_in_ignore_list_re,\n    expand_modules,\n)")
+open(p,'w').write(s)
+EOF
+grep -n "expand_modules" pylint/lint/pylinter.py | head; git diff
+$ cd /tmp/rp && for a in src src/ ./src ./src/; do python -m pylint --recursive=y $a | grep Module; done; rm src/gen/__init__.py; for a in src ./src/; do python -m pylint --recursive=y $a | grep Module; done; cd /testbed && python -m pytest tests/lint tests/test_self.py -q 2>&1 | tail -2
+$ cd /testbed && git stash -q && python -m pytest tests/test_self.py -q 2>&1 | tail -3; git stash pop -q
+$ cd /testbed && grep -n "def test_regression_recursive\|def test_recursive" -A12 tests/test_self.py | head -60; ls tests/regrtest_data/directory/ -R | head -30
+$ cd /testbed && sed -n 1245,1316p tests/test_self.py
+$ cd /testbed && python - <<'EOF'
+p='tests/test_self.py'
+s=open(p).read()
+anchor="    def test_recursive_current_dir(self):"
+new='''    def test_ignore_path_recursive_relative(self):
+        """Tests that anchored --ignore-paths patterns are honoured with
+        relative paths (including a ``./`` prefix) when running recursively.
+        """
+        with _test_sys_path():
+            sys.path = [
+                path
+                for path in sys.path
+                if not os.path.basename(path) == "regrtest_data"
+            ]
+            with _test_cwd():
+                os.chdir(join(HERE, "regrtest_data"))
+                for target in ("directory", "directory/", "./directory"):
+                    self._runtest(
+                        [
+                            target,
+                            "--recursive=y",
+                            "--ignore-paths=^directory/ignored_subdirectory/.*$",
+                        ],
+                        code=0,
+                    )
+
+'''
+s=s.replace(anchor,new+anchor,1)
+open(p,'w').write(s)
+EOF
+python -m pytest tests/test_self.py -q -k "recursive" 2>&1 | tail -2; git stash -q; python -m pytest tests/test_self.py -q -k "recursive_relative" 2>&1 | tail -2; git stash pop -q
+$ cd /testbed && git stash push pylint/lint/pylinter.py -q; python -m pytest tests/test_self.py -q -k "recursive_relative" 2>&1 | tail -2; git stash pop -q; git status --short
+`--recursive=y` now skips folders that match anchored `ignore-paths` patterns like `^src/gen/.*$`. A new regression test fails without the fix and passes with it.
+
+**Cause:** When running recursively, pylint checks each folder it walks into against `ignore-paths`. Two things stopped that from working:
+- Folder paths were checked without a trailing `/` (`src/gen` rather than `src/gen/`), so `^src/gen/.*$` never matched the folder itself. Because `src/gen` is a package, it was then linted as a whole.
+- Paths weren't normalised, so `./src/...` or `src//gen` (from `pylint src/`) didn't match anchored patterns either.
+
+**Fix** (in `pylint/lint/pylinter.py`):
+- Walked paths are normalised before they're checked.
+- Folders are also checked with a trailing separator, so `^src/gen/.*$` excludes the whole `src/gen` folder.
+- The check that skips folders under an already-handled one now compares whole path parts. Before, it was a plain prefix match, so skipping `src/gen` would also have skipped a sibling like `src/generated`.
+
+**Testing:**
+- On a copy of your layout, `pylint --recursive=y` with `src`, `src/`, `./src` and `./src/` now reports only `src/a.py`, with or without `src/gen/__init__.py`.
+- The new test, `test_ignore_path_recursive_relative` in `tests/test_self.py`, covers `directory`, `directory/` and `./directory`.
+- `tests/lint` and `tests/test_self.py` pass except for the two `test_generate_toml_config*` tests, which also fail without my change.
+
+I only tested on Linux, so the Windows-style paths in your output weren't checked directly.

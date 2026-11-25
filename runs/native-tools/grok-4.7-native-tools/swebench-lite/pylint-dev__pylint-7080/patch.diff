@@ -1,0 +1,118 @@
+diff --git a/doc/whatsnew/2/2.14/full.rst b/doc/whatsnew/2/2.14/full.rst
+index 77d8bf9d..43ca8069 100755
+--- a/doc/whatsnew/2/2.14/full.rst
++++ b/doc/whatsnew/2/2.14/full.rst
+@@ -5,6 +5,10 @@ What's New in Pylint 2.14.4?
+ ----------------------------
+ Release date: TBA
+ 
++* Fixed ``ignore-paths`` being ignored when running with ``--recursive=y``.
++
++  Closes #6964
++
+ * Fixed regression that didn't allow quoted ``init-hooks`` in option files.
+ 
+   Closes #7006
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..1878523c 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -7,6 +7,7 @@ from __future__ import annotations
+ import os
+ import sys
+ from collections.abc import Sequence
++from pathlib import Path
+ from re import Pattern
+ 
+ from astroid import modutils
+@@ -52,11 +53,35 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
++    """Return whether the element (file or directory) should be ignored.
++
++    ``ignore-paths`` is matched against several normalized forms of the path.
++    ``os.walk`` yields paths in the form given by the caller (relative or
++    absolute, platform separator), while patterns are often written relative
++    to the working directory using POSIX separators (for example
++    ``^src/gen/.*$``). Matching only the raw walk path therefore silently
++    ignores such patterns, especially with ``--recursive``.
++    """
+     basename = os.path.basename(element)
++    element_norm = os.path.normpath(element)
++    # relpath fails when element and the cwd are on different Windows drives.
++    try:
++        element_rel = os.path.relpath(element_norm)
++    except ValueError:
++        element_rel = element_norm
++    path_elements = {
++        element,
++        element_norm,
++        element_rel,
++        Path(element_rel).as_posix(),
++    }
+     return (
+         basename in ignore_list
+         or _is_in_ignore_list_re(basename, ignore_list_re)
+-        or _is_in_ignore_list_re(element, ignore_list_paths_re)
++        or any(
++            _is_in_ignore_list_re(path_element, ignore_list_paths_re)
++            for path_element in path_elements
++        )
+     )
+ 
+ 
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..94f8ff06 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -610,10 +610,21 @@ class PyLinter(
+                         skip_subtrees.append(root)
+                         yield root
+                     else:
++                        # Filter individual files as well. ignore-paths (and
++                        # ignore / ignore-patterns) must apply to files inside a
++                        # directory that is itself not ignored. Matching only the
++                        # walked directory root drops patterns such as
++                        # ``^src/gen/.*$`` when the walked root is ``src``.
+                         yield from (
+                             os.path.join(root, file)
+                             for file in files
+                             if file.endswith(".py")
++                            and not _is_ignored_file(
++                                os.path.join(root, file),
++                                self.config.ignore,
++                                self.config.ignore_patterns,
++                                self.config.ignore_paths,
++                            )
+                         )
+             else:
+                 yield something
+diff --git a/tests/test_self.py b/tests/test_self.py
+index c18a04ae..73f59531 100755
+--- a/tests/test_self.py
++++ b/tests/test_self.py
+@@ -1314,6 +1314,23 @@ class TestRunTC:
+             code=0,
+         )
+ 
++    def test_ignore_path_recursive_relative(self):
++        """Relative ``ignore-paths`` patterns match files discovered recursively.
++
++        ``--recursive`` walks directories and previously only applied
++        ``ignore-paths`` to directory roots. A pattern such as
++        ``^directory/ignored_subdirectory/.*$`` therefore failed to exclude
++        files yielded from a parent directory that itself was not ignored.
++        """
++        self._runtest(
++            [
++                join(HERE, "regrtest_data", "directory"),
++                "--recursive=y",
++                "--ignore-paths=^directory/ignored_subdirectory/.*$",
++            ],
++            code=0,
++        )
++
+     def test_recursive_current_dir(self):
+         with _test_sys_path():
+             # pytest is including directory HERE/regrtest_data to sys.path which causes

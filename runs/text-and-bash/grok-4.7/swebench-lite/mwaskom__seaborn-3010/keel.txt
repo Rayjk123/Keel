@@ -1,0 +1,86 @@
+$ find . -type f -name "*.py" | head -100 && echo "---" && ls -la
+$ cat seaborn/_stats/regression.py && echo "======= TESTS =======" && find tests -name "*regress*" -o -name "*stat*" | head -50 && ls tests
+$ cat tests/_stats/test_regression.py && echo "======= BASE =======" && cat seaborn/_stats/base.py && echo "======= HISTOGRAM HEAD =======" && head -150 seaborn/_stats/histogram.py
+$ rg -n "dropna|isna|isnull|missing" seaborn/_stats seaborn/_statistics.py seaborn/regression.py --type py | head -80 && echo "======= AGG =======" && cat seaborn/_stats/aggregation.py && echo "======= GROUPBY =======" && cat seaborn/_core/groupby.py
+$ grep -n -E "dropna|polyfit|missing|isnan|na" seaborn/regression.py seaborn/_statistics.py | head -60 && echo "======= GIT LOG =======" && git log --oneline -20 && echo "======= BLAME REGRESSION =======" && git log -p -- seaborn/_stats/regression.py | head -200
+$ cat seaborn/__init__.py | head -40 && echo "======= TEST REGRESSION MORE =======" && wc -l tests/_stats/test_regression.py && echo "======= OTHER STAT TESTS =======" && ls tests/_stats && echo "======= PLOT MISSING =======" && grep -n -E "dropna|missing|None|nan" tests/_stats/*.py tests/_core/*.py | head -40
+$ grep -n -E "def _setup|numeric|to_numeric|convert" seaborn/_core/plot.py | head -40 && echo "======= DATA =======" && grep -n -E "nan|None|numeric|infer" seaborn/_core/data.py | head -40 && echo "======= SCALES =======" && grep -n -E "nan|missing|dropna" seaborn/_core/scales.py | head -20
+$ python - << 'EOF'
+import seaborn.objects as so
+import pandas as pd
+import numpy as np
+
+# Check what data looks like before polyfit by monkeypatching
+from seaborn._stats.regression import PolyFit
+orig = PolyFit._fit_predict
+def wrapped(self, data):
+    print(data)
+    print(data.dtypes)
+    print(data.isna())
+    return orig(self, data)
+PolyFit._fit_predict = wrapped
+
+try:
+    so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+except Exception as e:
+    print(type(e), e)
+EOF
+$ python - << 'PY'
+from pathlib import Path
+
+p = Path("seaborn/_stats/regression.py")
+text = p.read_text()
+old = '''    def _fit_predict(self, data):
+
+        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:
+'''
+new = '''    def _fit_predict(self, data):
+
+        data = data.dropna(subset=["x", "y"])
+        x = data["x"]
+        y = data["y"]
+        if x.nunique() <= self.order:
+'''
+if old not in text:
+    raise SystemExit("pattern not found")
+p.write_text(text.replace(old, new, 1))
+
+t = Path("tests/_stats/test_regression.py")
+test = t.read_text()
+addition = '''
+    def test_missing_data(self):
+
+        df = pd.DataFrame({
+            "x": [1, 2, 3, np.nan, 4],
+            "y": [1, 2, 3, 4, 5],
+            "group": ["a", "a", "a", "a", "a"],
+        })
+        groupby = GroupBy(["group"])
+        res = PolyFit(order=1, gridsize=5)(df, groupby, "x", {})
+
+        grid = np.linspace(1, 4, 5)
+        assert_array_equal(res["x"], grid)
+        expected = np.polyval(np.polyfit([1, 2, 3, 4], [1, 2, 3, 5], 1), grid)
+        assert_array_almost_equal(res["y"], expected)
+
+        df.loc[:, "y"] = np.nan
+        res = PolyFit()(df, groupby, "x", {})
+        assert res.empty
+
+'''
+if "def test_missing_data" not in test:
+    t.write_text(test + addition)
+print("updated")
+PY
+$ python - << 'EOF'
+import seaborn.objects as so
+p = so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit())
+plotter = p.plot()
+print("plot ok", type(plotter))
+EOF
+python -m pytest tests/_stats/test_regression.py -q
+$ sed -n '1,80p' seaborn/_stats/regression.py && echo "======= TEST =======" && sed -n '50,90p' tests/_stats/test_regression.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+PolyFit now drops rows with missing `x` or `y` values before calling `np.polyfit`, so missing data no longer triggers the SVD failure.

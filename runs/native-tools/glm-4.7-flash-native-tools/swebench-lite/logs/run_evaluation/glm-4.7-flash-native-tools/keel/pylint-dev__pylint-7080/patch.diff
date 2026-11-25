@@ -1,0 +1,235 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..c5c5dfba
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,72 @@
++"""Simple script to reproduce the ignore-paths issue with --recursive=y"""
++import os
++import tempfile
++import shutil
++import subprocess
++
++# Create a temporary directory structure
++test_dir = tempfile.mkdtemp(prefix="pylint_test_")
++print(f"Created test directory: {test_dir}")
++
++try:
++    os.makedirs(os.path.join(test_dir, "src", "gen"))
++    os.makedirs(os.path.join(test_dir, "src", "non_gen"))
++    
++    # Create some test files
++    with open(os.path.join(test_dir, "src", "__init__.py"), "w") as f:
++        f.write("# src init\n")
++    with open(os.path.join(test_dir, "src", "about.py"), "w") as f:
++        f.write("# about module\n")
++    with open(os.path.join(test_dir, "src", "non_gen.py"), "w") as f:
++        f.write("# non_gen module\n")
++    
++    # Create files in gen directory
++    with open(os.path.join(test_dir, "src", "gen", "__init__.py"), "w") as f:
++        f.write("# gen init\n")
++    with open(os.path.join(test_dir, "src", "gen", "about.py"), "w") as f:
++        f.write("# gen about\n")
++    with open(os.path.join(test_dir, "src", "gen", "design.py"), "w") as f:
++        f.write("# gen design\n")
++    
++    # Create config
++    config_file = os.path.join(test_dir, "pyproject.toml")
++    with open(config_file, "w") as f:
++        f.write("""
++[tool.pylint.MASTER]
++ignore-paths = [
++  "src/gen/.*$",
++]
++""")
++    
++    # Run pylint command
++    result = subprocess.run(
++        ["python", "-m", "pylint", "--rcfile", config_file, "--recursive=y", "src/"],
++        cwd=test_dir,
++        capture_output=True,
++        text=True,
++    )
++    
++    print("\n=== Pylint output ===")
++    print(result.stdout)
++    print(result.stderr)
++    
++    # Count how many files were checked
++    checked_files = [line for line in result.stdout.split('\n') if 'Module' in line and not line.strip().endswith('Your code has been rated')]
++    print(f"\n=== Files checked ===")
++    for f in checked_files:
++        print(f"  {f.strip().split(':')[1].strip()}")
++    
++    # Check if gen files were checked
++    has_gen_files = any('/gen/' in f for f in checked_files)
++    
++    if has_gen_files:
++        print("\n❌ BUG REPRODUCED: Gen files were checked even though they match the ignore-paths pattern!")
++        exit(1)
++    else:
++        print("\n✅ SUCCESS: Gen files are correctly ignored!")
++        exit(0)
++        
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    print(f"\nCleaned up test directory: {test_dir}")
+diff --git a/test_collect.py b/test_collect.py
+new file mode 100644
+index 00000000..15811b42
+--- /dev/null
++++ b/test_collect.py
+@@ -0,0 +1,32 @@
++"""Test collecting files with recursive mode"""
++import os
++import re
++from pathlib import Path
++
++def _is_in_ignore_list_re(element: str, ignore_list_re):
++    """Determines if the element is matched in a regex ignore-list."""
++    return any(file_pattern.match(element) for file_pattern in ignore_list_re)
++
++# Test different regex patterns directly
++patterns_to_test = [
++    "^/tmp/test_/.*",
++    "^src/gen/.*$",
++    "^/tmp/test_/src/gen/.*$",
++    "^.*src/gen/.*$",
++]
++
++print("Testing regex patterns directly:")
++for pattern in patterns_to_test:
++    regex = re.compile(pattern)
++    print(f"\nPattern: {pattern}")
++    
++    # Test paths
++    test_paths = [
++        "/tmp/test_/src/about.py",
++        "/tmp/test_/src/gen/about.py",
++        "/tmp/test_/src/non_gen.py",
++    ]
++    
++    for path in test_paths:
++        matched = regex.match(path) is not None
++        print(f"  {path}: {matched}")
+diff --git a/test_recursive_issue.py b/test_recursive_issue.py
+new file mode 100644
+index 00000000..da866dd2
+--- /dev/null
++++ b/test_recursive_issue.py
+@@ -0,0 +1,98 @@
++"""Test script to reproduce the ignore-paths issue with --recursive=y"""
++import os
++import re
++import tempfile
++import shutil
++import sys
++
++def _is_in_ignore_list_re(element: str, ignore_list_re):
++    """Determines if the element is matched in a regex ignore-list."""
++    return any(file_pattern.match(element) for file_pattern in ignore_list_re)
++
++def _regexp_paths_csv_transfomer(value: str):
++    """Transforms a comma separated list of regular expressions paths."""
++    patterns = []
++    for pattern in value.split(","):
++        pattern = pattern.strip()
++        if pattern:
++            # This is the transformation that pylint uses
++            patterns.append(
++                re.compile(
++                    str(pattern).replace("\\\\", "\\\\\\\\")  # For Windows paths
++                    + "|"
++                    + str(pattern).as_posix()  # For Unix paths
++                )
++            )
++    return patterns
++
++# Create a temporary directory structure
++test_dir = tempfile.mkdtemp(prefix="pylint_test_")
++print(f"Created test directory: {test_dir}")
++
++try:
++    os.makedirs(os.path.join(test_dir, "src", "gen"))
++    os.makedirs(os.path.join(test_dir, "src", "non_gen"))
++    
++    # Create some test files
++    with open(os.path.join(test_dir, "src", "__init__.py"), "w") as f:
++        f.write("# src init\n")
++    with open(os.path.join(test_dir, "src", "about.py"), "w") as f:
++        f.write("# about module\n")
++    with open(os.path.join(test_dir, "src", "non_gen.py"), "w") as f:
++        f.write("# non_gen module\n")
++    
++    # Create files in gen directory
++    with open(os.path.join(test_dir, "src", "gen", "__init__.py"), "w") as f:
++        f.write("# gen init\n")
++    with open(os.path.join(test_dir, "src", "gen", "about.py"), "w") as f:
++        f.write("# gen about\n")
++    with open(os.path.join(test_dir, "src", "gen", "design.py"), "w") as f:
++        f.write("# gen design\n")
++    
++    # The pattern from the bug report
++    pattern = "src/gen/.*$"
++    
++    # Transform it like pylint does
++    ignore_list_paths_re = _regexp_paths_csv_transfomer(pattern)
++    
++    print(f"\nPattern: {pattern}")
++    print(f"Compiled regex: {ignore_list_paths_re[0]}")
++    
++    # Test matching
++    test_paths = [
++        os.path.join(test_dir, "src", "about.py"),
++        os.path.join(test_dir, "src", "gen", "about.py"),
++        os.path.join(test_dir, "src", "gen", "design.py"),
++    ]
++    
++    print("\nTesting pattern matching:")
++    for path in test_paths:
++        matched = _is_in_ignore_list_re(path, ignore_list_paths_re)
++        print(f"  {path}")
++        print(f"    Matched: {matched}")
++        if matched:
++            print(f"    Pattern matched: {ignore_list_paths_re[0].match(path)}")
++    
++    # Now let's test with the normalize path
++    print("\n--- Testing with normalized paths ---")
++    normalized_paths = [
++        os.path.normpath(os.path.join(test_dir, "src", "about.py")),
++        os.path.normpath(os.path.join(test_dir, "src", "gen", "about.py")),
++        os.path.normpath(os.path.join(test_dir, "src", "gen", "design.py")),
++    ]
++    
++    for path in normalized_paths:
++        matched = _is_in_ignore_list_re(path, ignore_list_paths_re)
++        print(f"  {path}")
++        print(f"    Matched: {matched}")
++        if matched:
++            print(f"    Pattern matched: {ignore_list_paths_re[0].match(path)}")
++            
++    if not any(_is_in_ignore_list_re(path, ignore_list_paths_re) for path in normalized_paths):
++        print("\n❌ BUG CONFIRMED: Pattern does not match normal paths!")
++        sys.exit(1)
++
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    print(f"\nCleaned up test directory: {test_dir}")
+diff --git a/test_recursive_issue/src/__init__.py b/test_recursive_issue/src/__init__.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/test_recursive_issue/src/about.py b/test_recursive_issue/src/about.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/test_recursive_issue/src/design.py b/test_recursive_issue/src/design.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/test_recursive_issue/src/gen/about.py b/test_recursive_issue/src/gen/about.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/test_recursive_issue/src/gen/design.py b/test_recursive_issue/src/gen/design.py
+new file mode 100644
+index 00000000..e69de29b

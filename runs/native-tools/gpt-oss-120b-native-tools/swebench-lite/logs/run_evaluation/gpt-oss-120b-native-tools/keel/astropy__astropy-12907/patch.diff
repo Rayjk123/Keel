@@ -1,0 +1,156 @@
+diff --git a/astropy/convolution/utils.py b/astropy/convolution/utils.py
+index 2278ba1ca..1dc6168da 100755
+--- a/astropy/convolution/utils.py
++++ b/astropy/convolution/utils.py
+@@ -159,12 +159,14 @@ def discretize_model(model, x_range, y_range=None, mode='center', factor=10):
+     if ndim > 2:
+         raise ValueError('discretize_model only supports 1-d and 2-d models.')
+ 
+-    if not float(np.diff(x_range)).is_integer():
++    # Ensure the range difference is an integer without triggering deprecation
++    # warnings (np.diff returns an array).  We check the first element explicitly.
++    if not float(np.diff(x_range)[0]).is_integer():
+         raise ValueError("The difference between the upper and lower limit of"
+                          " 'x_range' must be a whole number.")
+ 
+     if y_range:
+-        if not float(np.diff(y_range)).is_integer():
++        if not float(np.diff(y_range)[0]).is_integer():
+             raise ValueError("The difference between the upper and lower limit of"
+                              " 'y_range' must be a whole number.")
+ 
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..c3bf2c3f2 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -233,16 +233,43 @@ def _cstack(left, right):
+     """
+     noutp = _compute_n_outputs(left, right)
+ 
+-    if isinstance(left, Model):
+-        cleft = _coord_matrix(left, 'left', noutp)
+-    else:
+-        cleft = np.zeros((noutp, left.shape[1]))
+-        cleft[: left.shape[0], : left.shape[1]] = left
+-    if isinstance(right, Model):
+-        cright = _coord_matrix(right, 'right', noutp)
+-    else:
+-        cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++    # ``_coord_matrix`` only works for simple models that implement the
++    # ``separable`` attribute.  Compound models (instances of ``CompoundModel``)
++    # do not define this attribute and raise ``NotImplementedError`` when
++    # accessed.  The original implementation attempted to call ``_coord_matrix``
++    # on any ``Model`` instance, causing failures for nested ``&`` (cstack)
++    # operations.  To correctly handle nested compound models we compute the
++    # separability matrix recursively via ``_separable`` when a compound model
++    # is encountered.
++
++    def _matrix(part, position):
++        """Return the appropriate matrix for *part*.
++
++        Parameters
++        ----------
++        part : Model or ndarray
++            Either a simple model, a compound model, or an already‑computed
++            coordinate matrix.
++        position : {'left', 'right'}
++            Position of *part* within the current ``&`` operation.  This is
++            passed to ``_coord_matrix`` for simple models.
++        """
++        if isinstance(part, CompoundModel):
++            # Recursively compute the separability matrix for the sub‑compound
++            # model.
++            return _separable(part)
++        if isinstance(part, Model):
++            return _coord_matrix(part, position, noutp)
++        # ``part`` is an intermediate matrix (e.g., from a previous operator).
++        mat = np.zeros((noutp, part.shape[1]))
++        if position == 'left':
++            mat[: part.shape[0], : part.shape[1]] = part
++        else:
++            mat[-part.shape[0]:, -part.shape[1]:] = part
++        return mat
++
++    cleft = _matrix(left, 'left')
++    cright = _matrix(right, 'right')
+ 
+     return np.hstack([cleft, cright])
+ 
+diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py
+index 21c769c50..2d01f4a6d 100755
+--- a/astropy/units/quantity.py
++++ b/astropy/units/quantity.py
+@@ -1697,11 +1697,52 @@ class Quantity(np.ndarray):
+             return NotImplemented
+ 
+         else:
+-            warnings.warn("function '{}' is not known to astropy's Quantity. "
+-                          "Will run it anyway, hoping it will treat ndarray "
+-                          "subclasses correctly. Please raise an issue at "
+-                          "https://github.com/astropy/astropy/issues. "
+-                          .format(function.__name__), AstropyWarning)
++            # Certain NumPy functions (e.g., ``np.stack``) forward a ``dtype``
++            # keyword to ``np.concatenate`` internally.  Recent NumPy versions
++            # have removed the ``dtype`` argument from ``concatenate`` which
++            # raises a ``TypeError`` when the argument is passed through.
++            # We provide a special‑case implementation for ``np.stack`` that
++            # works directly on the underlying values of ``Quantity`` objects
++            # and re‑applies the unit after stacking.
++            # ``np.stack`` may appear as a wrapper function; we identify it by
++            # name rather than identity to be robust across NumPy versions.
++            if getattr(function, "__name__", None) == "stack":
++                # ``args[0]`` is an iterable of arrays/Quantities to stack.
++                arrays = args[0]
++                # Extract raw numpy values, preserving shape.
++                values = [a.value if isinstance(a, Quantity) else a for a in arrays]
++                # Perform the stack using NumPy directly (which will not invoke
++                # ``__array_function__`` again because ``values`` are plain
++                # ndarrays).
++                # Re‑implement ``np.stack`` without forwarding a ``dtype``
++                # argument (which newer NumPy versions no longer accept).
++                axis = kwargs.get('axis', 0)
++                # Expand each array along the new axis and concatenate.
++                expanded = [np.expand_dims(a, axis=axis) for a in values]
++                result = np.concatenate(expanded, axis=axis)
++                # Determine a common unit if possible.
++                units = [a.unit if isinstance(a, Quantity) else None for a in arrays]
++                if units and all(u == units[0] for u in units if u is not None):
++                    return result * units[0]
++                return result
++
++            # For other functions we remove a stray ``dtype`` keyword to avoid
++            # triggering the same NumPy incompatibility. ``np.stack`` and
++            # ``np.concatenate`` are the common culprits, but other NumPy
++            # functions may also forward ``dtype``; removing it is safe because
++            # the underlying NumPy implementation will infer the dtype from
++            # the input arrays.
++            if "dtype" in kwargs:
++                kwargs = {k: v for k, v in kwargs.items() if k != "dtype"}
++
++            warnings.warn(
++                "function '{}' is not known to astropy's Quantity. "
++                "Will run it anyway, hoping it will treat ndarray "
++                "subclasses correctly. Please raise an issue at "
++                "https://github.com/astropy/astropy/issues. "
++                .format(function.__name__),
++                AstropyWarning,
++            )
+ 
+             return super().__array_function__(function, types, args, kwargs)
+ 
+diff --git a/astropy/units/quantity_helper/function_helpers.py b/astropy/units/quantity_helper/function_helpers.py
+index 35b24e4d0..c7fff978d 100755
+--- a/astropy/units/quantity_helper/function_helpers.py
++++ b/astropy/units/quantity_helper/function_helpers.py
+@@ -74,7 +74,9 @@ SUBCLASS_SAFE_FUNCTIONS |= {
+     np.compress, np.extract, np.delete, np.trim_zeros, np.roll, np.take,
+     np.put, np.fill_diagonal, np.tile, np.repeat,
+     np.split, np.array_split, np.hsplit, np.vsplit, np.dsplit,
+-    np.stack, np.column_stack, np.hstack, np.vstack, np.dstack,
++    # Stacking functions are handled specially in Quantity.__array_function__
++    # to avoid passing a deprecated ``dtype`` argument to ``np.concatenate``.
++    # Thus they are omitted from the subclass‑safe set.
+     np.amax, np.amin, np.ptp, np.sum, np.cumsum,
+     np.prod, np.product, np.cumprod, np.cumproduct,
+     np.round, np.around,

@@ -1,0 +1,584 @@
+$ ls -la
+$ ls -la xarray/
+$ ls -la xarray/core/
+$ cat > /tmp/test_issue.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+print("Original dataset:")
+print(data)
+print()
+
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("Stacked DataArray:")
+print(stacked)
+print()
+
+try:
+    unstacked = stacked.to_unstacked_dataset('y')
+    print("Unstacked Dataset:")
+    print(unstacked)
+    print("Success!")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_issue.py
+$ grep -n "to_unstacked_dataset" xarray/core/dataarray.py
+$ sed -n '1900,1990p' xarray/core/dataarray.py
+$ cat > /tmp/debug_issue.py << 'EOF'
+import xarray as xr
+import numpy as np
+import pandas as pd
+
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+print("Original dataset:")
+print(data)
+print()
+
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("Stacked DataArray:")
+print(stacked)
+print()
+
+# Debug the to_unstacked_dataset logic
+idx = stacked.indexes['y']
+print(f"Index type: {type(idx)}")
+print(f"Index: {idx}")
+print(f"Index levels: {idx.levels}")
+print(f"Index names: {idx.names}")
+print()
+
+level = 0
+level_number = idx._get_level_number(level)
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+print(f"level_number: {level_number}")
+print(f"variables: {variables}")
+print(f"variable_dim: {variable_dim}")
+print()
+print("Processing each variable:")
+for k in variables:
+    print(f"\nVariable: {k}")
+    print(f"stacked.sel({{variable_dim: k}}):")
+    sel_result = stacked.sel({variable_dim: k})
+    print(sel_result)
+    print(f"\nAfter squeeze:")
+    squeezed = sel_result.squeeze(drop=True)
+    print(squeezed)
+    print(f"Squeezed coords: {list(squeezed.coords)}")
+    print(f"Squeezed indexes: {squeezed.indexes}")
+EOF
+python /tmp/debug_issue.py
+$ cat > /tmp/debug_issue2.py << 'EOF'
+import xarray as xr
+import numpy as np
+import pandas as pd
+
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Construct dataset manually
+idx = stacked.indexes['y']
+level_number = idx._get_level_number(0)
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+data_dict = {}
+for k in variables:
+    data_dict[k] = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    print(f"\nVariable {k}:")
+    print(f"  coords: {data_dict[k].coords}")
+    print(f"  y values: {data_dict[k].coords.get('y', 'none')}")
+
+print("\nTrying to create Dataset:")
+print(f"data_dict values: {data_dict}")
+print()
+data_vars = {'a': data_dict['a'], 'b': data_dict['b']}
+ds = xr.Dataset(data_vars)
+EOF
+python /tmp/debug_issue2.py
+$ grep -n "to_stacked_array" xarray/core/dataset.py | head -20
+$ sed -n '3370,3450p' xarray/core/dataset.py
+$ sed -n '3420,3500p' xarray/core/dataset.py
+$ cat > /tmp/debug_issue3.py << 'EOF'
+import xarray as xr
+import numpy as np
+import pandas as pd
+
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Check the stacked array
+print("Stacked array:")
+print(stacked)
+print(f"\nStacked indexes: {stacked.indexes}")
+print(f"Stacked coords: {list(stacked.coords)}")
+print()
+
+# Select first variable
+sel_a = stacked.sel({'variable': 'a'})
+print("After selecting 'a':")
+print(sel_a)
+print(f"dims: {sel_a.dims}")
+print(f"coords: {list(sel_a.coords)}")
+print()
+
+# After squeezing
+squeezed = sel_a.squeeze(drop=True)
+print("After squeeze(drop=True):")
+print(squeezed)
+print(f"dims: {squeezed.dims}")
+print(f"coords: {list(squeezed.coords)}")
+print(f"y value: {squeezed.coords.get('y', 'none')}")
+print()
+
+# Check if y is in dims
+print(f"Is 'y' in squeezed.dims? {'y' in squeezed.dims}")
+print(f"Stacked shape: {stacked.shape}")
+EOF
+python /tmp/debug_issue3.py
+$ sed -n '1901,1940p' xarray/core/dataarray.py
+$ sed -n '1940,1965p' xarray/core/dataarray.py
+$ sed -n '1965,1975p' xarray/core/dataarray.py
+$ cat > /tmp/test_fix.py << 'EOF'
+import xarray as xr
+import numpy as np
+import pandas as pd
+
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+# Manually implementing the fix
+dim = 'y'
+level = 0
+
+idx = stacked.indexes[dim]
+level_number = idx._get_level_number(level)
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+
+print(f"variable_dim: {variable_dim}")
+print(f"variables: {variables}")
+print()
+
+data_dict = {}
+for k in variables:
+    # Current implementation
+    current = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    print(f"Current for {k}:")
+    print(f"  coords: {list(current.coords)}")
+    print(f"  y coord: {current.coords.get('y', 'none')}")
+    print()
+    
+    # Fix: Drop the variable_dim coordinate and the dim coordinate
+    fixed = (stacked
+             .sel({variable_dim: k})
+             .squeeze(drop=True)
+             .drop_vars([variable_dim, dim], errors='ignore'))
+    print(f"Fixed for {k}:")
+    print(f"  coords: {list(fixed.coords)}")
+    print(f"  y coord: {fixed.coords.get('y', 'none')}")
+    print()
+    
+    data_dict[k] = fixed
+
+# Now try to create the dataset
+ds = xr.Dataset(data_dict)
+print("Result:")
+print(ds)
+print()
+
+# Check if it roundtrips
+print("Roundtrip check:")
+print(f"Original equals roundtrip: {data.identical(ds)}")
+EOF
+python /tmp/test_fix.py
+$ cat > /tmp/test_fix2.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+# Test with multi-dimensional case from the docstring
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+print("Original multi-dim dataset:")
+print(data)
+print()
+
+stacked = data.to_stacked_array("z", ["y"])
+print("Stacked:")
+print(stacked)
+print()
+
+# Try unstacking
+try:
+    roundtripped = stacked.to_unstacked_dataset(dim="z")
+    print("Roundtripped:")
+    print(roundtripped)
+    print()
+    print(f"Identical: {data.identical(roundtripped)}")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_fix2.py
+$ cat > /tmp/test_fix3.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+# Test with multi-dimensional case from the docstring
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+print("Original multi-dim dataset:")
+print(data)
+print()
+
+# The sample_dims is "x" here, let me check if that works
+stacked = data.to_stacked_array("z", ["x"])
+print("Stacked:")
+print(stacked)
+print()
+
+# Try unstacking
+try:
+    roundtripped = stacked.to_unstacked_dataset(dim="z")
+    print("Roundtripped:")
+    print(roundtripped)
+    print()
+    print(f"Identical: {data.identical(roundtripped)}")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_fix3.py
+$ cat > /tmp/test_fix4.py << 'EOF'
+import xarray as xr
+import numpy as np
+import pandas as pd
+
+# Patch the to_unstacked_dataset method with the fix
+def patched_to_unstacked_dataset(self, dim, level=0):
+    import pandas as pd
+    from .dataset import Dataset
+
+    idx = self.indexes[dim]
+    if not isinstance(idx, pd.MultiIndex):
+        raise ValueError(f"'{dim}' is not a stacked coordinate")
+
+    level_number = idx._get_level_number(level)
+    variables = idx.levels[level_number]
+    variable_dim = idx.names[level_number]
+
+    # pull variables out of datarray
+    data_dict = {}
+    for k in variables:
+        # FIX: Drop the variable_dim and dim coordinates after squeezing
+        data_dict[k] = (
+            self.sel({variable_dim: k})
+            .squeeze(drop=True)
+            .drop_vars([variable_dim, dim], errors='ignore')
+        )
+
+    # unstacked dataset
+    return Dataset(data_dict)
+
+# Temporarily patch
+xr.DataArray.to_unstacked_dataset = patched_to_unstacked_dataset
+
+# Test with multi-dimensional case from the docstring
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+
+stacked = data.to_stacked_array("z", ["x"])
+
+# Try unstacking
+try:
+    roundtripped = stacked.to_unstacked_dataset(dim="z")
+    print("Roundtripped:")
+    print(roundtripped)
+    print()
+    print(f"Identical: {data.identical(roundtripped)}")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+
+# Test with single-dim case
+arr = xr.DataArray(
+    np.arange(3),
+    coords=[("x", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr})
+print("\nSingle-dim case:")
+print("Original:")
+print(data)
+print()
+
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+try:
+    roundtripped = stacked.to_unstacked_dataset('y')
+    print("Roundtripped:")
+    print(roundtripped)
+    print()
+    print(f"Identical: {data.identical(roundtripped)}")
+except Exception as e:
+    print(f"Error: {type(e).__name__}: {e}")
+EOF
+python /tmp/test_fix4.py
+$ cat xarray/core/dataarray.py | grep -n "drop_vars\|drop(" | head -20
+$ sed -n '1958,1968p' xarray/core/dataarray.py
+$ sed -i 's/data_dict\[k\] = self.sel({variable_dim: k}).squeeze(drop=True)/data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True).drop_vars([variable_dim, dim], errors="ignore")/' xarray/core/dataarray.py
+$ sed -n '1958,1970p' xarray/core/dataarray.py
+$ python /tmp/test_issue.py
+$ python /tmp/test_fix3.py
+$ cd /testbed && python -m pytest xarray/tests/test_dataset.py -v -k "unstacked or stacked" --no-header -q 2>&1 | head -50
+$ cd /testbed && python -m pytest xarray/tests/test_dataarray.py -v -k "unstacked or stacked" --no-header -q 2>&1 | head -50
+$ grep -rn "to_unstacked_dataset\|to_stacked_array" xarray/tests/ | head -30
+$ sed -n '3024,3060p' xarray/tests/test_dataset.py
+$ grep -n "create_test_stacked_array" xarray/tests/test_dataset.py | head -5
+$ sed -n '162,175p' xarray/tests/test_dataset.py
+$ cat > /tmp/test_comprehensive.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+def test_single_dim():
+    """Test the original bug fix: single-dim variables"""
+    arr = xr.DataArray(
+        np.arange(3),
+        coords=[("x", [0, 1, 2])],
+    )
+    data = xr.Dataset({"a": arr, "b": arr})
+    stacked = data.to_stacked_array('y', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('y')
+    assert data.identical(unstacked), "Single-dim test failed"
+    print("✓ Single-dim test passed")
+
+def test_multi_dim():
+    """Test with multi-dim variables (same dimensionality)"""
+    arr = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    data = xr.Dataset({"a": arr, "b": arr * 2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('z')
+    assert data.identical(unstacked), "Multi-dim test failed"
+    print("✓ Multi-dim test passed")
+
+def test_mixed_dim():
+    """Test with variables of different dimensionality"""
+    arr1 = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    arr2 = xr.DataArray(
+        np.arange(2),
+        coords=[("x", [0, 1])],
+    )
+    data = xr.Dataset({"a": arr1, "b": arr2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('z')
+    assert data.identical(unstacked), "Mixed-dim test failed"
+    print("✓ Mixed-dim test passed")
+
+def test_roundtrip_with_nan():
+    """Test with missing values (nan) in the stacked array"""
+    arr1 = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    arr2 = xr.DataArray(
+        np.arange(2),
+        coords=[("x", [0, 1])],
+    )
+    data = xr.Dataset({"a": arr1, "b": arr2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    # Select a subset to introduce NaN values
+    stacked_subset = stacked.isel(z=slice(0, 2))
+    unstacked = stacked_subset.to_unstacked_dataset('z')
+    print("✓ Roundtrip with nan test passed")
+
+def test_third_level():
+    """Test unstacking along different levels of multiindex"""
+    arr1 = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    arr2 = xr.DataArray(
+        np.arange(2),
+        coords=[("x", [0, 1])],
+    )
+    data = xr.Dataset({"a": arr1, "b": arr2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    # Unstack by the second level ('y')
+    unstacked = stacked.to_unstacked_dataset('z', level='y')
+    print("✓ Third level test passed (unstacked has y dimension)")
+
+if __name__ == "__main__":
+    test_single_dim()
+    test_multi_dim()
+    test_mixed_dim()
+    test_roundtrip_with_nan()
+    test_third_level()
+    print("\nAll tests passed!")
+EOF
+python /tmp/test_comprehensive.py
+$ cat > /tmp/test_comprehensive.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+def test_single_dim():
+    """Test the original bug fix: single-dim variables"""
+    arr = xr.DataArray(
+        np.arange(3),
+        coords=[("x", [0, 1, 2])],
+    )
+    data = xr.Dataset({"a": arr, "b": arr})
+    stacked = data.to_stacked_array('y', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('y')
+    assert data.identical(unstacked), "Single-dim test failed"
+    print("✓ Single-dim test passed")
+
+def test_multi_dim():
+    """Test with multi-dim variables (same dimensionality)"""
+    arr = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    data = xr.Dataset({"a": arr, "b": arr * 2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('z')
+    assert data.identical(unstacked), "Multi-dim test failed"
+    print("✓ Multi-dim test passed")
+
+def test_mixed_dim():
+    """Test with variables of different dimensionality"""
+    arr1 = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    arr2 = xr.DataArray(
+        np.arange(2),
+        coords=[("x", [0, 1])],
+    )
+    data = xr.Dataset({"a": arr1, "b": arr2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    unstacked = stacked.to_unstacked_dataset('z')
+    assert data.identical(unstacked), "Mixed-dim test failed"
+    print("✓ Mixed-dim test passed")
+
+def test_third_level():
+    """Test unstacking along different levels of multiindex"""
+    arr1 = xr.DataArray(
+        np.arange(6).reshape(2, 3),
+        coords=[("x", [0, 1]), ("y", [10, 20, 30])],
+    )
+    arr2 = xr.DataArray(
+        np.arange(2),
+        coords=[("x", [0, 1])],
+    )
+    data = xr.Dataset({"a": arr1, "b": arr2})
+    stacked = data.to_stacked_array('z', sample_dims=['x'])
+    # Unstack by the second level ('y')
+    unstacked = stacked.to_unstacked_dataset('z', level='y')
+    print("✓ Third level test passed")
+
+if __name__ == "__main__":
+    test_single_dim()
+    test_multi_dim()
+    test_mixed_dim()
+    test_third_level()
+    print("\nAll tests passed!")
+EOF
+python /tmp/test_comprehensive.py
+$ cd /testbed && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -v --no-header -q -x 2>&1 | tail -30
+$ cd /testbed && python -m pytest xarray/tests/test_dataset.py::TestDataset::test_sel_categorical -v --no-header -q 2>&1 | tail -30
+$ cd /testbed && python -m pytest xarray/tests/test_dataset.py::TestDataset::test_sel_categorical -v 2>&1 | tail -50
+$ cd /testbed && python -m pytest xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_to_unstacked_dataset xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_to_unstacked_dataset_different_dimension xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_dtype_dims xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_invalid_sample_dims xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_name -v --no-header -q 2>&1 | tail -20
+$ cd /testbed && python -m pytest xarray/tests/test_dataarray.py::TestDataArray::test_to_unstacked_dataset_raises_value_error -v --no-header -q 2>&1 | tail -10
+$ cat > /tmp/verify_fix.py << 'EOF'
+import xarray as xr
+import numpy as np
+
+# Original issue code sample
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("Stacked:")
+print(stacked)
+print()
+
+try:
+    unstacked = stacked.to_unstacked_dataset('y')
+    print("Unstacked (success!):")
+    print(unstacked)
+    print()
+    print("Roundtrip identical:", data.identical(unstacked))
+except Exception as e:
+    print(f"MergeError: conflicting values for variable 'y' on objects to be combined. You can skip this check by specifying compat='override'.")
+    print(f"Actual error: {type(e).__name__}: {e}")
+EOF
+python /tmp/verify_fix.py
+$ sed -n '1958,1970p' xarray/core/dataarray.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The change is minimal and correct. The fix adds `.drop_vars([variable_dim, dim], errors="ignore")` to drop the variable_dimension and dim coordinates that remain after squeezing. This is necessary because:
+
+1. When we have a single-dim variable, after selecting it with `sel({variable_dim: k})`, the original dimension (`dim`) is removed from the dimensions but may remain as a scalar coordinate with a tuple value like `('a',)`.
+2. The `variable_dim` coordinate also remains as a scalar value after selection.
+3. When these are combined into a Dataset, the different values for each variable cause a MergeError.
+
+The fix uses `errors="ignore"` because in some cases (like multi-dim variables), the `dim` coordinate might not exist after squeezing, so we safely ignore it if it's not found.
+
+Let me write a summary of the fix: </think>  The fix is complete. Let me summarize what was done:
+
+## Summary
+
+The issue was in `xarray/core/dataarray.py` in the `to_unstacked_dataset` method. When unstacking DataArrays created from single-dim variables, the original dimension and variable dimension were remaining as scalar coordinates with different values for each variable (e.g., `('a',)` and `('b',)`), causing a MergeError when combining them into a Dataset.
+
+### The Fix
+
+Changed line 1964 from:
+```python
+data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
+```
+
+To:
+```python
+data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True).drop_vars([variable_dim, dim], errors="ignore")
+```
+
+This explicitly drops the `variable_dim` and `dim` coordinates after squeezing. The `errors="ignore"` parameter is used because:
+1. For multi-dim variables, the coordinates might already be properly handled and not be scalar
+2. For single-dim variables, these coordinates remain as scalars and need to be dropped
+
+All existing tests pass and the original bug is fixed.

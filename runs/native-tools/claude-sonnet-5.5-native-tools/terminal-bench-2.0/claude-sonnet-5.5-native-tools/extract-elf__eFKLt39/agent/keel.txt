@@ -1,0 +1,29 @@
+$ cd /app && ls -la && file a.out && readelf -hS a.out | head -60 && node -v
+$ cd /app && cat hi.c; which readelf objdump gcc python3; node -v; xxd a.out | head -5
+$ cd /app && readelf -hlS a.out
+$ cd /app && cat > extract.js <<'EOF'
+const fs = require('fs');
+const buf = fs.readFileSync(process.argv[2] || '/app/a.out');
+if (buf.readUInt32BE(0) !== 0x7f454c46) throw new Error('not ELF');
+const is64 = buf[4] === 2;
+const rd = (o, n) => n === 8 ? Number(buf.readBigUInt64LE(o)) : buf.readUInt32LE(o);
+let phoff, phentsize, phnum;
+if (is64) { phoff = rd(32, 8); phentsize = buf.readUInt16LE(54); phnum = buf.readUInt16LE(56); }
+else { phoff = rd(28, 4); phentsize = buf.readUInt16LE(42); phnum = buf.readUInt16LE(44); }
+const out = {};
+for (let i = 0; i < phnum; i++) {
+  const p = phoff + i * phentsize;
+  if (buf.readUInt32LE(p) !== 1) continue; // PT_LOAD
+  let off, vaddr, filesz;
+  if (is64) { off = rd(p + 8, 8); vaddr = rd(p + 16, 8); filesz = rd(p + 32, 8); }
+  else { off = rd(p + 4, 4); vaddr = rd(p + 8, 4); filesz = rd(p + 16, 4); }
+  for (let j = 0; j + 4 <= filesz; j += 4) out[vaddr + j] = buf.readUInt32LE(off + j);
+}
+process.stdout.write(JSON.stringify(out));
+EOF
+node extract.js /app/a.out > out.json; head -c 200 out.json; node -e 'console.log(Object.keys(require("./out.json")).length)'
+`/app/extract.js` is written and runs as `node extract.js /app/a.out > out.json`. On `a.out` it produced 698 address/value pairs. I couldn't compare them with the reference solution, so I haven't confirmed they match.
+
+The script reads the ELF program headers. For each loadable segment, it reads the bytes stored in the file as little-endian 32-bit words. It prints each word as an integer keyed by its virtual address, in the form `{"addr": value}`. It skips `.bss`, because that memory isn't stored in the file.
+
+**Address base:** `a.out` is a position-independent executable, so its segments start at address 0. I used those addresses as they are in the ELF, so the keys start at 0. Your example output starts at 4194304 (0x400000). If the reference expects that load base, every key in my output would be wrong and the test would fail. The first example value, 1784774249, doesn't match `a.out`'s ELF header bytes either, so the example may come from a different binary.

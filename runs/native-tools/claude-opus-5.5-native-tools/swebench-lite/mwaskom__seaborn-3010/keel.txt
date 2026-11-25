@@ -1,0 +1,57 @@
+$ cat seaborn/_stats/regression.py
+$ cd seaborn/_stats && python - <<'EOF'
+import re
+s=open('regression.py').read()
+s=s.replace("""        return groupby.apply(data, self._fit_predict)
+
+
+@dataclass
+class OLSFit""","""        return (
+            groupby
+            .apply(data.dropna(subset=["x", "y"]), self._fit_predict)
+        )
+
+
+@dataclass
+class OLSFit""")
+open('regression.py','w').write(s)
+EOF
+cd ../.. && python -c "
+import seaborn.objects as so
+p=so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+print(p._figure.axes[0].lines[0].get_xydata()[:3])
+" && python -m pytest tests/_stats/test_regression.py -q 2>&1 | tail -2
+$ python -c "
+import pandas as pd, numpy as np
+from seaborn._stats.regression import PolyFit
+from seaborn._core.groupby import GroupBy
+df=pd.DataFrame(dict(x=[1,2,3,None,4],y=[1,2,3,4,5]))
+r=PolyFit()(df,GroupBy([]),'x',{})
+print(r.head(), r.isna().any().any())
+" && python -m pytest tests/_stats/test_regression.py -q 2>&1 | tail -2
+$ python -c "
+import pandas as pd, numpy as np
+from seaborn._stats.regression import PolyFit
+from seaborn._core.groupby import GroupBy
+df=pd.DataFrame(dict(x=[1,2,3,None,4],y=[1,2,3,4,5],g='a'))
+r=PolyFit()(df,GroupBy(['g']),'x',{})
+print(r.head(), r.isna().any().any())
+" && python -m pytest tests/_stats/test_regression.py -q 2>&1 | tail -2
+$ tail -25 tests/_stats/test_regression.py
+$ cat >> tests/_stats/test_regression.py <<'EOF'
+
+    def test_missing_data(self, df):
+
+        groupby = GroupBy(["group"])
+        df.iloc[5:10] = np.nan
+        res1 = PolyFit()(df[["x", "y"]], groupby, "x", {})
+        res2 = PolyFit()(df[["x", "y"]].dropna(), groupby, "x", {})
+        assert_frame_equal(res1, res2)
+EOF
+grep -n "^from\|^import" tests/_stats/test_regression.py
+$ sed -i '6a from pandas.testing import assert_frame_equal' tests/_stats/test_regression.py && python -m pytest tests/_stats/test_regression.py -q 2>&1 | tail -2
+The fix is done: `PolyFit` no longer crashes when `x` or `y` has missing values.
+
+- **Fix:** in `seaborn/_stats/regression.py`, `PolyFit.__call__` now drops rows where `x` or `y` is missing before fitting each group. Those missing values were what made `np.polyfit` raise the `LinAlgError`.
+- **Test:** I added `test_missing_data` to `tests/_stats/test_regression.py`. It checks that data with missing values gives the same result as the same data with those rows removed. All 3 tests in that file pass.
+- **Not run end to end:** I couldn't run the exact snippet from the issue all the way through. The fit now works, but drawing the line then fails in `seaborn/_core/plot.py`, which uses the `"mode.use_inf_as_null"` pandas setting. The pandas installed here no longer has that setting. That's a separate version mismatch, and I didn't change it.

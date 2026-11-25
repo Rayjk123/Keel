@@ -1,0 +1,38 @@
+$ cd sympy/core && grep -n "def __eq__" -A30 expr.py | head -50; grep -n "_sympify\|def sympify" sympify.py | head
+$ cd sympy/core && sed -i '124s/other = sympify(other)/other = _sympify(other)/' expr.py && grep -n "^from .sympify\|import.*sympify" expr.py | head
+$ cd sympy && grep -rn "def __eq__" -A6 core/ | grep -n " sympify(" 
+$ cd sympy && grep -rn "def __eq__" -A8 core/numbers.py core/basic.py | grep "sympify"; cd .. && python -c "
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+class D:
+    def __repr__(self): return 'x'
+print(sympy.Symbol('x') == C(), sympy.Symbol('x') != D(), sympy.Symbol('x')==1, sympy.Integer(2)==2.0)
+"
+$ cd sympy/core/tests && cat >> test_expr.py <<'EOF'
+
+
+def test_issue_18073_eq_does_not_eval_repr():
+    class C:
+        def __repr__(self):
+            return 'x.y'
+
+    class D:
+        def __repr__(self):
+            return 'x'
+
+    x = Symbol('x')
+    assert (x == C()) is False
+    assert x != D()
+EOF
+cd ../../.. && python -m pytest -q -x sympy/core/tests 2>&1 | tail -5
+$ python bin/test sympy/core 2>&1 | tail -15
+$ python bin/test sympy/core 2>&1 | grep -E "^_+ sympy|Error" | head; git stash -q; python bin/test sympy/core 2>&1 | grep -E "^_+ sympy|tests finished"; git stash pop -q; sed -n 15,25p sympy/core/tests/test_var.py
+$ sed -i "s/    assert v == \['d', 'e', 'fg'\]/    assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]/" sympy/core/tests/test_var.py; python bin/test sympy/core 2>&1 | grep -iE "XPASS|tests finished" ; python bin/test sympy/core -v 2>&1 | grep -i xpass
+$ python bin/test sympy/core 2>&1 | grep -iE "pass|finished"; git diff --stat
+The fix is finished: comparing a SymPy expression with an unknown object no longer evaluates that object's repr.
+
+- **Fix:** in `sympy/core/expr.py`, `Expr.__eq__` now calls `_sympify(other)` instead of `sympify(other)`. `_sympify` only converts things SymPy already knows. For anything else it raises `SympifyError`, which `__eq__` already turns into `False`.
+- **Result:** `Symbol('x') == C()` with repr `'x.y'` returns `False` instead of raising. With repr `'x'`, `Symbol('x') != C()` is now `True`. Comparisons with plain numbers still work.
+- **Behaviour change:** SymPy objects no longer equal strings, so `Symbol('x') == 'x'` is now `False`. One test in `sympy/core/tests/test_var.py` relied on that, and I changed it to compare against `Symbol`s. User code that compares SymPy objects to strings will change the same way.
+- **Tests:** I added a regression test for both cases to `sympy/core/tests/test_expr.py`. The `sympy/core` suite gives 1712 passed and 2 exceptions, both in `test_sympify.py`. Those two also fail without my change, with `ValueError: Name node can't be used with 'False' constant`, which looks like a Python-version problem. I didn't run the full SymPy suite.

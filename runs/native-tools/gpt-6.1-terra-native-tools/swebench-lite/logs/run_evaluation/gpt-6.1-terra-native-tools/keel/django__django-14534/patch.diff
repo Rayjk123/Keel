@@ -1,0 +1,117 @@
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 2ff8b0ee26..a061f15f87 100755
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -277,7 +277,7 @@ class BoundWidget:
+ 
+     @property
+     def id_for_label(self):
+-        return 'id_%s_%s' % (self.data['name'], self.data['index'])
++        return self.data['attrs'].get('id')
+ 
+     @property
+     def choice_label(self):
+diff --git a/docs/releases/4.0.txt b/docs/releases/4.0.txt
+index 6821378e3b..0b060ea498 100755
+--- a/docs/releases/4.0.txt
++++ b/docs/releases/4.0.txt
+@@ -472,6 +472,10 @@ some cases.
+ Miscellaneous
+ -------------
+ 
++* The ``id_for_label`` attribute of an iterated form field's subwidget now
++  reflects the ID actually rendered by the widget. It is ``None`` when the
++  subwidget has no ID, rather than a generated ID that doesn't exist.
++
+ * Support for ``cx_Oracle`` < 7.0 is removed.
+ 
+ * To allow serving a Django site on a subpath without changing the value of
+diff --git a/tests/forms_tests/tests/test_forms.py b/tests/forms_tests/tests/test_forms.py
+index f3ee64ceda..299df71b4b 100755
+--- a/tests/forms_tests/tests/test_forms.py
++++ b/tests/forms_tests/tests/test_forms.py
+@@ -720,11 +720,83 @@ Java</label></li>
+         fields = list(BeatleForm(auto_id=False)['name'])
+         self.assertEqual(len(fields), 4)
+ 
+-        self.assertEqual(fields[0].id_for_label, 'id_name_0')
++        self.assertIsNone(fields[0].id_for_label)
+         self.assertEqual(fields[0].choice_label, 'John')
+         self.assertHTMLEqual(fields[0].tag(), '<option value="john">John</option>')
+         self.assertHTMLEqual(str(fields[0]), '<option value="john">John</option>')
+ 
++    def test_iterable_boundfield_ids(self):
++        choices = [('john', 'John'), ('group', [('paul', 'Paul'), ('george', 'George')])]
++        for widget, field in ((RadioSelect, ChoiceField), (CheckboxSelectMultiple, MultipleChoiceField)):
++            class BeatleForm(Form):
++                name = field(choices=choices, widget=widget)
++
++            for kwargs, expected in (
++                ({}, ['id_name_0', 'id_name_1_0', 'id_name_1_1']),
++                ({'auto_id': 'custom_%s', 'prefix': 'band'},
++                 ['custom_band-name_0', 'custom_band-name_1_0', 'custom_band-name_1_1']),
++                ({'auto_id': False}, [None, None, None]),
++            ):
++                with self.subTest(widget=widget, kwargs=kwargs):
++                    form = BeatleForm(**kwargs)
++                    subwidgets = list(form['name'])
++                    self.assertEqual(len(subwidgets), len(expected))
++                    for subwidget, id_ in zip(subwidgets, expected):
++                        self.assertEqual(subwidget.id_for_label, id_)
++                        self.assertEqual(subwidget.data['attrs'].get('id'), id_)
++                        if id_ is None:
++                            self.assertNotIn(' id=', subwidget.tag())
++                        else:
++                            self.assertIn('id="%s"' % id_, subwidget.tag())
++
++            form = BeatleForm(auto_id=False)
++            form.fields['name'].widget.attrs['id'] = 'explicit'
++            self.assertEqual(
++                [subwidget.id_for_label for subwidget in form['name']],
++                ['explicit_0', 'explicit_1_0', 'explicit_1_1'],
++            )
++
++    def test_iterable_boundfield_custom_option_id(self):
++        class CustomCheckboxSelectMultiple(CheckboxSelectMultiple):
++            def create_option(self, *args, **kwargs):
++                option = super().create_option(*args, **kwargs)
++                option['attrs']['id'] = 'option-%s' % option['index']
++                return option
++
++        class TestForm(Form):
++            name = MultipleChoiceField(choices=[('a', 'A')], widget=CustomCheckboxSelectMultiple)
++
++        subwidget = TestForm()['name'][0]
++        self.assertEqual(subwidget.id_for_label, 'option-0')
++        self.assertHTMLEqual(
++            str(subwidget),
++            '<label for="option-0"><input type="checkbox" name="name" value="a" id="option-0"> A</label>',
++        )
++
++    def test_iterable_boundfield_label_template(self):
++        class TestForm(Form):
++            name = MultipleChoiceField(choices=[('a', 'A')], widget=CheckboxSelectMultiple)
++
++        template = Template(
++            '{% for checkbox in form.name %}'
++            '<label{% if checkbox.id_for_label %} for="{{ checkbox.id_for_label }}"{% endif %}>'
++            '{{ checkbox.tag }} {{ checkbox.choice_label }}</label>{% endfor %}'
++        )
++        for auto_id, html in (
++            ('custom_%s', '<label for="custom_name_0"><input type="checkbox" name="name" '
++                          'value="a" id="custom_name_0"> A</label>'),
++            (False, '<label><input type="checkbox" name="name" value="a"> A</label>'),
++        ):
++            with self.subTest(auto_id=auto_id):
++                self.assertHTMLEqual(template.render(Context({'form': TestForm(auto_id=auto_id)})), html)
++
++    def test_nonchoice_subwidget_id_for_label(self):
++        class TestForm(Form):
++            name = CharField()
++
++        self.assertEqual(TestForm()['name'][0].id_for_label, 'id_name')
++        self.assertIsNone(TestForm(auto_id=False)['name'][0].id_for_label)
++
+     def test_form_with_noniterable_boundfield(self):
+         # You can iterate over any BoundField, not just those with widget=RadioSelect.
+         class BeatleForm(Form):

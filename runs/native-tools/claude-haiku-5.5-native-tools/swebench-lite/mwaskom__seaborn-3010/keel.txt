@@ -1,0 +1,40 @@
+$ cd ~ 2>/dev/null; cd "$OLDPWD"; pwd; cat seaborn/_stats/regression.py; sed -n 1,80p seaborn/_stats/density.py | head -5; grep -n "dropna\|notna" seaborn/_stats/*.py | head -20
+$ cd /testbed && python - <<'EOF'
+import re
+p='seaborn/_stats/regression.py'
+s=open(p).read()
+s=s.replace('''        x = data["x"]
+        y = data["y"]
+        if x.nunique()''','''        part = data[["x", "y"]].dropna()
+        x = part["x"]
+        y = part["y"]
+        if x.nunique()''')
+open(p,'w').write(s)
+EOF
+python -c "
+import seaborn.objects as so
+p=so.Plot([1, 2, 3, None, 4], [1, 2, 3, 4, 5]).add(so.Line(), so.PolyFit()).plot()
+ln=p._figure.axes[0].lines[-1]; print(ln.get_xydata())
+" && python -m pytest -q tests/_stats/test_regression.py 2>&1 | tail -3
+$ cd /testbed && git status --short && git stash -q && python -c "
+import seaborn.objects as so
+so.Plot([1,2,3],[1,2,3]).add(so.Line()).plot()" 2>&1 | tail -1; git stash pop -q && git status --short; python -c "import pandas;print(pandas.__version__)"; python -m pytest -q tests/_stats/test_regression.py tests/_core/test_plot.py 2>&1 | tail -3
+$ cd /testbed && python -m pytest -q tests/_stats/test_regression.py 2>&1 | tail -3; python -c "
+import pandas as pd, numpy as np
+from seaborn._stats.regression import PolyFit
+from seaborn._core.groupby import GroupBy
+d=pd.DataFrame(dict(x=[1,2,3,np.nan,4.],y=[1,2,3,4,5.],))
+print(PolyFit()(d, GroupBy([]), 'x', {}))
+"
+$ cd /testbed && python -c "
+import pandas as pd, numpy as np
+from seaborn._stats.regression import PolyFit
+from seaborn._core.groupby import GroupBy
+d=pd.DataFrame(dict(x=[1,2,3,np.nan,4.],y=[1,2,3,4,5.],g=0))
+print(PolyFit()(d, GroupBy(['g']), 'x', {}))
+"
+The fix for the issue is in place, but I haven't verified the plot from the issue end to end.
+
+In `seaborn/_stats/regression.py`, `PolyFit._fit_predict` now drops rows with missing `x` or `y` before calling `np.polyfit`. Calling PolyFit directly on data containing a NaN now returns a fitted curve, and the two tests in `tests/_stats/test_regression.py` pass.
+
+Rendering any plot in this environment still fails with `OptionError: No such keys(s): 'mode.use_inf_as_null'`. The repo uses a pandas option that doesn't exist in the installed pandas 2.0.0. I confirmed this error also occurs on the untouched code, so it is a separate pre-existing incompatibility in `seaborn/_core/plot.py`, which I left alone. Because of it, the issue's example can't be rendered here. With my change, 73 tests fail across `tests/_core/test_plot.py` and `tests/_stats/test_regression.py`. I did not run a baseline count for those files, so I can't say how many of those failures were already there before my change.

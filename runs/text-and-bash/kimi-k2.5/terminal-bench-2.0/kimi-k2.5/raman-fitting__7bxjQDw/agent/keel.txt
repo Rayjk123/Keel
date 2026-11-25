@@ -1,0 +1,1187 @@
+$ ls -la
+$ head -50 graphene.dat
+$ cat graphene.dat | head -5 | od -c
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+import re
+
+# Read the data file
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # Split by tab
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                # Convert European notation (comma as decimal) to float
+                x = float(parts[0].replace(',', '.'))
+                y = float(parts[1].replace(',', '.'))
+                data.append((x, y))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    # Lorentzian: amplitude / (1 + ((x - x0) / (gamma/2))**2) + offset
+    return amplitude * (gamma/2)**2 / ((x - x0)**2 + (gamma/2)**2) + offset
+
+# Double Lorentzian function for fitting
+def double_lorentzian(x, x0_1, gamma_1, amp_1, x0_2, gamma_2, amp_2, offset):
+    peak1 = amp_1 * (gamma_1/2)**2 / ((x - x0_1)**2 + (gamma_1/2)**2)
+    peak2 = amp_2 * (gamma_2/2)**2 / ((x - x0_2)**2 + (gamma_2/2)**2)
+    return peak1 + peak2 + offset
+
+# Read data
+data = read_dat_file('graphene.dat')
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# For Raman of graphene, we expect:
+# G peak around 1580 cm^-1
+# 2D peak around 2690 cm^-1
+
+# Filter data to the range of interest
+min_x = 1400
+max_x = 2900
+mask = (x_data >= min_x) & (x_data <= max_x)
+x_fit = x_data[mask]
+y_fit = y_data[mask]
+
+# Initial guesses
+# G peak: x0 around 1580, gamma ~ 20, amplitude ~ max in region
+# 2D peak: x0 around 2690, gamma ~ 30, amplitude ~ max in region
+
+g_region = (x_fit >= 1500) & (x_fit <= 1650)
+d2_region = (x_fit >= 2600) & (x_fit <= 2800)
+
+# Estimate initial parameters
+x0_g_init = x_fit[g_region][np.argmax(y_fit[g_region])] if np.any(g_region) else 1580
+amp_g_init = np.max(y_fit[g_region]) - np.min(y_fit) if np.any(g_region) else 1000
+gamma_g_init = 20
+
+x0_2d_init = x_fit[d2_region][np.argmax(y_fit[d2_region])] if np.any(d2_region) else 2690
+amp_2d_init = np.max(y_fit[d2_region]) - np.min(y_fit) if np.any(d2_region) else 1000
+gamma_2d_init = 30
+
+offset_init = np.min(y_fit)
+
+# Initial parameters for double Lorentzian
+p0 = [x0_g_init, gamma_g_init, amp_g_init, 
+      x0_2d_init, gamma_2d_init, amp_2d_init, 
+      offset_init]
+
+# Bounds
+bounds = ([1500, 5, 0, 2600, 5, 0, 0],
+          [1650, 100, 100000, 2800, 100, 100000, 20000])
+
+# Fit the data
+try:
+    popt, pcov = curve_fit(double_lorentzian, x_fit, y_fit, p0=p0, bounds=bounds, maxfev=10000)
+    
+    # Extract parameters
+    x0_g, gamma_g, amp_g = popt[0], popt[1], popt[2]
+    x0_2d, gamma_2d, amp_2d = popt[3], popt[4], popt[5]
+    offset = popt[6]
+    
+    # Separate fits for individual peaks (to get individual offsets)
+    # Fit G peak separately
+    g_mask = (x_fit >= 1500) & (x_fit <= 1650)
+    try:
+        popt_g, _ = curve_fit(lorentzian, x_fit[g_mask], y_fit[g_mask], 
+                             p0=[x0_g, gamma_g, amp_g, offset],
+                             bounds=([1500, 5, 0, 0], [1650, 100, 100000, 20000]),
+                             maxfev=5000)
+    except:
+        # Use values from double fit
+        popt_g = [x0_g, gamma_g, amp_g, offset]
+    
+    # Fit 2D peak separately
+    d2_mask = (x_fit >= 2600) & (x_fit <= 2800)
+    try:
+        popt_2d, _ = curve_fit(lorentzian, x_fit[d2_mask], y_fit[d2_mask],
+                               p0=[x0_2d, gamma_2d, amp_2d, offset],
+                               bounds=([2600, 5, 0, 0], [2800, 100, 100000, 20000]),
+                               maxfev=5000)
+    except:
+        # Use values from double fit
+        popt_2d = [x0_2d, gamma_2d, amp_2d, offset]
+    
+except Exception as e:
+    print(f"Double lorentzian fit failed: {e}")
+    # Fallback: fit individually
+    # Fit G peak
+    g_mask = (x_fit >= 1500) & (x_fit <= 1650)
+    popt_g, _ = curve_fit(lorentzian, x_fit[g_mask], y_fit[g_mask],
+                         p0=[1580, 20, np.max(y_fit[g_mask]) - np.min(y_fit), np.min(y_fit)],
+                         maxfev=5000)
+    
+    # Fit 2D peak
+    d2_mask = (x_fit >= 2600) & (x_fit <= 2800)
+    popt_2d, _ = curve_fit(lorentzian, x_fit[d2_mask], y_fit[d2_mask],
+                           p0=[2690, 30, np.max(y_fit[d2_mask]) - np.min(y_fit), np.min(y_fit)],
+                           maxfev=5000)
+
+# Create results dictionary
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(popt_g[1]),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(popt_2d[1]),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+# Write results to JSON file
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("Results written to /app/results.json")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ pip install numpy scipy
+$ python fit_raman.py
+$ cat > explore_data.py << 'EOF'
+import numpy as np
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                x = float(parts[0].replace(',', '.'))
+                y = float(parts[1].replace(',', '.'))
+                data.append((x, y))
+    return np.array(data)
+
+data = read_dat_file('graphene.dat')
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+print("X range:", x_data.min(), "-", x_data.max())
+print("Y range:", y_data.min(), "-", y_data.max())
+print("Number of points:", len(x_data))
+
+# Check regions where G and 2D peaks typically are
+g_region = (x_data >= 1500) & (x_data <= 1700)
+d2_region = (x_data >= 2600) & (x_data <= 2800)
+
+print("\nG region (1500-1700):", np.sum(g_region), "points")
+if np.sum(g_region) > 0:
+    print("  Y range:", y_data[g_region].min(), "-", y_data[g_region].max())
+    print("  X of max Y:", x_data[g_region][np.argmax(y_data[g_region])])
+
+print("\n2D region (2600-2800):", np.sum(d2_region), "points")
+if np.sum(d2_region) > 0:
+    print("  Y range:", y_data[d2_region].min(), "-", y_data[d2_region].max())
+    print("  X of max Y:", x_data[d2_region][np.argmax(y_data[d2_region])])
+
+# Show some sample values
+print("\nFirst 10 points:")
+for i in range(10):
+    print(f"  x={x_data[i]:.2f}, y={y_data[i]:.2f}")
+
+print("\nLast 10 points:")
+for i in range(-10, 0):
+    print(f"  x={x_data[i]:.2f}, y={y_data[i]:.2f}")
+EOF
+python explore_data.py
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+# Read the data file - columns are swapped!
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                # Second column is wavenumber (x), first is intensity (y)
+                x = float(parts[1].replace(',', '.'))
+                y = float(parts[0].replace(',', '.'))
+                data.append((x, y))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    # Lorentzian: amplitude * (gamma/2)^2 / ((x-x0)^2 + (gamma/2)^2) + offset
+    return amplitude * (gamma/2)**2 / ((x - x0)**2 + (gamma/2)**2) + offset
+
+# Read data
+data = read_dat_file('graphene.dat')
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+print("X (wavenumber) range:", x_data.min(), "-", x_data.max())
+print("Y (intensity) range:", y_data.min(), "-", y_data.max())
+
+# For Raman of graphene:
+# G peak around 1580 cm^-1
+# 2D peak around 2690 cm^-1
+
+# G peak fitting (region 1500-1650)
+g_mask = (x_data >= 1500) & (x_data <= 1650)
+x_g = x_data[g_mask]
+y_g = y_data[g_mask]
+
+# Initial guess for G peak
+x0_g_init = x_g[np.argmax(y_g)]
+amp_g_init = np.max(y_g) - np.min(y_g)
+gamma_g_init = 20
+offset_g_init = np.median(y_data[(x_data >= 1400) & (x_data <= 1500)])  # baseline left of G
+
+p0_g = [x0_g_init, gamma_g_init, amp_g_init, offset_g_init]
+
+# Fit G peak
+popt_g, pcov_g = curve_fit(lorentzian, x_g, y_g, p0=p0_g, maxfev=10000)
+print(f"G fitted parameters: x0={popt_g[0]:.2f}, gamma={popt_g[1]:.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+
+# 2D peak fitting (region 2550-2800)
+d2_mask = (x_data >= 2550) & (x_data <= 2800)
+x_2d = x_data[d2_mask]
+y_2d = y_data[d2_mask]
+
+# Initial guess for 2D peak
+x0_2d_init = x_2d[np.argmax(y_2d)]
+amp_2d_init = np.max(y_2d) - np.min(y_2d)
+gamma_2d_init = 30
+offset_2d_init = np.median(np.concatenate([
+    y_data[(x_data >= 2500) & (x_data <= 2550)],
+    y_data[(x_data >= 2800) & (x_data <= 2900)]
+]))
+
+p0_2d = [x0_2d_init, gamma_2d_init, amp_2d_init, offset_2d_init]
+
+# Fit 2D peak
+popt_2d, pcov_2d = curve_fit(lorentzian, x_2d, y_2d, p0=p0_2d, maxfev=10000)
+print(f"2D fitted parameters: x0={popt_2d[0]:.2f}, gamma={popt_2d[1]:.2f}, amp={popt_2d[2]:.2f}, offset={popt_2d[3]:.2f}")
+
+# Create results dictionary
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(popt_g[1]),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(popt_2d[1]),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+# Write results to JSON file
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults written to /app/results.json")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ head -20 graphene.dat && echo "---" && tail -20 graphene.dat
+$ sed -n '1700p;1800p;1900p;2000p' graphene.dat && echo "---" && python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    # Around middle
+    for i in [1700, 1800, 1900, 2000]:
+        line = lines[i].strip().split('\t')
+        print(f'Line {i}: col1={line[0]}, col2={line[1]}')
+"
+$ grep -n '^1[45][0-9][0-9],' graphene.dat | head -5 && echo "---" && grep -n '^2[67][0-9][0-9],' graphene.dat | head -5
+$ grep -n '^15[78][0-9],' graphene.dat | head -10 && echo "---" && grep -n '^16[01][0-9],' graphene.dat | head -10 && echo "---" && sed -n '2450p;2500p;2600p' graphene.dat
+$ python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    # Find rows where first column is in Raman range (1000-3000)
+    print('First column in 1000-3000 range:')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 1500 <= col1 <= 1700:
+            print(f'Line {i}: col1={col1:.1f}, col2={col2:.1f}')
+            if i >= 10:
+                break
+    print()
+    print('Second column in 1000-3000 range:')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 1500 <= col2 <= 1700:
+            print(f'Line {i}: col1={col1:.1f}, col2={col2:.1f}')
+            if i >= 10:
+                break
+"
+$ python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    
+    print('First column around 1580 (G peak):')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 1580 <= col1 <= 1590:
+            print(f'Line {i}: col1={col1:.2f}, col2={col2:.2f}')
+            break
+    
+    print()
+    print('First column around 2690 (2D peak):')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 2680 <= col1 <= 2700:
+            print(f'Line {i}: col1={col1:.2f}, col2={col2:.2f}')
+            break
+    
+    print()
+    print('Range of first column:')
+    col1_vals = [float(line.strip().split('\t')[0].replace(',', '.')) for line in lines]
+    print(f'Min: {min(col1_vals):.2f}, Max: {max(col1_vals):.2f}')
+"
+$ python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    
+    print('Second column value statistics:')
+    col2_vals = [float(line.strip().split('\t')[1].replace(',', '.')) for line in lines]
+    print(f'Min: {min(col2_vals):.2f}, Max: {max(col2_vals):.2f}')
+    
+    print()
+    print('Second column around 1580:')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 1580 <= col2 <= 1590:
+            print(f'Line {i}: col1={col1:.2f}, col2={col2:.2f}')
+            break
+            
+    print()
+    print('Second column around 2690:')
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        if 2680 <= col2 <= 2700:
+            print(f'Line {i}: col1={col1:.2f}, col2={col2:.2f}')
+            break
+            
+    print()
+    # Find peaks in intensity
+    print('Looking for max values in each column...')    
+    max_col1_idx = max(range(len(lines)), key=lambda i: float(lines[i].strip().split('\t')[0].replace(',', '.')))
+    max_col2_idx = max(range(len(lines)), key=lambda i: float(lines[i].strip().split('\t')[1].replace(',', '.')))
+    print(f'Max col1 at line {max_col1_idx}: {lines[max_col1_idx].strip()}')
+    print(f'Max col2 at line {max_col2_idx}: {lines[max_col2_idx].strip()}')
+"
+$ python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    
+    # Get data in G peak region (col2 around 1580)
+    g_region = []
+    d2_region = []
+    
+    for i, line in enumerate(lines):
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        
+        if 1570 <= col2 <= 1590:
+            g_region.append((col2, col1))
+        if 2680 <= col2 <= 2700:
+            d2_region.append((col2, col1))
+    
+    print('G peak region (col2=1580):')
+    for x, y in sorted(g_region)[:5]:
+        print(f'  wavenumber={x:.1f}, intensity={y:.1f}')
+    print('...')
+    for x, y in sorted(g_region)[-5:]:
+        print(f'  wavenumber={x:.1f}, intensity={y:.1f}')
+    
+    print()
+    print('2D peak region (col2=2690):')
+    for x, y in sorted(d2_region)[:5]:
+        print(f'  wavenumber={x:.1f}, intensity={y:.1f}')
+    print('...')
+    for x, y in sorted(d2_region)[-5:]:
+        print(f'  wavenumber={x:.1f}, intensity={y:.1f}')
+"
+$ python3 -c "
+with open('graphene.dat', 'r') as f:
+    lines = f.readlines()
+    
+    # Check if data is sorted
+    col1_vals = [float(line.strip().split('\t')[0].replace(',', '.')) for line in lines]
+    col2_vals = [float(line.strip().split('\t')[1].replace(',', '.')) for line in lines]
+    
+    print(f'Total lines: {len(lines)}')
+    print(f'Col1 sorted descending: {all(col1_vals[i] >= col1_vals[i+1] for i in range(len(col1_vals)-1))}')
+    print(f'Col1 sorted ascending: {all(col1_vals[i] <= col1_vals[i+1] for i in range(len(col1_vals)-1))}')
+    print(f'Col2 sorted descending: {all(col2_vals[i] >= col2_vals[i+1] for i in range(len(col2_vals)-1))}')
+    print(f'Col2 sorted ascending: {all(col2_vals[i] <= col2_vals[i+1] for i in range(len(col2_vals)-1))}')
+    
+    # Check for duplicates
+    col1_set = set(col1_vals)
+    col2_set = set(col2_vals)
+    print(f'Unique col1 values: {len(col1_set)} out of {len(col1_vals)}')
+    print(f'Unique col2 values: {len(col2_set)} out of {len(col2_vals)}')
+    
+    # Get data around expected peaks
+    data = []
+    for line in lines:
+        parts = line.strip().split('\t')
+        col1 = float(parts[0].replace(',', '.'))
+        col2 = float(parts[1].replace(',', '.'))
+        data.append((col2, col1))  # x=col2 (wavenumber), y=col1 (intensity)
+    
+    # Sort by wavenumber
+    data_sorted = sorted(data)
+    
+    # Find peaks in intensity around G and 2D regions
+    g_peak = max([d for d in data_sorted if 1540 <= d[0] <= 1620], key=lambda x: x[1], default=None)
+    d2_peak = max([d for d in data_sorted if 2650 <= d[0] <= 2750], key=lambda x: x[1], default=None)
+    
+    print(f'G peak candidate: {g_peak}')
+    print(f'2D peak candidate: {d2_peak}')
+    
+    # Sample of sorted data around G
+    g_data = [d for d in data_sorted if 1500 <= d[0] <= 1650]
+    print(f'\\nG region data points: {len(g_data)}')
+    print('Sample:')
+    for d in g_data[:10]:
+        print(f'  x={d[0]:.1f}, y={d[1]:.1f}')
+"
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))  # First column = Y
+                wavenum = float(parts[1].replace(',', '.'))    # Second column = X
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    # Lorentzian: amplitude * (gamma/2)^2 / ((x-x0)^2 + (gamma/2)^2) + offset
+    return amplitude * (gamma/2)**2 / ((x - x0)**2 + (gamma/2)**2) + offset
+
+# Read data
+data = read_dat_file('graphene.dat')
+x_raw = data[:, 0]
+y_raw = data[:, 1]
+
+# Sort by x (wavenumber)
+sort_idx = np.argsort(x_raw)
+x = x_raw[sort_idx]
+y = y_raw[sort_idx]
+
+print(f"Data range after sorting: x={x.min():.1f} to {x.max():.1f}")
+print(f"Y range: {y.min():.1f} to {y.max():.1f}")
+
+# Filter to relevant range for Raman spectrum (1000-3000 cm^-1 roughly)
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+print(f"Filtered range: x={x.min():.1f} to {x.max():.1f}")
+print(f"Filtered Y range: {y.min():.1f} to {y.max():.1f}")
+
+# G peak fitting (region 1500-1650)
+g_mask = (x >= 1500) & (x <= 1650)
+x_g = x[g_mask]
+y_g = y[g_mask]
+
+print(f"\nG peak region points: {len(x_g)}")
+print(f"G peak Y range: {y_g.min():.1f} to {y_g.max():.1f}")
+print(f"G peak X of max Y: {x_g[np.argmax(y_g)]:.2f}")
+
+# Initial guess for G peak
+x0_g_init = x_g[np.argmax(y_g)]
+amp_g_init = np.max(y_g) - np.min(y_g)
+gamma_g_init = 20
+offset_g_init = np.median(y_g) - amp_g_init * 0.1
+
+p0_g = [x0_g_init, gamma_g_init, amp_g_init, offset_g_init]
+
+# Fit G peak
+popt_g, pcov_g = curve_fit(lorentzian, x_g, y_g, p0=p0_g, maxfev=10000)
+print(f"G fitted: x0={popt_g[0]:.2f}, gamma={popt_g[1]:.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+
+# 2D peak fitting (region 2550-2800)
+d2_mask = (x >= 2550) & (x <= 2800)
+x_2d = x[d2_mask]
+y_2d = y[d2_mask]
+
+print(f"\n2D peak region points: {len(x_2d)}")
+print(f"2D peak Y range: {y_2d.min():.1f} to {y_2d.max():.1f}")
+print(f"2D peak X of max Y: {x_2d[np.argmax(y_2d)]:.2f}")
+
+# Initial guess for 2D peak
+x0_2d_init = x_2d[np.argmax(y_2d)]
+amp_2d_init = np.max(y_2d) - np.min(y_2d)
+gamma_2d_init = 30
+offset_2d_init = np.median(y_2d) - amp_2d_init * 0.1
+
+p0_2d = [x0_2d_init, gamma_2d_init, amp_2d_init, offset_2d_init]
+
+# Fit 2D peak
+popt_2d, pcov_2d = curve_fit(lorentzian, x_2d, y_2d, p0=p0_2d, maxfev=10000)
+print(f"2D fitted: x0={popt_2d[0]:.2f}, gamma={popt_2d[1]:.2f}, amp={popt_2d[2]:.2f}, offset={popt_2d[3]:.2f}")
+
+# Create results dictionary
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(popt_g[1]),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(popt_2d[1]),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+# Write results to JSON file
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults written to /app/results.json")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))
+                wavenum = float(parts[1].replace(',', '.'))
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+# Lorentzian with standard peak height parameterization
+# amplitude = peak height, gamma = FWHM
+def lorentzian(x, x0, gamma, amplitude, offset):
+    # Peak height at x0 is amplitude
+    return amplitude / (1 + ((x - x0) / (gamma/2))**2) + offset
+
+# Read and sort data
+data = read_dat_file('graphene.dat')
+x_raw = data[:, 0]
+y_raw = data[:, 1]
+sort_idx = np.argsort(x_raw)
+x = x_raw[sort_idx]
+y = y_raw[sort_idx]
+
+# Filter to Raman range
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+# Remove baseline trend with polynomial subtraction
+# Fit a low-order polynomial to the background
+poly_bg = np.polyfit(x, y, 2)
+y_bg = np.polyval(poly_bg, x)
+y_corrected = y - y_bg + np.min(y_bg)  # Keep some background
+
+print("After baseline correction:")
+print(f"Y range: {y_corrected.min():.1f} to {y_corrected.max():.1f}")
+
+# G peak
+g_mask = (x >= 1540) & (x <= 1620)
+x_g = x[g_mask]
+y_g = y_corrected[g_mask]
+
+# Find actual peak
+peak_idx = np.argmax(y_g)
+x0_g_init = x_g[peak_idx]
+amp_g_init = y_g[peak_idx] - np.min(y_g)
+gamma_g_init = 15
+offset_g_init = np.min(y_g)
+
+print(f"\nG peak search: x0={x0_g_init:.1f}, amp={amp_g_init:.1f}")
+
+# Try fitting
+try:
+    popt_g, _ = curve_fit(lambda x, x0, gamma, amp, off: lorentzian(x, x0, gamma, amp, off),
+                          x_g, y_g,
+                          p0=[x0_g_init, gamma_g_init, amp_g_init, offset_g_init],
+                          bounds=([1540, 1, 0, 0], [1620, 100, 10000, 10000]),
+                          maxfev=5000)
+    print(f"G fit: x0={popt_g[0]:.2f}, gamma={popt_g[1]:.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+except Exception as e:
+    print(f"G fit failed: {e}")
+    popt_g = [x0_g_init, gamma_g_init, amp_g_init, offset_g_init]
+
+# 2D peak
+d2_mask = (x >= 2650) & (x <= 2800)
+x_2d = x[d2_mask]
+y_2d = y_corrected[d2_mask]
+
+peak_idx = np.argmax(y_2d)
+x0_2d_init = x_2d[peak_idx]
+amp_2d_init = y_2d[peak_idx] - np.min(y_2d)
+gamma_2d_init = 25
+offset_2d_init = np.min(y_2d)
+
+print(f"\n2D peak search: x0={x0_2d_init:.1f}, amp={amp_2d_init:.1f}")
+
+try:
+    popt_2d, _ = curve_fit(lambda x, x0, gamma, amp, off: lorentzian(x, x0, gamma, amp, off),
+                           x_2d, y_2d,
+                           p0=[x0_2d_init, gamma_2d_init, amp_2d_init, offset_2d_init],
+                           bounds=([2650, 1, 0, 0], [2800, 100, 10000, 10000]),
+                           maxfev=5000)
+    print(f"2D fit: x0={popt_2d[0]:.2f}, gamma={popt_2d[1]:.2f}, amp={popt_2d[2]:.2f}, offset={popt_2d[3]:.2f}")
+except Exception as e:
+    print(f"2D fit failed: {e}")
+    popt_2d = [x0_2d_init, gamma_2d_init, amp_2d_init, offset_2d_init]
+
+# Create results
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(abs(popt_g[1])),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(abs(popt_2d[1])),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults written:")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ python3 -c "
+import numpy as np
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))
+                wavenum = float(parts[1].replace(',', '.'))
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+data = read_dat_file('graphene.dat')
+x = data[:, 0]
+y = data[:, 1]
+sort_idx = np.argsort(x)
+x = x[sort_idx]
+y = y[sort_idx]
+
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+# Baseline subtract
+poly_bg = np.polyfit(x, y, 3)
+y_bg = np.polyval(poly_bg, x)
+y_corr = y - y_bg
+
+# G peak analysis
+g_mask = (x >= 1540) & (x <= 1620)
+x_g = x[g_mask]
+y_g = y_corr[g_mask]
+
+peak_idx = np.argmax(y_g)
+peak_x = x_g[peak_idx]
+peak_y = y_g[peak_idx]
+
+# Estimate FWHM by finding points at half max
+half_max = peak_y / 2
+left_idx = np.where(y_g[:peak_idx] < half_max)[0]
+right_idx = np.where(y_g[peak_idx:] < half_max)[0] + peak_idx
+
+if len(left_idx) > 0:
+    x_left = x_g[left_idx[-1]]
+else:
+    x_left = x_g[0]
+if len(right_idx) > 0:
+    x_right = x_g[right_idx[0]]
+else:
+    x_right = x_g[-1]
+
+print(f'G peak: x0={peak_x:.2f}, max_y={peak_y:.2f}')
+print(f'Rough FWHM: {x_right - x_left:.2f} cm-1')
+print(f'Points near G peak:')
+for i in range(max(0, peak_idx-5), min(len(x_g), peak_idx+6)):
+    print(f'  x={x_g[i]:.1f}, y={y_g[i]:.1f}')
+
+print()
+# 2D peak analysis
+d2_mask = (x >= 2650) & (x <= 2800)
+x_2d = x[d2_mask]
+y_2d = y_corr[d2_mask]
+
+peak_idx = np.argmax(y_2d)
+peak_x = x_2d[peak_idx]
+peak_y = y_2d[peak_idx]
+
+half_max = peak_y / 2
+left_idx = np.where(y_2d[:peak_idx] < half_max)[0]
+right_idx = np.where(y_2d[peak_idx:] < half_max)[0] + peak_idx
+
+if len(left_idx) > 0:
+    x_left = x_2d[left_idx[-1]]
+else:
+    x_left = x_2d[0]
+if len(right_idx) > 0:
+    x_right = x_2d[right_idx[0]]
+else:
+    x_right = x_2d[-1]
+
+print(f'2D peak: x0={peak_x:.2f}, max_y={peak_y:.2f}')
+print(f'Rough FWHM: {x_right - x_left:.2f} cm-1')
+print(f'Points near 2D peak:')
+for i in range(max(0, peak_idx-5), min(len(x_2d), peak_idx+6)):
+    print(f'  x={x_2d[i]:.1f}, y={y_2d[i]:.1f}')
+"
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))
+                wavenum = float(parts[1].replace(',', '.'))
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude / (1 + ((x - x0) / (gamma/2))**2) + offset
+
+# Read and sort data
+data = read_dat_file('graphene.dat')
+x_raw = data[:, 0]
+y_raw = data[:, 1]
+sort_idx = np.argsort(x_raw)
+x = x_raw[sort_idx]
+y = y_raw[sort_idx]
+
+# Filter to Raman range
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+# Simple baseline using endpoints
+# Average of beginning and end regions
+bg_left = np.median(y[(x >= 1400) & (x <= 1500)])
+bg_right = np.median(y[(x >= 2800) & (x <= 2900)])
+bg_mean = (bg_left + bg_right) / 2
+y_bg = np.full_like(y, bg_mean)
+y_corrected = y - y_bg
+
+print(f"Baseline: {bg_mean:.1f}")
+print(f"Y range after correction: {y_corrected.min():.1f} to {y_corrected.max():.1f}")
+
+# G peak - use data around the peak
+g_mask = (x >= 1560) & (x <= 1610)
+x_g = x[g_mask]
+y_g = y_corrected[g_mask]
+
+# Get local maximum and surrounding points
+peak_idx = np.argmax(y_g)
+peak_x = x_g[peak_idx]
+peak_y = y_g[peak_idx]
+print(f"\nG peak found at x={peak_x:.2f}, y={peak_y:.2f}")
+
+# Estimate FWHM from non-negative points around peak
+positive_mask = y_g > 0
+x_g_pos = x_g[positive_mask]
+y_g_pos = y_g[positive_mask]
+if len(y_g_pos) > 1:
+    half_max = peak_y / 2
+    above_half = x_g_pos[y_g_pos > half_max]
+    if len(above_half) > 1:
+        fwhm_est = above_half[-1] - above_half[0]
+    else:
+        fwhm_est = 15
+else:
+    fwhm_est = 15
+print(f"Estimated G FWHM: {fwhm_est:.1f}")
+
+amp_g = peak_y
+offset_g = np.min(y_g_pos) if len(y_g_pos) > 0 else 0
+
+p0_g = [peak_x, fwhm_est, amp_g, offset_g]
+try:
+    popt_g, _ = curve_fit(lambda x, x0, gamma, amp, off: lorentzian(x, x0, abs(gamma), amp, off),
+                          x_g_pos, y_g_pos,
+                          p0=p0_g,
+                          bounds=([peak_x-20, 5, 0, -2000], [peak_x+20, 50, 10000, 2000]),
+                          maxfev=10000)
+    print(f"G fit: x0={popt_g[0]:.2f}, gamma={abs(popt_g[1]):.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+except Exception as e:
+    print(f"G fit error: {e}")
+    popt_g = [peak_x, fwhm_est, amp_g, offset_g]
+
+# 2D peak
+d2_mask = (x >= 2680) & (x <= 2790)
+x_2d = x[d2_mask]
+y_2d = y_corrected[d2_mask]
+
+peak_idx = np.argmax(y_2d)
+peak_x = x_2d[peak_idx]
+peak_y = y_2d[peak_idx]
+print(f"\n2D peak found at x={peak_x:.2f}, y={peak_y:.2f}")
+
+positive_mask = y_2d > 0
+x_2d_pos = x_2d[positive_mask]
+y_2d_pos = y_2d[positive_mask]
+if len(y_2d_pos) > 1:
+    half_max = peak_y / 2
+    above_half = x_2d_pos[y_2d_pos > half_max]
+    if len(above_half) > 1:
+        fwhm_est = above_half[-1] - above_half[0]
+    else:
+        fwhm_est = 30
+else:
+    fwhm_est = 30
+print(f"Estimated 2D FWHM: {fwhm_est:.1f}")
+
+amp_2d = peak_y
+offset_2d = np.min(y_2d_pos) if len(y_2d_pos) > 0 else 0
+
+p0_2d = [peak_x, fwhm_est, amp_2d, offset_2d]
+try:
+    popt_2d, _ = curve_fit(lambda x, x0, gamma, amp, off: lorentzian(x, x0, abs(gamma), amp, off),
+                           x_2d_pos, y_2d_pos,
+                           p0=p0_2d,
+                           bounds=([peak_x-30, 10, 0, -2000], [peak_x+30, 60, 10000, 2000]),
+                           maxfev=10000)
+    print(f"2D fit: x0={popt_2d[0]:.2f}, gamma={abs(popt_2d[1]):.2f}, amp={popt_2d[2]:.2f}, offset={popt_2d[3]:.2f}")
+except Exception as e:
+    print(f"2D fit error: {e}")
+    popt_2d = [peak_x, fwhm_est, amp_2d, offset_2d]
+
+# Use positive gamma
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(abs(popt_g[1])),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(abs(popt_2d[1])),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nFinal results:")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))
+                wavenum = float(parts[1].replace(',', '.'))
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude / (1 + ((x - x0) / (gamma/2))**2) + offset
+
+# Read and sort data
+data = read_dat_file('graphene.dat')
+x_raw = data[:, 0]
+y_raw = data[:, 1]
+sort_idx = np.argsort(x_raw)
+x = x_raw[sort_idx]
+y = y_raw[sort_idx]
+
+# Filter to Raman range
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+# Simple baseline using median of edge regions
+bg_left = np.median(y[(x >= 1400) & (x <= 1500)])
+bg_right = np.median(y[(x >= 2800) & (x <= 2900)])
+bg_mean = (bg_left + bg_right) / 2
+y_bg = np.full_like(y, bg_mean)
+y_corrected = y - y_bg
+
+print(f"Baseline: {bg_mean:.1f}")
+
+# G peak
+g_mask = (x >= 1560) & (x <= 1610)
+x_g = x[g_mask]
+y_g = y_corrected[g_mask]
+
+# Use only positive values for fit
+pos_mask = y_g > 0
+x_g_pos = x_g[pos_mask]
+y_g_pos = y_g[pos_mask]
+
+peak_idx = np.argmax(y_g_pos)
+peak_x_g = x_g_pos[peak_idx]
+peak_y_g = y_g_pos[peak_idx]
+
+p0_g = [peak_x_g, 15, peak_y_g, 0]
+popt_g, _ = curve_fit(lorentzian, x_g_pos, y_g_pos,
+                      p0=p0_g,
+                      bounds=([1560, 1, 0, -5000], [1610, 100, 10000, 5000]),
+                      maxfev=10000)
+print(f"G fit: x0={popt_g[0]:.2f}, gamma={popt_g[1]:.2f}, amp={popt_g[2]:.2f}, offset={popt_g[3]:.2f}")
+
+# 2D peak
+d2_mask = (x >= 2650) & (x <= 2800)
+x_2d = x[d2_mask]
+y_2d = y_corrected[d2_mask]
+
+pos_mask = y_2d > 0
+x_2d_pos = x_2d[pos_mask]
+y_2d_pos = y_2d[pos_mask]
+
+peak_idx = np.argmax(y_2d_pos)
+peak_x_2d = x_2d_pos[peak_idx]
+peak_y_2d = y_2d_pos[peak_idx]
+
+p0_2d = [peak_x_2d, 40, peak_y_2d, 0]
+popt_2d, _ = curve_fit(lorentzian, x_2d_pos, y_2d_pos,
+                       p0=p0_2d,
+                       bounds=([2650, 5, 0, -5000], [2800, 200, 10000, 5000]),
+                       maxfev=10000)
+print(f"2D fit: x0={popt_2d[0]:.2f}, gamma={popt_2d[1]:.2f}, amp={popt_2d[2]:.2f}, offset={popt_2d[3]:.2f}")
+
+# Ensure positive gamma
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(abs(popt_g[1])),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(abs(popt_2d[1])),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults:")
+print(json.dumps(results, indent=2))
+EOF
+python fit_raman.py
+$ cat > fit_raman.py << 'EOF'
+import json
+import numpy as np
+from scipy.optimize import curve_fit
+
+def read_dat_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) >= 2:
+                intensity = float(parts[0].replace(',', '.'))
+                wavenum = float(parts[1].replace(',', '.'))
+                data.append((wavenum, intensity))
+    return np.array(data)
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude / (1 + ((x - x0) / (gamma/2))**2) + offset
+
+# Read and sort data
+data = read_dat_file('graphene.dat')
+x = data[:, 0]
+y = data[:, 1]
+sort_idx = np.argsort(x)
+x = x[sort_idx]
+y = y[sort_idx]
+
+# Filter to Raman range
+mask = (x >= 1000) & (x <= 3000)
+x = x[mask]
+y = y[mask]
+
+# Baseline subtraction using median of edge regions
+bg_left = np.median(y[(x >= 1400) & (x <= 1500)])
+bg_right = np.median(y[(x >= 2800) & (x <= 2900)])
+bg_mean = (bg_left + bg_right) / 2
+y_corrected = y - bg_mean
+
+# G peak fit
+g_mask = (x >= 1560) & (x <= 1610)
+x_g = x[g_mask]
+y_g = y_corrected[g_mask]
+pos_mask_g = y_g > 0
+x_g_pos = x_g[pos_mask_g]
+y_g_pos = y_g[pos_mask_g]
+
+peak_idx_g = np.argmax(y_g_pos)
+p0_g = [x_g_pos[peak_idx_g], 15, y_g_pos[peak_idx_g], 0]
+popt_g, _ = curve_fit(lorentzian, x_g_pos, y_g_pos,
+                      p0=p0_g,
+                      bounds=([1560, 1, 0, -5000], [1610, 100, 10000, 5000]),
+                      maxfev=10000)
+
+# 2D peak fit
+d2_mask = (x >= 2650) & (x <= 2800)
+x_2d = x[d2_mask]
+y_2d = y_corrected[d2_mask]
+pos_mask_2d = y_2d > 0
+x_2d_pos = x_2d[pos_mask_2d]
+y_2d_pos = y_2d[pos_mask_2d]
+
+peak_idx_2d = np.argmax(y_2d_pos)
+p0_2d = [x_2d_pos[peak_idx_2d], 30, y_2d_pos[peak_idx_2d], 0]
+popt_2d, _ = curve_fit(lorentzian, x_2d_pos, y_2d_pos,
+                        p0=p0_2d,
+                        bounds=([2650, 1, 0, -5000], [2800, 200, 10000, 5000]),
+                        maxfev=10000)
+
+# Convert back to original signal scale (add baseline to offset)
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(abs(popt_g[1])),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3] + bg_mean)
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(abs(popt_2d[1])),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3] + bg_mean)
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("G Peak Fit:")
+print(f"  x0 = {results['G']['x0']:.2f} cm⁻¹")
+print(f"  gamma (FWHM) = {results['G']['gamma']:.2f} cm⁻¹")
+print(f"  amplitude = {results['G']['amplitude']:.2f}")
+print(f"  offset = {results['G']['offset']:.2f}")
+print()
+print("2D Peak Fit:")
+print(f"  x0 = {results['2D']['x0']:.2f} cm⁻¹")
+print(f"  gamma (FWHM) = {results['2D']['gamma']:.2f} cm⁻¹")
+print(f"  amplitude = {results['2D']['amplitude']:.2f}")
+print(f"  offset = {results['2D']['offset']:.2f}")
+print()
+print("Results saved to /app/results.json")
+EOF
+python fit_raman.py
+$ cat /app/results.json
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The task is complete. I've successfully:
+
+1. Read the Raman spectroscopy data file `graphene.dat` which had a European number format (comma as decimal separator) with columns separated by tabs
+2. Identified that the data was:
+   - First column: intensity (Y)
+   - Second column: wavenumber in cm⁻¹ (X)
+3. Sorted the data by wavenumber
+4. Applied baseline subtraction
+5. Fitted Lorentzian functions to both the G peak (~1580 cm⁻¹) and 2D peak (~2690 cm⁻¹)
+6. Extracted the fitting parameters:
+   - **G peak**: x0 = 1585.88 cm⁻¹, gamma (FWHM) = 2.20 cm⁻¹
+   - **2D peak**: x0 = 2756.82 cm⁻¹, gamma (FWHM) = 22.70 cm⁻¹
+7. Saved the results to `/app/results.json` in the requested format
+
+The results are now properly saved in the JSON file with the required structure containing x0, gamma, amplitude, and offset values for both G and 2D peaks. </think>   The task is complete. I have:
+1. Read the Raman spectroscopy data file with European decimal format
+2. Identified the correct column mapping (intensity=wavenumber pairs)
+3. Fitted Lorentzian functions to the G peak (~1580 cm⁻¹) and 2D peak (~2690 cm⁻¹)
+4. Extracted the fitting parameters (x0, gamma, amplitude, offset) for both peaks
+5. Saved the results to `/app/results.json` in the required format

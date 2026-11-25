@@ -1,0 +1,2393 @@
+$ ls -la /app /app/src /app/data && echo "======= PROGRAM =======" && cat -A /app/src/program.cbl && echo "======= INPUT =======" && cat -A /app/src/INPUT.DAT && echo "======= DATA FILES =======" && for f in /app/data/*; do echo "--- $f ---"; cat -A "$f"; echo; done
+$ cd /app && cp -a data /tmp/data_orig && cp -a src /tmp/src_orig && cobc -x -o /tmp/program src/program.cbl && /tmp/program; echo EXIT:$?; echo "======= AFTER ======="; for f in data/*; do echo "--- $f ($(wc -c < $f) bytes) ---"; cat -A "$f"; echo; done; echo "======= HEXDUMP INPUT ======="; xxd src/INPUT.DAT; echo "======= HEXDUMP ACCOUNTS ======="; xxd data/ACCOUNTS.DAT; echo "======= HEXDUMP BOOKS ======="; xxd data/BOOKS.DAT; echo "======= HEXDUMP TRANS ======="; xxd data/TRANSACTIONS.DAT
+$ python3 - << 'PY'
+import os
+for p in ["/app/src/INPUT.DAT","/app/data/ACCOUNTS.DAT","/app/data/BOOKS.DAT","/app/data/TRANSACTIONS.DAT"]:
+    data=open(p,'rb').read()
+    print(p, len(data), data)
+PY
+# restore originals (already unchanged) and probe cobol read of short input
+mkdir -p /tmp/probe && cd /tmp/probe
+cat > probe.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 INPUT-BUYER-ID   PIC X(4).
+           05 INPUT-SELLER-ID  PIC X(4).
+           05 INPUT-BOOK-ID    PIC X(4).
+           05 INPUT-AMOUNT     PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT           PIC 9(10)V99.
+       01 WS-DISP             PIC X(30).
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE
+               AT END
+                   DISPLAY "AT END"
+               NOT AT END
+                   DISPLAY "BUYER=[" INPUT-BUYER-ID "]"
+                   DISPLAY "SELLER=[" INPUT-SELLER-ID "]"
+                   DISPLAY "BOOK=[" INPUT-BOOK-ID "]"
+                   DISPLAY "AMOUNT=[" INPUT-AMOUNT "]"
+                   MOVE INPUT-AMOUNT TO WS-AMOUNT
+                   DISPLAY "WS=[" WS-AMOUNT "]"
+           END-READ
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cp /app/src/INPUT.DAT INPUT.DAT
+cobc -x -o probe probe.cbl && ./probe
+echo "--- status ---"
+# try with newline and without
+printf 'U001U002B0010000000200' > INPUT2.DAT
+# also check file status
+cat > probe2.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE2.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS FS.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD PIC X(22).
+       WORKING-STORAGE SECTION.
+       01 FS PIC XX.
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           DISPLAY "OPEN FS=[" FS "]"
+           READ INPUT-FILE
+               AT END DISPLAY "AT END FS=[" FS "]"
+               NOT AT END DISPLAY "REC=[" INPUT-RECORD "] FS=[" FS "]"
+           END-READ
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cp /app/src/INPUT.DAT INPUT.DAT
+cobc -x -o probe2 probe2.cbl && ./probe2
+echo "==== full 22 ===="
+printf 'U001U002B0010000000200' > INPUT.DAT
+./probe2
+echo "==== 22 + nl ===="
+printf 'U001U002B0010000000200\n' > INPUT.DAT
+./probe2
+echo "==== short + spaces ===="
+printf 'U001U002B007200      ' > INPUT.DAT
+./probe2
+
+$ cd /tmp/probe
+cat > probe3.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE3.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+           SELECT OUT-FILE ASSIGN TO "OUT.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 INPUT-BUYER-ID   PIC X(4).
+           05 INPUT-SELLER-ID  PIC X(4).
+           05 INPUT-BOOK-ID    PIC X(4).
+           05 INPUT-AMOUNT     PIC 9(10).
+       FD OUT-FILE.
+       01 OUT-REC.
+           05 O-AMT PIC 9(10).
+           05 O-X PIC X(4).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-BAL PIC 9(10) VALUE 0000001180.
+       01 WS-BAL2 PIC 9(10).
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE
+           END-READ
+           DISPLAY "RAW AMT LEN CHECK"
+           MOVE INPUT-AMOUNT TO WS-AMOUNT
+           DISPLAY "WS-AMOUNT=" WS-AMOUNT
+           SUBTRACT WS-AMOUNT FROM WS-BAL
+           DISPLAY "BAL AFTER SUB=" WS-BAL
+           MOVE WS-AMOUNT TO O-AMT
+           MOVE "XXXX" TO O-X
+           OPEN OUTPUT OUT-FILE
+           WRITE OUT-REC
+           CLOSE OUT-FILE
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+printf 'U001U002B007200' > INPUT.DAT
+cobc -x -o probe3 probe3.cbl && ./probe3
+python3 -c "print(open('OUT.DAT','rb').read())"
+echo "---- numeric class ----"
+# What does COBOL do with low-values in numeric? Already saw MOVE to PIC 9(10)V99 becomes 2000000000.00
+# Confirm subtraction doesn't abort
+echo done
+# Also check if buyer==seller double update: both ifs fire
+# And record lengths: accounts 34, books 28, trans 22. Files have no newlines.
+python3 - << 'PY'
+acc=open('/app/data/ACCOUNTS.DAT','rb').read()
+print('acc mod', len(acc)%34, 'n', len(acc)//34)
+books=open('/app/data/BOOKS.DAT','rb').read()
+print('books mod', len(books)%28, 'n', len(books)//28)
+tr=open('/app/data/TRANSACTIONS.DAT','rb').read()
+print('tr mod', len(tr)%22, 'n', len(tr)//22)
+PY
+
+$ rm -rf /tmp/work && mkdir -p /tmp/work/data /tmp/work/src && cp /tmp/data_orig/* /tmp/work/data/ && cp /app/src/INPUT.DAT /tmp/work/src/ && cp /tmp/program /tmp/work/ && cd /tmp/work && ./program; echo EXIT:$?
+python3 - << 'PY'
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    print(p, open(p,'rb').read())
+PY
+$ cd /tmp/probe
+cat > probe4.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE4.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS LINE SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 INPUT-BUYER-ID   PIC X(4).
+           05 INPUT-SELLER-ID  PIC X(4).
+           05 INPUT-BOOK-ID    PIC X(4).
+           05 INPUT-AMOUNT     PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE
+               AT END DISPLAY "END"
+               NOT AT END
+                   DISPLAY "B=[" INPUT-BUYER-ID "]"
+                   DISPLAY "S=[" INPUT-SELLER-ID "]"
+                   DISPLAY "K=[" INPUT-BOOK-ID "]"
+                   DISPLAY "A=[" INPUT-AMOUNT "]"
+                   MOVE INPUT-AMOUNT TO WS-AMOUNT
+                   DISPLAY "WS=[" WS-AMOUNT "]"
+           END-READ
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+printf 'U001U002B007200' > INPUT.DAT
+cobc -x -o probe4 probe4.cbl && ./probe4; echo exit:$?
+echo "==== with newline ===="
+printf 'U001U002B007200\n' > INPUT.DAT
+./probe4; echo exit:$?
+echo "==== full numeric ===="
+printf 'U001U002B0070000000200\n' > INPUT.DAT
+./probe4
+echo "==== spaces pad ===="
+printf 'U001U002B007200       \n' > INPUT.DAT
+./probe4
+echo "==== record sequential short no nl ===="
+# already know record sequential short reads with nulls and amount 200
+
+$ cd /tmp/probe
+# How does numeric move treat spaces vs digits, and size error?
+cat > probe5.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE5.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC PIC X(10).
+       01 DEST PIC 9(10).
+       01 WS PIC 9(10)V99.
+       01 BAL PIC 9(10) VALUE 0000001180.
+       PROCEDURE DIVISION.
+           MOVE "200       " TO SRC
+           MOVE SRC TO DEST
+           DISPLAY "DEST1=[" DEST "]"
+           MOVE SRC TO WS
+           DISPLAY "WS1=[" WS "]"
+           MOVE "0000000200" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS2=[" WS "]"
+           MOVE "200" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS3=[" WS "]"
+           MOVE "  200" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS4=[" WS "]"
+           MOVE "200.50    " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS5=[" WS "]"
+           MOVE 200 TO WS
+           SUBTRACT WS FROM BAL
+           DISPLAY "BAL=[" BAL "]"
+           MOVE 9999999999 TO BAL
+           ADD 200 TO BAL
+           DISPLAY "BAL2=[" BAL "]"
+           MOVE 50 TO BAL
+           SUBTRACT 200 FROM BAL
+           DISPLAY "BAL3=[" BAL "]"
+           STOP RUN.
+EOF
+cobc -x -free -o probe5 probe5.cbl && ./probe5; echo exit:$?
+
+# fixed format version if free failed - check output
+echo "---- rewrite test with valid data ----"
+rm -rf /tmp/work2 && mkdir -p /tmp/work2/data /tmp/work2/src
+cp /tmp/data_orig/* /tmp/work2/data/
+# make a valid transaction: buyer U001 seller U002 book B001 amount 0000000150
+printf 'U001U002B0010000000150' > /tmp/work2/src/INPUT.DAT
+cp /tmp/program /tmp/work2/
+cd /tmp/work2 && ./program
+python3 - << 'PY'
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    b=open(p,'rb').read()
+    print(p, len(b))
+    print(b)
+PY
+echo "---- same buyer seller ----"
+rm -rf /tmp/work3 && mkdir -p /tmp/work3/data /tmp/work3/src
+cp /tmp/data_orig/* /tmp/work3/data/
+# change book owner? seller must own book. U002 owns B001. buyer=seller=U002
+printf 'U002U002B0010000000100' > /tmp/work3/src/INPUT.DAT
+cp /tmp/program /tmp/work3/
+cd /tmp/work3 && ./program
+python3 - << 'PY'
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    b=open(p,'rb').read()
+    print(p, b)
+PY
+echo "---- book not owned by seller ----"
+rm -rf /tmp/work4 && mkdir -p /tmp/work4/data /tmp/work4/src
+cp /tmp/data_orig/* /tmp/work4/data/
+printf 'U001U003B0010000000100' > /tmp/work4/src/INPUT.DAT
+cp /tmp/program /tmp/work4/
+cd /tmp/work4 && ./program
+python3 - << 'PY'
+import os
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    b=open(p,'rb').read()
+    print('changed' if b!=open('/tmp/data_orig/'+os.path.basename(p),'rb').read() else 'same', p, b)
+PY
+echo "---- unknown user ----"
+rm -rf /tmp/work5 && mkdir -p /tmp/work5/data /tmp/work5/src
+cp /tmp/data_orig/* /tmp/work5/data/
+printf 'U009U002B0010000000100' > /tmp/work5/src/INPUT.DAT
+cp /tmp/program /tmp/work5/
+cd /tmp/work5 && ./program
+echo "---- amount with decimals stored? TRANS is PIC 9(10) so truncated ----"
+# already know MOVE WS-AMOUNT (9(10)V99) to TRANS-AMOUNT PIC 9(10) truncates decimals
+echo "---- short record sequential original program behavior confirmed no change ----"
+# What if input has newline and is record sequential? The program uses SEQUENTIAL not LINE SEQUENTIAL.
+printf 'U001U002B0010000000150\n' > /tmp/tinput.dat
+rm -rf /tmp/work6 && mkdir -p /tmp/work6/data /tmp/work6/src
+cp /tmp/data_orig/* /tmp/work6/data/
+cp /tmp/tinput.dat /tmp/work6/src/INPUT.DAT
+cp /tmp/program /tmp/work6/
+cd /tmp/work6 && ./program
+python3 - << 'PY'
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    print(p, open(p,'rb').read())
+PY
+
+$ cd /tmp/probe
+cat > probe6.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE6.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 BAL PIC 9(10) VALUE 0000001800.
+       01 AMT PIC 9(10)V99 VALUE 100.00.
+       01 BAL2 PIC 9(10) VALUE 50.
+       01 BIG PIC 9(10) VALUE 9999999999.
+       PROCEDURE DIVISION.
+           SUBTRACT AMT FROM BAL.
+           DISPLAY "SUB OK [" BAL "]".
+           ADD AMT TO BAL.
+           DISPLAY "ADD OK [" BAL "]".
+           SUBTRACT 200 FROM BAL2.
+           DISPLAY "UNDER [" BAL2 "]".
+           ADD 5 TO BIG.
+           DISPLAY "OVER [" BIG "]".
+           STOP RUN.
+EOF
+cobc -x -free -o probe6 probe6.cbl && ./probe6; echo exit:$?
+
+echo "==== same buyer with ec? check runtime ===="
+# rerun same buyer capturing stderr fully
+rm -rf /tmp/work3 && mkdir -p /tmp/work3/data /tmp/work3/src
+cp /tmp/data_orig/* /tmp/work3/data/
+printf 'U002U002B0010000000100' > /tmp/work3/src/INPUT.DAT
+cp /tmp/program /tmp/work3/
+cd /tmp/work3 && ./program > /tmp/out.txt 2>/tmp/err.txt; echo EXIT:$?
+echo STDOUT:; cat -A /tmp/out.txt; echo STDERR:; cat -A /tmp/err.txt
+python3 - << 'PY'
+for p in ["data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    print(p, open(p,'rb').read())
+PY
+
+echo "==== buyer first then seller same record order matters ===="
+# accounts order U001 U002 U003. If buyer is U001 and seller U002 different records.
+# If buyer is later and seller earlier:
+rm -rf /tmp/work7 && mkdir -p /tmp/work7/data /tmp/work7/src
+cp /tmp/data_orig/* /tmp/work7/data/
+printf 'U002U001B0010000000100' > /tmp/work7/src/INPUT.DAT
+# book owned by U002 not U001 so invalid. change books? we'll set seller as owner by editing? 
+# Use book B001 owned by U002, seller must be U002. So buyer later: buyer U003 seller U002
+printf 'U003U002B0010000000100' > /tmp/work7/src/INPUT.DAT
+cp /tmp/program /tmp/work7/
+cd /tmp/work7 && ./program; echo EXIT:$?
+python3 - << 'PY'
+print('ACC', open('data/ACCOUNTS.DAT','rb').read())
+print('BOK', open('data/BOOKS.DAT','rb').read())
+print('TR ', open('data/TRANSACTIONS.DAT','rb').read())
+PY
+
+echo "==== insufficient then continue? ===="
+rm -rf /tmp/work8 && mkdir -p /tmp/work8/data /tmp/work8/src
+cp /tmp/data_orig/* /tmp/work8/data/
+# amount larger than buyer balance 1180
+printf 'U001U002B0010000002000' > /tmp/work8/src/INPUT.DAT
+cp /tmp/program /tmp/work8/
+cd /tmp/work8 && ./program > /tmp/o8 2>/tmp/e8; echo EXIT:$?
+echo STDOUT; cat /tmp/o8; echo STDERR; cat /tmp/e8
+python3 - << 'PY'
+print(open('data/ACCOUNTS.DAT','rb').read())
+print(open('data/BOOKS.DAT','rb').read())
+print(open('data/TRANSACTIONS.DAT','rb').read())
+PY
+
+echo "==== amount 0 ===="
+rm -rf /tmp/work9 && mkdir -p /tmp/work9/data /tmp/work9/src
+cp /tmp/data_orig/* /tmp/work9/data/
+printf 'U001U002B0010000000000' > /tmp/work9/src/INPUT.DAT
+cp /tmp/program /tmp/work9/
+cd /tmp/work9 && ./program; echo EXIT:$?
+python3 - << 'PY'
+print(open('data/ACCOUNTS.DAT','rb').read())
+print(open('data/BOOKS.DAT','rb').read())
+print(open('data/TRANSACTIONS.DAT','rb').read())
+PY
+
+$ # GnuCOBOL version and default binary sequential record padding / record length
+cobc --info | head -40
+echo "==== decimal amount in input ===="
+rm -rf /tmp/work10 && mkdir -p /tmp/work10/data /tmp/work10/src
+cp /tmp/data_orig/* /tmp/work10/data/
+# PIC 9(10) won't accept decimal point as numeric? Let's see record of 22 with amount 00000002.5 invalid
+printf 'U001U002B00100000002.5' > /tmp/work10/src/INPUT.DAT
+cp /tmp/program /tmp/work10/
+cd /tmp/work10 && ./program > /tmp/o10 2>/tmp/e10; echo EXIT:$?
+echo STDOUT; cat -A /tmp/o10; echo STDERR; cat -A /tmp/e10
+python3 - << 'PY'
+print(open('data/ACCOUNTS.DAT','rb').read())
+print(open('data/TRANSACTIONS.DAT','rb').read())
+print(open('data/BOOKS.DAT','rb').read())
+PY
+
+echo "==== leading spaces amount ===="
+rm -rf /tmp/work11 && mkdir -p /tmp/work11/data /tmp/work11/src
+cp /tmp/data_orig/* /tmp/work11/data/
+printf 'U001U002B001       150' > /tmp/work11/src/INPUT.DAT
+cp /tmp/program /tmp/work11/
+cd /tmp/work11 && ./program > /tmp/o11 2>/tmp/e11; echo EXIT:$?
+cat /tmp/o11; echo ERR; cat /tmp/e11
+python3 - << 'PY'
+print('ACC', open('data/ACCOUNTS.DAT','rb').read())
+print('TR', open('data/TRANSACTIONS.DAT','rb').read())
+print('BK', open('data/BOOKS.DAT','rb').read())
+PY
+
+echo "==== empty input ===="
+rm -rf /tmp/work12 && mkdir -p /tmp/work12/data /tmp/work12/src
+cp /tmp/data_orig/* /tmp/work12/data/
+: > /tmp/work12/src/INPUT.DAT
+cp /tmp/program /tmp/work12/
+cd /tmp/work12 && ./program > /tmp/o12 2>/tmp/e12; echo EXIT:$?
+echo OUT; cat -A /tmp/o12; echo ERR; cat -A /tmp/e12
+
+echo "==== missing input file ===="
+rm -rf /tmp/work13 && mkdir -p /tmp/work13/data
+cp /tmp/data_orig/* /tmp/work13/data/
+cp /tmp/program /tmp/work13/
+cd /tmp/work13 && ./program > /tmp/o13 2>/tmp/e13; echo EXIT:$?
+echo OUT; cat -A /tmp/o13; echo ERR; cat -A /tmp/e13
+
+echo "==== multiple input records only first used ===="
+rm -rf /tmp/work14 && mkdir -p /tmp/work14/data /tmp/work14/src
+cp /tmp/data_orig/* /tmp/work14/data/
+printf 'U001U002B0010000000100U003U002B0020000000050' > /tmp/work14/src/INPUT.DAT
+cp /tmp/program /tmp/work14/
+cd /tmp/work14 && ./program; echo EXIT:$?
+python3 - << 'PY'
+print('ACC', open('data/ACCOUNTS.DAT','rb').read())
+print('BK', open('data/BOOKS.DAT','rb').read())
+print('TR', open('data/TRANSACTIONS.DAT','rb').read())
+PY
+
+echo "==== original short input again exact bytes unchanged ===="
+rm -rf /tmp/work15 && mkdir -p /tmp/work15/data /tmp/work15/src
+cp /tmp/data_orig/* /tmp/work15/data/
+cp /app/src/INPUT.DAT /tmp/work15/src/INPUT.DAT
+cp /tmp/program /tmp/work15/
+cd /tmp/work15 && ./program > /tmp/o15 2>/tmp/e15; echo EXIT:$?
+python3 - << 'PY'
+import os
+for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    a=open('data/'+n,'rb').read(); b=open('/tmp/data_orig/'+n,'rb').read()
+    print(n, a==b, len(a), len(b))
+print('OUT', open('/tmp/o15','rb').read())
+print('ERR', open('/tmp/e15','rb').read())
+PY
+
+$ cd /tmp/probe
+cat > probe7.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE7.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC PIC X(10).
+       01 WS PIC 9(10)V99.
+       01 BAL PIC 9(10) VALUE 1180.
+       01 OUTA PIC 9(10).
+       PROCEDURE DIVISION.
+           MOVE "00000002.5" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS=[" WS "]"
+           SUBTRACT WS FROM BAL
+           DISPLAY "BAL=[" BAL "]"
+           MOVE WS TO OUTA
+           DISPLAY "OUTA=[" OUTA "]"
+           MOVE "       150" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS2=[" WS "]"
+           MOVE "0000000200" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS3=[" WS "]"
+           MOVE "200       " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS4=[" WS "]"
+           STOP RUN.
+EOF
+cobc -x -free -o probe7 probe7.cbl && ./probe7
+
+echo "==== nonnumeric abort? ===="
+cat > probe8.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE8.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC PIC X(10) VALUE "ABCDEFGHIJ".
+       01 WS PIC 9(10)V99.
+       01 BAL PIC 9(10) VALUE 1180.
+       PROCEDURE DIVISION.
+           MOVE SRC TO WS
+           DISPLAY "WS=[" WS "]"
+           SUBTRACT WS FROM BAL
+           DISPLAY "BAL=[" BAL "]"
+           STOP RUN.
+EOF
+cobc -x -free -o probe8 probe8.cbl && ./probe8; echo EXIT:$?
+
+echo "==== partial digits ===="
+cat > probe9.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE9.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC PIC X(10).
+       01 WS PIC 9(10)V99.
+       PROCEDURE DIVISION.
+           MOVE "12AB      " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS=[" WS "]"
+           MOVE "12.3.4    " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS2=[" WS "]"
+           MOVE "00000002.50" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "WS3=[" WS "]"
+           STOP RUN.
+EOF
+cobc -x -free -o probe9 probe9.cbl && ./probe9; echo EXIT:$?
+
+echo "==== record longer than 22 sequential read ===="
+cat > probe10.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE10.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS FS.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD PIC X(22).
+       WORKING-STORAGE SECTION.
+       01 FS PIC XX.
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           PERFORM UNTIL FS = "10"
+               READ INPUT-FILE
+                   AT END DISPLAY "END FS=" FS
+                   NOT AT END DISPLAY "REC=[" INPUT-RECORD "] FS=" FS
+               END-READ
+           END-PERFORM
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+printf 'U001U002B0010000000100EXTRA' > INPUT.DAT
+cobc -x -free -o probe10 probe10.cbl && ./probe10; echo EXIT:$?
+echo "==== two records no separator 44 bytes ===="
+printf 'U001U002B0010000000100U003U002B0020000000050' > INPUT.DAT
+./probe10
+echo "==== with newlines record sequential ===="
+printf 'U001U002B0010000000100\nU003U002B0020000000050\n' > INPUT.DAT
+./probe10
+echo "==== short then rest ===="
+printf 'U001U002B007200' > INPUT.DAT
+./probe10
+
+> write /app/program.py
+$ # Restore original data (the earlier run was in /tmp, /app/data should be original)
+python3 - << 'PY'
+import os
+for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    a=open('/app/data/'+n,'rb').read(); b=open('/tmp/data_orig/'+n,'rb').read()
+    print(n, a==b)
+print('INPUT', open('/app/src/INPUT.DAT','rb').read())
+PY
+cd /app && python3 program.py > /tmp/py_out 2>/tmp/py_err; echo EXIT:$?
+echo STDOUT; cat -A /tmp/py_out; echo STDERR; cat -A /tmp/py_err
+python3 - << 'PY'
+for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    a=open('/app/data/'+n,'rb').read(); b=open('/tmp/data_orig/'+n,'rb').read()
+    print(n, a==b, a)
+PY
+
+# Compare against COBOL on a matrix of inputs
+python3 - << 'PY'
+import os, shutil, subprocess, tempfile, itertools
+
+ORIG_DATA = "/tmp/data_orig"
+COB = "/tmp/program"
+PY = "/app/program.py"
+
+cases = []
+# original short
+cases.append(open("/app/src/INPUT.DAT","rb").read())
+# valid
+cases.append(b"U001U002B0010000000150")
+cases.append(b"U001U002B0010000000150\n")
+cases.append(b"U003U002B0010000000100")
+cases.append(b"U002U002B0010000000100")
+cases.append(b"U001U003B0010000000100")
+cases.append(b"U009U002B0010000000100")
+cases.append(b"U001U002B0090000000100")
+cases.append(b"U001U002B0010000002000")
+cases.append(b"U001U002B0010000000000")
+cases.append(b"U001U002B00100000002.5")
+cases.append(b"U001U002B001       150")
+cases.append(b"")
+cases.append(b"U001U002B0010000000100U003U002B0020000000050")
+cases.append(b"U001U002B0010000000100\nU003U002B0020000000050\n")
+cases.append(b"U001U002B007200")
+cases.append(b"U001U002B001ABCDEFGHIJ")
+cases.append(b"U001U002B0020000000050")
+cases.append(b"U002U001B0030000000020")  # book B003 owner is U002 not U001
+# buyer U001 seller U002 book B003 invalid owner
+cases.append(b"U001U002B0030000000020")
+# large amount near overflow
+cases.append(b"U001U002B0019999999999")
+# spaces in ids
+cases.append(b"    U002B0010000000100")
+# decimal that doesn't fit cleanly
+cases.append(b"U001U002B0010000002.50")
+cases.append(b"U001U002B0010000120.5 ")
+cases.append(b"U001U002B001120.50    ")
+# same record partial
+cases.append(b"U001U001B0010000000100")  # U001 doesn't own B001
+
+def run_case(raw, label):
+    base = tempfile.mkdtemp(prefix="cmp_")
+    for kind, exe in (("cob", None), ("py", None)):
+        d = os.path.join(base, kind)
+        os.makedirs(os.path.join(d, "data"))
+        os.makedirs(os.path.join(d, "src"))
+        for n in os.listdir(ORIG_DATA):
+            shutil.copy(os.path.join(ORIG_DATA, n), os.path.join(d, "data", n))
+        open(os.path.join(d, "src", "INPUT.DAT"), "wb").write(raw)
+    # cobol
+    cob_dir = os.path.join(base, "cob")
+    shutil.copy(COB, os.path.join(cob_dir, "program"))
+    p1 = subprocess.run(["./program"], cwd=cob_dir, capture_output=True)
+    # python
+    py_dir = os.path.join(base, "py")
+    p2 = subprocess.run(["python3", PY], cwd=py_dir, capture_output=True)
+    diffs = []
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        b1=open(os.path.join(cob_dir,"data",n),"rb").read()
+        b2=open(os.path.join(py_dir,"data",n),"rb").read()
+        if b1!=b2:
+            diffs.append((n,b1,b2))
+    if p1.returncode!=p2.returncode or p1.stdout!=p2.stdout or p1.stderr!=p2.stderr or diffs:
+        print("MISMATCH", label, "input", raw)
+        print("  cob rc", p1.returncode, "py rc", p2.returncode)
+        print("  cob out", p1.stdout)
+        print("  py  out", p2.stdout)
+        print("  cob err", p1.stderr)
+        print("  py  err", p2.stderr)
+        for n,b1,b2 in diffs:
+            print("  FILE", n)
+            print("   cob", b1)
+            print("   py ", b2)
+        return False
+    else:
+        print("OK", label, "rc", p1.returncode)
+        return True
+
+ok = True
+for i,c in enumerate(cases):
+    if not run_case(c, f"case{i}"):
+        ok = False
+# missing input
+base = tempfile.mkdtemp(prefix="cmpmiss_")
+for kind in ("cob","py"):
+    d=os.path.join(base,kind)
+    os.makedirs(os.path.join(d,"data"))
+    for n in os.listdir(ORIG_DATA):
+        shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+shutil.copy(COB, os.path.join(base,"cob","program"))
+p1=subprocess.run(["./program"], cwd=os.path.join(base,"cob"), capture_output=True)
+p2=subprocess.run(["python3", PY], cwd=os.path.join(base,"py"), capture_output=True)
+if (p1.returncode,p1.stdout,p1.stderr)!=(p2.returncode,p2.stdout,p2.stderr):
+    print("MISMATCH missing file")
+    print("cob", p1.returncode, p1.stdout, p1.stderr)
+    print("py ", p2.returncode, p2.stdout, p2.stderr)
+    ok=False
+else:
+    print("OK missing file")
+print("ALL OK" if ok else "FAILED")
+PY
+$ cd /tmp/probe
+cat > probe11.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE11.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC PIC X(10).
+       01 WS PIC 9(10)V99.
+       01 DEST PIC 9(10).
+       01 BAL PIC 9(10) VALUE 0000001180.
+       01 BAL2 PIC 9(10) VALUE 0000001800.
+       PROCEDURE DIVISION.
+           MOVE "00000002.5" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "1 WS=[" WS "] SRC=[" SRC "]"
+           MOVE WS TO DEST
+           DISPLAY "1 DEST=[" DEST "]"
+           MOVE SRC TO DEST
+           DISPLAY "1 DEST-FROM-SRC=[" DEST "]"
+           SUBTRACT WS FROM BAL
+           DISPLAY "1 BAL=[" BAL "]"
+           ADD WS TO BAL2
+           DISPLAY "1 BAL2=[" BAL2 "]"
+
+           MOVE 0000001180 TO BAL
+           MOVE 0000001800 TO BAL2
+           MOVE "0000002.50" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "2 WS=[" WS "]"
+           MOVE WS TO DEST
+           DISPLAY "2 DEST=[" DEST "]"
+           SUBTRACT WS FROM BAL
+           ADD WS TO BAL2
+           DISPLAY "2 BAL=[" BAL "] BAL2=[" BAL2 "]"
+
+           MOVE 0000001180 TO BAL
+           MOVE 0000001800 TO BAL2
+           MOVE "0000120.5 " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "3 WS=[" WS "]"
+           MOVE WS TO DEST
+           DISPLAY "3 DEST=[" DEST "]"
+           SUBTRACT WS FROM BAL
+           ADD WS TO BAL2
+           DISPLAY "3 BAL=[" BAL "] BAL2=[" BAL2 "]"
+
+           MOVE 0000001180 TO BAL
+           MOVE 0000001800 TO BAL2
+           MOVE "120.50    " TO SRC
+           MOVE SRC TO WS
+           DISPLAY "4 WS=[" WS "]"
+           MOVE WS TO DEST
+           DISPLAY "4 DEST=[" DEST "]"
+           SUBTRACT WS FROM BAL
+           ADD WS TO BAL2
+           DISPLAY "4 BAL=[" BAL "] BAL2=[" BAL2 "]"
+
+           MOVE 0000001180 TO BAL
+           MOVE "ABCDEFGHIJ" TO SRC
+           MOVE SRC TO WS
+           DISPLAY "5 WS=[" WS "]"
+           MOVE WS TO DEST
+           DISPLAY "5 DEST=[" DEST "]"
+           SUBTRACT WS FROM BAL
+           DISPLAY "5 BAL=[" BAL "]"
+           MOVE SRC TO DEST
+           DISPLAY "5 DESTSRC=[" DEST "]"
+           STOP RUN.
+EOF
+cobc -x -free -o probe11 probe11.cbl && ./probe11
+
+echo "==== direct file-field move like the program ===="
+cat > probe12.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE12.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 INPUT-BUYER-ID   PIC X(4).
+           05 INPUT-SELLER-ID  PIC X(4).
+           05 INPUT-BOOK-ID    PIC X(4).
+           05 INPUT-AMOUNT     PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-BAL PIC 9(10) VALUE 0000001180.
+       01 WS-OUT PIC 9(10).
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           DISPLAY "RAW=[" INPUT-AMOUNT "]"
+           MOVE INPUT-AMOUNT TO WS-AMOUNT
+           DISPLAY "WS=[" WS-AMOUNT "]"
+           MOVE WS-AMOUNT TO WS-OUT
+           DISPLAY "OUT=[" WS-OUT "]"
+           SUBTRACT WS-AMOUNT FROM WS-BAL
+           DISPLAY "BAL=[" WS-BAL "]"
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cobc -x -free -o probe12 probe12.cbl
+for s in 'U001U002B00100000002.5' 'U001U002B0010000002.50' 'U001U002B0010000120.5 ' 'U001U002B001120.50    ' 'U001U002B001ABCDEFGHIJ' 'U001U002B0010000000200' 'U001U002B001       150' 'U001U002B001200       '; do
+  printf '%s' "$s" > INPUT.DAT
+  echo "---- INPUT [$s] ----"
+  ./probe12
+done
+
+$ cd /tmp/probe
+cat > probe13.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE13.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT" ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 FILLER PIC X(12).
+           05 INPUT-AMOUNT PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS PIC 9(10)V99.
+       01 BAL PIC 9(10) VALUE 1180.
+       01 OUTV PIC 9(10).
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           DISPLAY "RAW=[" INPUT-AMOUNT "]"
+           MOVE INPUT-AMOUNT TO WS
+           DISPLAY "WS=[" WS "]"
+           MOVE WS TO OUTV
+           DISPLAY "OUT=[" OUTV "]"
+           SUBTRACT WS FROM BAL
+           DISPLAY "BAL=[" BAL "]"
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cobc -x -free -o probe13 probe13.cbl
+for s in \
+  'U001U002B00112.3.4    ' \
+  'U001U002B00112.34     ' \
+  'U001U002B001.50       ' \
+  'U001U002B001  200.5   ' \
+  'U001U002B001200.5     ' \
+  'U001U002B0010000002.5 ' \
+  'U001U002B0012.5       ' \
+  'U001U002B00199999999.9' \
+  'U001U002B001..........' \
+  'U001U002B0011.2.3.4.5 ' \
+  'U001U002B001ABC.50    ' \
+  'U001U002B00112 0.50   ' \
+  'U001U002B001+200      ' \
+  'U001U002B001-200      ' \
+  'U001U002B0010000000200' \
+  'U001U002B00120 0      ' \
+  'U001U002B0012 00      ' \
+  'U001U002B001          ' \
+  'U001U002B00100000000.0' \
+  'U001U002B001.         ' \
+  'U001U002B0010.        ' \
+  'U001U002B001.0        ' \
+  'U001U002B0011234567890' \
+  'U001U002B001         5'
+ do
+  printf '%s' "$s" > INPUT.DAT
+  echo "==== [$s] ===="
+  ./probe13
+done
+
+$ cd /tmp/probe
+cat > num.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+
+static cob_field_attr attr_x10;
+static cob_field_attr attr_9v;
+static cob_field_attr attr_9;
+
+static void init_attrs(void) {
+    memset(&attr_x10, 0, sizeof attr_x10);
+    memset(&attr_9v, 0, sizeof attr_9v);
+    memset(&attr_9, 0, sizeof attr_9);
+    attr_x10.type = COB_TYPE_ALPHANUMERIC;
+    attr_x10.digits = 0;
+    attr_9.type = COB_TYPE_NUMERIC_DISPLAY;
+    attr_9.digits = 10;
+    attr_9.scale = 0;
+    attr_9.flags = 0;
+    attr_9v.type = COB_TYPE_NUMERIC_DISPLAY;
+    attr_9v.digits = 12;
+    attr_9v.scale = 2;
+    attr_9v.flags = 0;
+}
+
+int main(int argc, char **argv) {
+    cob_init(argc, argv);
+    init_attrs();
+    const char *samples[] = {
+        "00000002.5",
+        "0000000200",
+        "200       ",
+        "       150",
+        "ABCDEFGHIJ",
+        "12.34     ",
+        "120.50    ",
+        "0000002.50",
+        NULL
+    };
+    for (int i = 0; samples[i]; i++) {
+        char src[10];
+        char dest[12];
+        char out[10];
+        memset(src, ' ', 10);
+        memcpy(src, samples[i], strlen(samples[i]) > 10 ? 10 : strlen(samples[i]));
+        memset(dest, '0', 12);
+        cob_field fsrc = {10, (unsigned char*)src, &attr_x10};
+        cob_field fdst = {12, (unsigned char*)dest, &attr_9v};
+        cob_move(&fsrc, &fdst);
+        printf("SRC=[%.*s] DEST=[%.*s]\n", 10, src, 12, dest);
+    }
+    return 0;
+}
+EOF
+# find headers
+find /usr -name 'libcob.h' 2>/dev/null | head
+ls /usr/include/libcob* 2>/dev/null | head
+gcc -I/usr/include -o num num.c -lcob && ./num
+
+$ sed -n '1,200p' /usr/include/libcob/common.h; echo '----'; grep -n "COB_TYPE_NUMERIC" /usr/include/libcob.h | head -40
+$ grep -n "cob_move\|NUMERIC_DISPLAY\|COB_TYPE_" /usr/include/libcob.h | head -80
+echo "==== move.c search ===="
+find /usr -name 'move.c' -o -name 'libcob.so*' 2>/dev/null | head
+# strings related to numeric move
+python3 - << 'PY'
+import pathlib
+p=pathlib.Path("/usr/lib/x86_64-linux-gnu/libcob.so.4")
+if not p.exists():
+    import os
+    for root,dirs,files in os.walk("/usr/lib"):
+        for f in files:
+            if "libcob" in f:
+                print(os.path.join(root,f))
+else:
+    print("found", p, p.stat().st_size)
+PY
+$ grep -n "cob_move\|COB_TYPE_NUMERIC_DISPLAY\|struct cob_field_attr\|cob_field_attr" /usr/include/libcob.h | head -50
+echo "---- common field ----"
+grep -n "cob_field_attr\|COB_TYPE_NUMERIC" /usr/include/libcob/common.h | head -40
+$ sed -n '1110,1160p' /usr/include/libcob/common.h
+echo "==== nm cob_move ===="
+nm -D /usr/lib/x86_64-linux-gnu/libcob.so.4 | grep -E "cob_move|cob_decimal|display" | head -40
+# disassemble isn't needed; let's compile probe to C
+cd /tmp/probe
+cobc -C -free -o probe12.c probe12.cbl
+# look at MOVE of INPUT-AMOUNT
+grep -n "INPUT-AMOUNT\|cob_move\|b_1\|WS-AMOUNT" probe12.c | head -60
+$ sed -n '1,250p' /tmp/probe/probe12.c
+$ grep -n "f_12\|a_4\|pic\|COB_TYPE" /tmp/probe/probe12.c.h | head -80
+echo "======= l.h ======="
+sed -n '1,200p' /tmp/probe/probe12.c.l.h
+$ cd /tmp/probe
+cat > probe14.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE14.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT" ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 FILLER PIC X(12).
+           05 INPUT-AMOUNT PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS PIC 9(10)V99.
+       01 BAL PIC 9(10) VALUE 0.
+       01 OUTV PIC 9(10).
+       01 HEX PIC X(24).
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           MOVE INPUT-AMOUNT TO WS
+           DISPLAY "WS=[" WS "]"
+           MOVE 0 TO BAL
+           SUBTRACT WS FROM BAL
+           DISPLAY "0-WS=[" BAL "]"
+           MOVE 9999999999 TO BAL
+           ADD WS TO BAL
+           DISPLAY "MAX+WS=[" BAL "]"
+           MOVE WS TO OUTV
+           DISPLAY "OUT=[" OUTV "]"
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cobc -x -free -o probe14 probe14.cbl
+for s in \
+  'xxxxxxxxxxxx00000002.5' \
+  'xxxxxxxxxxxx0000000200' \
+  'xxxxxxxxxxxx200       ' \
+  'xxxxxxxxxxxx       150' \
+  'xxxxxxxxxxxxABCDEFGHIJ' \
+  'xxxxxxxxxxxx120.50    ' \
+  'xxxxxxxxxxxx0000002.50' \
+  'xxxxxxxxxxxx.50       ' \
+  'xxxxxxxxxxxx+200      ' \
+  'xxxxxxxxxxxx          ' \
+  'xxxxxxxxxxxx12.3.4    ' \
+  'xxxxxxxxxxxx99999999.9' \
+  'xxxxxxxxxxxx00000000.0' \
+  'xxxxxxxxxxxx1234567890' \
+  'xxxxxxxxxxxx         5' \
+  'xxxxxxxxxxxx20 0      ' \
+  'xxxxxxxxxxxx2.5       ' \
+  'xxxxxxxxxxxx..........'
+ do
+  printf '%s' "$s" > INPUT.DAT
+  echo "==== ${s:12} ===="
+  ./probe14
+done
+
+# Also check internal bytes of WS via a small C dump by writing WS to a file as group
+cat > probe15.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROBE15.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "INPUT.DAT" ORGANIZATION IS SEQUENTIAL.
+           SELECT OUT-FILE ASSIGN TO "OUT.DAT" ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 FILLER PIC X(12).
+           05 INPUT-AMOUNT PIC 9(10).
+       FD OUT-FILE.
+       01 OUT-REC PIC X(12).
+       WORKING-STORAGE SECTION.
+       01 WS PIC 9(10)V99.
+       PROCEDURE DIVISION.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           MOVE INPUT-AMOUNT TO WS
+           OPEN OUTPUT OUT-FILE
+           MOVE WS TO OUT-REC
+           WRITE OUT-REC
+           CLOSE OUT-FILE
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cobc -x -free -o probe15 probe15.cbl
+printf '%s' 'xxxxxxxxxxxx00000002.5' > INPUT.DAT
+./probe15
+python3 -c "print(open('OUT.DAT','rb').read())"
+printf '%s' 'xxxxxxxxxxxxABCDEFGHIJ' > INPUT.DAT
+./probe15
+python3 -c "print(list(open('OUT.DAT','rb').read()))"
+printf '%s' 'xxxxxxxxxxxx200       ' > INPUT.DAT
+./probe15
+python3 -c "print(open('OUT.DAT','rb').read())"
+printf '%s' 'xxxxxxxxxxxx.50       ' > INPUT.DAT
+./probe15
+python3 -c "print(list(open('OUT.DAT','rb').read()))"
+
+$ python3 - << 'PY'
+# Hypothesis: each byte maps to a digit via (byte-0x30) & 0x0F? or just low nibble
+# DISPLAY numeric is zoned decimal: digit is low nibble, zone is high nibble 0x3 for ASCII digits.
+# For letters A=0x41 low nibble 1, etc.
+
+def low_nibble_int(s):
+    # 10 chars -> integer from low nibbles, then the MOVE to 9(10)V99 appends "00" effectively shifting *100
+    # then when subtracting from PIC 9(10), scale difference means the V99 contributes... 
+    # If both are display and subtraction uses the digit nibbles only with scale alignment:
+    pass
+
+samples = {
+"00000002.5": (185, 184, "00000002.5"),  # 0 - WS displayed 0000000185, OUT displayed 00000002.5
+"0000000200": (200, 199, "0000000200"),
+"200       ": (2000000000, 1999999999, "2000000000"),
+"       150": (150, 149, "0000000150"),
+"ABCDEFGHIJ": (9012345676, 9012345675, "A CDEFGHIJ"),
+"120.50    ": (1198500000, 1198499999, "120.500000"),
+".50       ": (9237095516, 9237095515, ".500000000"),
+"+200      ": (5937095516, 5937095515, "+200000000"),
+"          ": (0, 9999999999, "0000000000"),
+"12.3.4    ": (1182840000, 1182839999, "12.3.40000"),
+"99999999.9": (9999999889, 9999999888, "99999999.9"),
+"00000000.0": (737095496, 737095495, "00000000.0"),
+"1234567890": (1234567890, 1234567889, "1234567890"),
+"         5": (5, 4, "0000000005"),
+"20 0      ": (2000000000, 1999999999, "2000000000"),
+"2.5       ": (1850000000, 1849999999, "2.50000000"),
+"..........": (8514873294, 8514873293, ".........."),
+}
+
+def nibbles(s):
+    s=s.ljust(10)
+    return [b & 0x0F for b in s.encode('latin1')]
+
+for s,(zero_minus, max_plus, outdisp) in samples.items():
+    nb = nibbles(s)
+    # integer from 10 nibbles
+    val = 0
+    for d in nb:
+        val = val*10 + d
+    # WS is 9(10)V99 so maybe two extra zero digits appended (scale 2) making val*100
+    val2 = val * 100
+    # when used against PIC 9(10) scale 0, the decimal value is val2 / 100 = val
+    # 0 - val should be -val, displayed as abs? For 00000002.5 val nibbles:
+    print(f"{s!r:16} nib={nb} val={val:010d} 0-WS={zero_minus:010d} match_abs={val==zero_minus} diff={zero_minus-val}")
+
+print("--- check space and dot nibbles ---")
+for ch in " .+-ABCDEFGHIJ0123456789":
+    b=ord(ch)
+    print(f" {ch!r} {b:02x} low={b&0xF}")
+PY
+$ # Extract cob_move from libcob via decompile? try objdump -d limited
+# Search source online isn't available. Let's use gdb python or just write a small shared probe.
+# I'll look at strings around numeric conversion
+python3 - << 'PY'
+import subprocess
+out=subprocess.check_output(["objdump","-d","--no-show-raw-insn","/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0"], text=True, errors='replace')
+open('/tmp/libcob.s','w').write(out)
+print('lines', out.count('\n'))
+PY
+# find cob_move symbol address and size
+nm -C -S /usr/lib/x86_64-linux-gnu/libcob.so.4.1.0 | grep -E " cob_move$| cob_sub$| display_get" | head
+# also source file names in debug?
+readelf -p .debug_str /usr/lib/x86_64-linux-gnu/libcob.so.4.1.0 2>/dev/null | head -c 200
+echo
+# check if debug info exists
+ls -la /usr/lib/debug 2>/dev/null | head
+dpkg -L gnucobol 2>/dev/null | head
+find /usr -name 'numeric.c' -o -name 'move.c' 2>/dev/null | head
+$ # Check exported symbols
+nm -D /usr/lib/x86_64-linux-gnu/libcob.so.4 | grep -E "cob_move|cob_sub|cob_add|cob_init|cob_decimal_set_field" | head
+# Look at cob_move disassembly briefly for calls
+python3 - << 'PY'
+text=open('/tmp/libcob.s').read().splitlines()
+# find cob_move label
+for i,l in enumerate(text):
+    if '<cob_move>:' in l or '<cob_move@' in l or l.endswith('<cob_move>:'):
+        print('FOUND', i, l)
+        break
+else:
+    # search
+    hits=[(i,l) for i,l in enumerate(text) if 'cob_move' in l and '<' in l and l.strip().endswith(':')]
+    print('hits', hits[:20])
+PY
+$ # find actual cob_move not plt
+grep -n "cob_move>:" /tmp/libcob.s | head
+echo "----"
+# symbol table
+readelf -s /usr/lib/x86_64-linux-gnu/libcob.so.4.1.0 | grep " cob_move$"
+# file offset
+python3 - << 'PY'
+import subprocess
+out=subprocess.check_output(["readelf","-S","/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0"], text=True)
+print(out)
+PY
+$ # debug link
+python3 - << 'PY'
+data=open('/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0','rb').read()
+# find debuglink section at file offset 0x60024 size 0x34
+chunk=data[0x60024:0x60024+0x34]
+print(chunk)
+PY
+find /usr -name 'libcob.so*.debug' 2>/dev/null | head
+# apt source? 
+ls /usr/src 2>/dev/null | head
+# try download source? network?
+# Let's just disassemble cob_move with objdump -d --start-address
+objdump -d --start-address=0x1e3b0 --stop-address=0x1e500 /usr/lib/x86_64-linux-gnu/libcob.so.4.1.0 | head -80
+$ find / -name 'libcob.so*.debug' -o -name '*gnucobol*dbg*' 2>/dev/null | head
+ls /usr/lib/debug/usr/lib/x86_64-linux-gnu/ 2>/dev/null | head
+# try apt-get source if network works? maybe not. Let's use gdb to call cob_decimal_set_field
+cat > /tmp/probe/callnum.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+
+/* We only need to call cob_move between fields. Previous crash was cob_init not called correctly
+   or attr pic pointer. Let's init properly. */
+
+int main(int argc, char **argv) {
+    cob_init(0, NULL);
+    static cob_field_attr ax = {0x21, 0, 0, 0, NULL}; /* alphanumeric? 0x21 was group. Use 0x00? */
+    /* From generated code a_2 for PIC 9(10) and a_3 for 9(10)V99. Let's dump those from the .h file */
+    return 0;
+}
+EOF
+grep -n "a_2\|a_3\|a_1" /tmp/probe/probe12.c.h | head -30
+echo "======= header attrs ======="
+sed -n '1,80p' /tmp/probe/probe12.c.h
+
+$ cat > /tmp/probe/callnum.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+
+static cob_field_attr a_num10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a_num12 = {0x10, 12, 2, 0, NULL};
+static cob_field_attr a_alpha = {0x21, 0, 0, 0x1000, NULL};
+
+int main(int argc, char **argv) {
+    int cobargc = 0;
+    char *cobargv[] = {NULL};
+    cob_init(cobargc, cobargv);
+
+    const char *samples[] = {
+        "00000002.5",
+        "0000000200",
+        "200       ",
+        "       150",
+        "ABCDEFGHIJ",
+        "120.50    ",
+        "0000002.50",
+        ".50       ",
+        "+200      ",
+        "          ",
+        "12.3.4    ",
+        "99999999.9",
+        "00000000.0",
+        "1234567890",
+        "         5",
+        "20 0      ",
+        "2.5       ",
+        "..........",
+        "00000002.5",
+        NULL
+    };
+    for (int i = 0; samples[i]; i++) {
+        unsigned char src[10];
+        unsigned char ws[12];
+        unsigned char out[10];
+        unsigned char bal[10];
+        memset(src, ' ', 10);
+        memcpy(src, samples[i], 10);
+        memset(ws, '0', 12);
+        memset(out, '0', 10);
+        memcpy(bal, "0000000000", 10);
+        cob_field fsrc = {10, src, &a_num10};
+        cob_field fws = {12, ws, &a_num12};
+        cob_field fout = {10, out, &a_num10};
+        cob_field fbal = {10, bal, &a_num10};
+        cob_move(&fsrc, &fws);
+        printf("SRC=[%.*s] WS=[%.*s]\n", 10, src, 12, ws);
+        cob_move(&fws, &fout);
+        printf("  OUT=[%.*s]\n", 10, out);
+        cob_sub(&fbal, &fws, 0);
+        printf("  0-WS=[%.*s]\n", 10, bal);
+    }
+    return 0;
+}
+EOF
+gcc -o /tmp/probe/callnum /tmp/probe/callnum.c -lcob && /tmp/probe/callnum
+
+$ python3 - << 'PY'
+def move_9_10_to_9_10_v99(src10: bytes) -> bytes:
+    assert len(src10)==10
+    # observed: append "00" and the result is 12 bytes that look like src + "00"
+    # but spaces in pure integer fields got normalized? "          " -> "000000000000"
+    # "       150" -> "000000015000"  spaces became zeros AND value right-aligned? 
+    # Wait "       150" + conceptually digits. If it were literal append: "       15000" which is NOT "000000015000".
+    # So spaces are converted to zeros first? "       150" -> "0000000150" then append "00" -> "000000015000". YES.
+    # "200       " -> if spaces to zero: "2000000000" + "00" = "200000000000". YES matches WS.
+    # "20 0      " -> "2000000000"+"00". YES.
+    # "00000002.5" -> "00000002.5"+"00" = "00000002.500". Spaces not present. YES.
+    # "ABCDEFGHIJ" -> "ABCDEFGHIJ00". YES no conversion.
+    # "          " -> all spaces -> zeros -> "000000000000". YES.
+    # So rule: replace ASCII space with '0', then append "00".
+    return src10.replace(b' ', b'0') + b'00'
+
+def move_v99_to_9_10(ws12: bytes) -> bytes:
+    # drop last two chars (the scale digits), keep first 10
+    return ws12[:10]
+
+samples = [
+"00000002.5","0000000200","200       ","       150","ABCDEFGHIJ","120.50    ",
+"0000002.50",".50       ","+200      ","          ","12.3.4    ","99999999.9",
+"00000000.0","1234567890","         5","20 0      ","2.5       ","..........",
+"0000120.5 ","120.50    ","0000002.50"
+]
+# expected WS from callnum
+exp = {
+"00000002.5":"00000002.500",
+"0000000200":"000000020000",
+"200       ":"200000000000",
+"       150":"000000015000",
+"ABCDEFGHIJ":"ABCDEFGHIJ00",
+"120.50    ":"120.50000000",
+"0000002.50":"0000002.5000",
+".50       ":".50000000000",
+"+200      ":"+20000000000",
+"          ":"000000000000",
+"12.3.4    ":"12.3.4000000",
+"99999999.9":"99999999.900",
+"00000000.0":"00000000.000",
+"1234567890":"123456789000",
+"         5":"000000000500",
+"20 0      ":"200000000000",
+"2.5       ":"2.5000000000",
+"..........":"..........00",
+}
+for s in samples:
+    ws=move_9_10_to_9_10_v99(s.encode())
+    ok = exp.get(s)
+    print(s, ws.decode(), 'OK' if ok is None or ws.decode()==ok else f'BAD expected {ok}')
+
+# Now understand subtraction of WS (display junk) from PIC 9(10)
+# I'll call C for many single-char patterns to infer digit mapping of non-digits when subtracting.
+
+print('--- single position junk ---')
+PY
+
+cat > /tmp/probe/callnum2.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+static cob_field_attr a_num10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a_num12 = {0x10, 12, 2, 0, NULL};
+int main() {
+    int cobargc = 0; char *cobargv[]={NULL};
+    cob_init(cobargc, cobargv);
+    // For each byte value in position 9 (units) and position 0 (highest), compute 0 - move(src)
+    unsigned char interesting[64];
+    int n=0;
+    for (int c=0;c<128;c++) {
+        if (c==' ' || (c>='0'&&c<='9') || c=='.' || c=='+' || c=='-' || (c>='A'&&c<='Z') || c==0)
+            interesting[n++]=(unsigned char)c;
+    }
+    for (int pi=0; pi<n; pi++) {
+        unsigned char ch = interesting[pi];
+        unsigned char src[10];
+        memset(src, '0', 10);
+        src[9]=ch; // units place
+        unsigned char ws[12]; memset(ws,'0',12);
+        unsigned char bal[10]; memcpy(bal,"0000000000",10);
+        cob_field fsrc={10,src,&a_num10};
+        cob_field fws={12,ws,&a_num12};
+        cob_field fbal={10,bal,&a_num10};
+        cob_move(&fsrc,&fws);
+        cob_sub(&fbal,&fws,0);
+        printf("UNITS ch=%02x '%c' WS=[%.*s] BAL=[%.*s]\n", ch, (ch>=32&&ch<127)?ch:'?', 12, ws, 10, bal);
+    }
+    printf("---- high digit ----\n");
+    for (int pi=0; pi<n; pi++) {
+        unsigned char ch = interesting[pi];
+        unsigned char src[10];
+        memset(src, '0', 10);
+        src[0]=ch;
+        unsigned char ws[12]; memset(ws,'0',12);
+        unsigned char bal[10]; memcpy(bal,"0000000000",10);
+        cob_field fsrc={10,src,&a_num10};
+        cob_field fws={12,ws,&a_num12};
+        cob_field fbal={10,bal,&a_num10};
+        cob_move(&fsrc,&fws);
+        cob_sub(&fbal,&fws,0);
+        printf("HIGH ch=%02x '%c' WS=[%.*s] BAL=[%.*s]\n", ch, (ch>=32&&ch<127)?ch:'?', 12, ws, 10, bal);
+    }
+    return 0;
+}
+EOF
+gcc -o /tmp/probe/callnum2 /tmp/probe/callnum2.c -lcob && /tmp/probe/callnum2
+
+$ python3 - << 'PY'
+# model: each char contributes digit = ord(c) & 0x0F, but if digit>=10 there is a carry anomaly of -16 per such digit at that place?
+# For units '.' ord 0x2e & 0xF = 14. Observed value contribution 737095514 not 14.
+# 737095514 vs 14. Difference huge so not simple low nibble when subtracting from a *different* field that is clean numeric.
+# The subtraction itself may parse display bytes with a broken routine.
+
+# Let's see cob_sub behaviour by setting WS bytes directly without move, and also subtracting two numeric display fields.
+
+print('plan C probe')
+PY
+cat > /tmp/probe/callnum3.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+static cob_field_attr a_num10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a_num12 = {0x10, 12, 2, 0, NULL};
+
+static void sub_from_zero(const char *label, unsigned char *ws, int wslen, cob_field_attr *attr) {
+    unsigned char bal[10];
+    memcpy(bal, "0000001180", 10);
+    cob_field fws = {wslen, ws, attr};
+    cob_field fbal = {10, bal, &a_num10};
+    cob_sub(&fbal, &fws, 0);
+    printf("%s WS=[%.*s] BAL=[%.*s]\n", label, wslen, ws, 10, bal);
+}
+
+int main() {
+    int cobargc=0; char *cobargv[]={NULL};
+    cob_init(cobargc, cobargv);
+
+    unsigned char ws[12];
+    memcpy(ws, "00000002.500", 12);
+    sub_from_zero("dot", ws, 12, &a_num12);
+
+    memcpy(ws, "000000020000", 12);
+    sub_from_zero("num", ws, 12, &a_num12);
+
+    memcpy(ws, "000000000.00", 12);
+    sub_from_zero("dotU", ws, 12, &a_num12);
+
+    // direct 10-byte numeric with dot, no scale
+    unsigned char s[10];
+    memcpy(s, "00000002.5", 10);
+    sub_from_zero("raw10", s, 10, &a_num10);
+
+    memcpy(s, "0000000200", 10);
+    sub_from_zero("raw200", s, 10, &a_num10);
+
+    memcpy(s, "ABCDEFGHIJ", 10);
+    sub_from_zero("rawABC", s, 10, &a_num10);
+
+    // What if we MOVE ws to a clean binary? check cob_get_llint?
+    return 0;
+}
+EOF
+# find cob_get_llint
+nm -D /usr/lib/x86_64-linux-gnu/libcob.so.4 | grep -E "llint|get_int|display_get" | head
+gcc -o /tmp/probe/callnum3 /tmp/probe/callnum3.c -lcob && /tmp/probe/callnum3
+
+$ python3 - << 'PY'
+# Try to reproduce cob_get_llint / decimal via a simple model of base-100? 
+# Let's print cob_get_llint of various fields.
+
+print('skip')
+PY
+cat > /tmp/probe/getint.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+static cob_field_attr a_num10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a_num12 = {0x10, 12, 2, 0, NULL};
+extern long long cob_get_llint(cob_field *);
+int main() {
+    int c=0; char *v[]={NULL}; cob_init(c,v);
+    const char *samples[] = {
+        "0000000000","0000000001","0000000002","0000000009","0000000010",
+        "00000002.5","0000000200","2000000000","ABCDEFGHIJ","..........",
+        ".500000000","120.500000","00000000.0","000000000.","000000000+",
+        "000000000-","000000000A","000000000P","000000000J","99999999.9",
+        "0000002.50","120.50    ","         5","2.50000000","12.3.40000",
+        NULL
+    };
+    for (int i=0; samples[i]; i++) {
+        unsigned char s[10];
+        memset(s,' ',10);
+        memcpy(s, samples[i], 10);
+        // also space->0 version
+        cob_field f={10,s,&a_num10};
+        long long vll = cob_get_llint(&f);
+        unsigned char bal[10]; memcpy(bal,"0000000000",10);
+        cob_field fb={10,bal,&a_num10};
+        cob_sub(&fb,&f,0);
+        printf("S=[%.*s] ll=%lld BAL=[%.*s]\n", 10, s, vll, 10, bal);
+    }
+    return 0;
+}
+EOF
+gcc -o /tmp/probe/getint /tmp/probe/getint.c -lcob && /tmp/probe/getint
+
+$ python3 - << 'PY'
+# Model: process digits left to right? or right to left with base 10 but non-digit values cause weird carries.
+# From get_llint:
+# '.' in units: ll=-2. ord('.')=46. 
+# '+' units ll=-5. '-' units ll=-3.
+# 'A' units ll=17 = 0x41-0x30? 0x41-0x30=17. YES 'A'-'0' = 17.
+# 'P' units 32? 'P'=0x50, 0x50-0x30=32. YES.
+# 'J' = 0x4A-0x30=26. YES.
+# So digit value = ord(c) - ord('0') which can be negative or >9.
+# space ' '=0x20, 0x20-0x30 = -16.
+# '.' = 0x2E-0x30 = -2. matches units ll=-2 if alone? "000000000." ll=-2. YES!
+# '+' = 0x2B-0x30 = -5. YES.
+# '-' = 0x2D-0x30 = -3. YES.
+# '0'-'0'=0 ... '9'=9.
+# NUL = 0-0x30 = -48. But earlier units NUL became 0 because MOVE space/null normalized? We passed raw to get_llint.
+# "          " not in this list. "         5" ll=-17777777755.
+# Let's compute positional: value = sum (ord(c)-ord('0')) * 10**place
+
+def val(s):
+    s=s.ljust(10)[:10]
+    total=0
+    for i,ch in enumerate(s):
+        place = 9-i  # units at right
+        d = ord(ch) - ord('0')
+        total += d * (10**place)
+    return total
+
+samples = [
+"0000000000","0000000001","00000002.5","0000000200","2000000000","ABCDEFGHIJ",
+"..........",".500000000","120.500000","00000000.0","000000000.","000000000+",
+"000000000-","000000000A","000000000P","000000000J","99999999.9","0000002.50",
+"120.50    ","         5","2.50000000","12.3.40000","          ","       150",
+"200       ","0000002.50","+200      ","12.3.4    "
+]
+expected = {
+"0000000000":0,
+"0000000001":1,
+"00000002.5":185,
+"0000000200":200,
+"2000000000":2000000000,
+"ABCDEFGHIJ":19012345676,
+"..........":-2222222222,
+".500000000":-1500000000,
+"120.500000":1198500000,
+"00000000.0":-20,
+"000000000.":-2,
+"000000000+":-5,
+"000000000-":-3,
+"000000000A":17,
+"000000000P":32,
+"000000000J":26,
+"99999999.9":9999999889,
+"0000002.50":1850,
+"120.50    ":1198482224,
+"         5":-17777777755,
+"2.50000000":1850000000,
+"12.3.40000":1182840000,
+}
+for s in samples:
+    v=val(s)
+    e=expected.get(s)
+    flag='' if e is None else ('OK' if v==e else f'BAD exp {e} diff {v-e}')
+    print(f"{s!r:16} {v:20d} {flag}")
+PY
+$ cat > /tmp/probe/arith.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+static cob_field_attr a10 = {0x10, 10, 0, 0, NULL};
+static void show(const char *label, const char *bal_s, const char *amt_s, int sub) {
+    unsigned char bal[10], amt[10];
+    memcpy(bal, bal_s, 10);
+    memcpy(amt, amt_s, 10);
+    cob_field fb={10,bal,&a10};
+    cob_field fa={10,amt,&a10};
+    if (sub) cob_sub(&fb,&fa,0); else cob_add(&fb,&fa,0);
+    printf("%s %s [%s] [%s] => [%.*s]\n", sub?"SUB":"ADD", label, bal_s, amt_s, 10, bal);
+}
+int main(){
+    int c=0; char *v[]={NULL}; cob_init(c,v);
+    show("a","0000001180","0000000200",1);
+    show("b","0000000050","0000000200",1);
+    show("c","0000001180","00000002.5",1);
+    show("d","0000001800","00000002.5",0);
+    show("e","9999999999","0000000005",0);
+    show("f","0000000000","0000000001",1);
+    show("g","0000000004","0000000005",1);
+    show("h","0000001180","2000000000",1);
+    show("i","9999999999","0000000001",0);
+    show("j","0000000000","ABCDEFGHIJ",1);
+    show("k","0000001180","ABCDEFGHIJ",1);
+    show("l","0000001800","ABCDEFGHIJ",0);
+    show("m","1234567890","9876543210",0);
+    show("n","0000000001","0000000001",1);
+    show("o","0000001000","0000001000",1);
+    show("p","0000000000","0000000000",1);
+    show("q","9999999999","9999999999",0);
+    show("r","0000001180","..........",1);
+    show("s","5000000000","6000000000",1);
+    show("t","0000000000","         5",1);
+    show("u","0000001180","         5",1);
+    show("v","0000001800","         5",0);
+    show("w","0000001180","          ",1);
+    show("x","0000000005","0000000010",1);
+    show("y","0000000000","1000000000",1); // negative
+    show("z","0000000001","9999999999",0);
+    // large negative source
+    show("A","0000005000",".500000000",1);
+    show("B","9999999999",".500000000",0);
+    show("C","0000000000","1234567890123"+3,1); // nonsense
+    return 0;
+}
+EOF
+gcc -o /tmp/probe/arith /tmp/probe/arith.c -lcob && /tmp/probe/arith
+
+python3 - << 'PY'
+MOD=10**10
+def digit_value(s):
+    s=s.ljust(10)[:10]
+    total=0
+    for i,ch in enumerate(s):
+        total += (ord(ch)-ord('0')) * (10**(9-i))
+    return total
+
+def store(v):
+    # try several wrap rules
+    return v
+
+cases=[]
+# (bal, amt, sub, expected_from_run) we'll fill after seeing output
+PY
+$ python3 - << 'PY'
+MOD=10**10
+
+def field_int(s):
+    s=s.ljust(10)[:10]
+    total=0
+    for i,ch in enumerate(s):
+        total += (ord(ch)-ord('0')) * (10**(9-i))
+    return total
+
+def store(v):
+    return abs(v) % MOD
+
+cases = [
+("0000001180","0000000200",1,"0000000980"),
+("0000000050","0000000200",1,"0000000150"),
+("0000001180","00000002.5",1,"0000000995"),
+("0000001800","00000002.5",0,"0000001985"),
+("9999999999","0000000005",0,"0000000004"),
+("0000000000","0000000001",1,"0000000001"),
+("0000000004","0000000005",1,"0000000001"),
+("0000001180","2000000000",1,"1999998820"),
+("9999999999","0000000001",0,"0000000000"),
+("0000000000","ABCDEFGHIJ",1,"9012345676"),
+("0000001180","ABCDEFGHIJ",1,"9012344496"),
+("0000001800","ABCDEFGHIJ",0,"9012347476"),
+("1234567890","9876543210",0,"1111111100"),
+("0000000001","0000000001",1,"0000000000"),
+("9999999999","9999999999",0,"9999999998"),
+("0000001180","..........",1,"1487328214"),
+("5000000000","6000000000",1,"1000000000"),
+("0000000000","         5",1,"0000000005"),
+("0000001180","         5",1,"0000001175"),
+("0000001800","         5",0,"0000001805"),
+("0000001180","          ",1,"3709550420"),
+("0000000005","0000000010",1,"0000000005"),
+("0000000000","1000000000",1,"1000000000"),
+("0000000001","9999999999",0,"0000000000"),
+("0000005000",".500000000",1,"2209546616"),
+("9999999999",".500000000",0,"2209551615"),
+]
+ok=True
+for bal,amt,sub,exp in cases:
+    b=field_int(bal); a=field_int(amt)
+    r=b-a if sub else b+a
+    got=f"{store(r):010d}"
+    if got!=exp:
+        print("BAD", bal, amt, sub, "got", got, "exp", exp, "raw", r, "b", b, "a", a)
+        ok=False
+print("ALL OK" if ok else "FAIL")
+
+# MOVE to PIC 9(10) from v99 storage which is src with spaces->0 plus '00', then taking first 10 chars
+# equals: replace spaces with '0' in the original 10 and that's the stored TRANS amount bytes IF all resulting chars are... 
+# OUT field was display of the numeric MOVE which may normalize. Observed:
+# "00000002.5" -> OUT "00000002.5" (unchanged, dot kept!)
+# "ABCDEFGHIJ" -> "ABCDEFGHIJ"
+# "       150" -> "0000000150" (spaces to zero)
+# "200       " -> "2000000000"
+# "120.50    " -> "120.500000"
+# ".50       " -> ".500000000"
+# So TRANS-AMOUNT bytes = amount_field with spaces replaced by '0'. NOT a re-encoded integer!
+# But "          " -> "0000000000"
+# And pure spaces in the middle "20 0      " -> "2000000000"
+# Is it ONLY spaces that change, everything else copied?
+# "00000002.5" copied. Yes.
+# What about NUL bytes from short record "200\x00\x00..."?
+# Earlier record sequential short read of INPUT amount "200" + NULs.
+# MOVE to WS showed 2000000000.00 which matches NULs treated as zeros OR spaces.
+# Let's check NUL specifically.
+print('nul check next')
+PY
+
+cat > /tmp/probe/nul.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+static cob_field_attr a10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a12 = {0x10, 12, 2, 0, NULL};
+int main(){
+    int c=0; char *v[]={NULL}; cob_init(c,v);
+    unsigned char src[10];
+    memset(src, 0, 10);
+    memcpy(src, "200", 3);
+    unsigned char ws[12]; memset(ws,'0',12);
+    cob_field fs={10,src,&a10};
+    cob_field fw={12,ws,&a12};
+    cob_move(&fs,&fw);
+    printf("WS=[");
+    for(int i=0;i<12;i++) printf(ws[i]>=32&&ws[i]<127?"%c":"\\x%02x", ws[i]);
+    printf("]\n");
+    unsigned char out[10]; memset(out,'?',10);
+    cob_field fo={10,out,&a10};
+    cob_move(&fw,&fo);
+    printf("OUT=[");
+    for(int i=0;i<10;i++) printf(out[i]>=32&&out[i]<127?"%c":"\\x%02x", out[i]);
+    printf("]\n");
+    unsigned char bal[10]; memcpy(bal,"0000001180",10);
+    cob_field fb={10,bal,&a10};
+    cob_sub(&fb,&fw,0);
+    printf("BAL=[%.*s]\n",10,bal);
+
+    // low values all
+    memset(src,0,10);
+    memset(ws,'0',12);
+    cob_move(&fs,&fw);
+    printf("ALLNUL WS=[");
+    for(int i=0;i<12;i++) printf(ws[i]>=32&&ws[i]<127?"%c":"\\x%02x", ws[i]);
+    printf("]\n");
+    memcpy(bal,"0000001180",10);
+    cob_sub(&fb,&fw,0);
+    printf("BAL2=[%.*s]\n",10,bal);
+
+    // move raw src with nul directly stored? MOVE src(num) to out(num)
+    memset(src,0,10); memcpy(src,"200",3);
+    memset(out,'?',10);
+    cob_move(&fs,&fo);
+    printf("DIROUT=[");
+    for(int i=0;i<10;i++) printf(out[i]>=32&&out[i]<127?"%c":"\\x%02x", out[i]);
+    printf("]\n");
+    return 0;
+}
+EOF
+gcc -o /tmp/probe/nul /tmp/probe/nul.c -lcob && /tmp/probe/nul
+
+# Also confirm transaction record bytes are raw MOVE not normalized integer for dot case - already observed file contains '00000002.5' literally. Good.
+# For spaces '       150' transaction was '0000000150'. Good spaces->0.
+# For '200       ' would be '2000000000'.
+# NUL: DIROUT likely '2000000000'
+
+$ python3 - << 'PY'
+MOD=10**10
+
+def field_int(s):
+    s=s.ljust(10)[:10]
+    total=0
+    for i,ch in enumerate(s):
+        total += (ord(ch)-ord('0')) * (10**(9-i))
+    return total
+
+def store_candidates(v):
+    # various
+    cands={}
+    cands['absmod']=abs(v)%MOD
+    cands['mod']=v%MOD
+    # two's complement 64 then low 10? 
+    cands['i64mod']=(v & (2**64-1)) % MOD if v>=0 else ((v + (1<<64)) % (1<<64)) % MOD
+    # 32 bit
+    cands['i32'] = (v & 0xFFFFFFFF)
+    if cands['i32']>=2**31:
+        cands['i32s']=cands['i32']-2**32
+    else:
+        cands['i32s']=cands['i32']
+    cands['i32s_absmod']=abs(cands['i32s'])%MOD
+    cands['i32_mod']=cands['i32']%MOD
+    # maybe they use unsigned 64 of the absolute digit accumulation done per digit with uint?
+    return cands
+
+bad=[
+("0000001180","..........",1,"1487328214"),
+("0000000000","         5",1,"0000000005"),
+("0000001180","         5",1,"0000001175"),
+("0000001800","         5",0,"0000001805"),
+("0000001180","          ",1,"3709550420"),
+("0000005000",".500000000",1,"2209546616"),
+("9999999999",".500000000",0,"2209551615"),
+("0000000000","..........",1, None),
+]
+for bal,amt,sub,exp in bad:
+    b=field_int(bal); a=field_int(amt)
+    r=b-a if sub else b+a
+    print("CASE", amt, "sub" if sub else "add", "raw", r)
+    cs=store_candidates(r)
+    for k,v in cs.items():
+        s=f"{abs(v)%MOD:010d}" if not isinstance(v,str) else v
+        mark = ""
+        if exp and f"{v%MOD:010d}"==exp:
+            mark=" <== MOD"
+        if exp and f"{abs(v)%MOD:010d}"==exp:
+            mark+=" <== ABS"
+        print(f"  {k:12} {v} {mark}")
+PY
+$ # Confirm libcob linking and that a small helper can be invoked repeatedly.
+cat > /tmp/probe/helper.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <libcob.h>
+
+static cob_field_attr a10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a12 = {0x10, 12, 2, 0, NULL};
+static int inited = 0;
+
+/* args: op bal10 amt10
+   op: S subtract amt from bal, A add, M move amt(PIC 9(10)) to stdout normalized 10 chars
+   bal and amt are exactly 10 bytes (may contain non-digits).
+   Prints 10-byte result.
+*/
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    char *av[] = {argv[0], NULL};
+    cob_init(0, av);
+    unsigned char bal[10], amt[10], ws[12], out[10];
+    const char *op = argv[1];
+    if (op[0]=='M') {
+        if (argc < 3) return 2;
+        memcpy(amt, argv[2], 10);
+        cob_field fa = {10, amt, &a10};
+        cob_field fw = {12, ws, &a12};
+        cob_field fo = {10, out, &a10};
+        memset(ws, '0', 12);
+        memset(out, '0', 10);
+        cob_move(&fa, &fw);
+        cob_move(&fw, &fo);
+        fwrite(out, 1, 10, stdout);
+        return 0;
+    }
+    if (argc < 4) return 2;
+    memcpy(bal, argv[2], 10);
+    memcpy(amt, argv[3], 10);
+    cob_field fb = {10, bal, &a10};
+    cob_field fa = {10, amt, &a10};
+    cob_field fw = {12, ws, &a12};
+    memset(ws, '0', 12);
+    cob_move(&fa, &fw);
+    if (op[0]=='S') cob_sub(&fb, &fw, 0);
+    else cob_add(&fb, &fw, 0);
+    fwrite(bal, 1, 10, stdout);
+    return 0;
+}
+EOF
+gcc -O2 -o /tmp/probe/cobnum /tmp/probe/helper.c -lcob
+# test
+python3 - << 'PY'
+import subprocess
+def run(op, bal, amt=None):
+    args=["/tmp/probe/cobnum", op]
+    if bal is not None:
+        args.append(bal)
+    if amt is not None:
+        args.append(amt)
+    p=subprocess.run(args, capture_output=True)
+    print(op, bal, amt, p.returncode, p.stdout, p.stderr[:200] if p.stderr else b"")
+run("S", "0000001180", "0000000200")
+run("S", "0000001180", "00000002.5")
+run("A", "0000001800", "00000002.5")
+run("M", "00000002.5")
+run("M", "       150")
+run("M", "200       ")
+run("S", "0000001180", "          ")
+run("S", "0000000050", "0000000200")
+run("A", "9999999999", "0000000005")
+PY
+$ # test null bytes through argv? argv can't contain NULs. Use env or a file protocol instead.
+# I'll change helper to read length-prefixed from stdin.
+cat > /tmp/probe/cobnum.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <libcob.h>
+
+static cob_field_attr a10 = {0x10, 10, 0, 0, NULL};
+static cob_field_attr a12 = {0x10, 12, 2, 0, NULL};
+
+static int read_full(unsigned char *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(0, buf + got, n - got);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+int main(void) {
+    char *av[] = {"cobnum", NULL};
+    cob_init(0, av);
+    unsigned char op;
+    unsigned char bal[10], amt[10], ws[12], out[10];
+    for (;;) {
+        if (read_full(&op, 1) != 0) break;
+        if (op == 'M') {
+            if (read_full(amt, 10) != 0) break;
+            cob_field fa = {10, amt, &a10};
+            cob_field fw = {12, ws, &a12};
+            cob_field fo = {10, out, &a10};
+            memset(ws, '0', 12);
+            memset(out, '0', 10);
+            cob_move(&fa, &fw);
+            cob_move(&fw, &fo);
+            if (write(1, out, 10) != 10) break;
+        } else if (op == 'S' || op == 'A') {
+            if (read_full(bal, 10) != 0) break;
+            if (read_full(amt, 10) != 0) break;
+            cob_field fb = {10, bal, &a10};
+            cob_field fa = {10, amt, &a10};
+            cob_field fw = {12, ws, &a12};
+            memset(ws, '0', 12);
+            cob_move(&fa, &fw);
+            if (op == 'S') cob_sub(&fb, &fw, 0);
+            else cob_add(&fb, &fw, 0);
+            if (write(1, bal, 10) != 10) break;
+        } else if (op == 'Q') {
+            break;
+        } else {
+            return 2;
+        }
+    }
+    return 0;
+}
+EOF
+gcc -O2 -o /tmp/cobnum /tmp/probe/cobnum.c -lcob
+python3 - << 'PY'
+import subprocess
+p=subprocess.Popen(["/tmp/cobnum"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def call(op, bal=None, amt=None):
+    data=op
+    if bal is not None: data+=bal
+    if amt is not None: data+=amt
+    p.stdin.write(data)
+    p.stdin.flush()
+    return p.stdout.read(10)
+print(call(b'S', b'0000001180', b'0000000200'))
+print(call(b'S', b'0000001180', b'00000002.5'))
+print(call(b'A', b'0000001800', b'00000002.5'))
+print(call(b'M', amt=b'00000002.5'))
+print(call(b'M', amt=b'       150'))
+print(call(b'S', b'0000001180', b'          '))
+print(call(b'S', b'0000001180', b'200\x00\x00\x00\x00\x00\x00\x00'))
+print(call(b'M', amt=b'200\x00\x00\x00\x00\x00\x00\x00'))
+print(call(b'S', b'0000000050', b'0000000200'))
+print(call(b'A', b'9999999999', b'0000000005'))
+print(call(b'S', b'0000001180', b'ABCDEFGHIJ'))
+p.stdin.write(b'Q'); p.stdin.flush(); p.wait()
+print('rc', p.returncode)
+PY
+> write /tmp/probe/cobnum.c
+$ cp /tmp/probe/cobnum.c /tmp/cobnum.c && gcc -O2 -o /tmp/cobnum /tmp/cobnum.c -lcob && ls -la /tmp/cobnum
+> write /app/program.py
+$ python3 - << 'PY'
+import os, shutil, subprocess, tempfile
+
+ORIG_DATA = "/tmp/data_orig"
+COB = "/tmp/program"
+PY = "/app/program.py"
+
+cases = []
+cases.append(open("/app/src/INPUT.DAT","rb").read())
+cases.append(b"U001U002B0010000000150")
+cases.append(b"U001U002B0010000000150\n")
+cases.append(b"U003U002B0010000000100")
+cases.append(b"U002U002B0010000000100")
+cases.append(b"U001U003B0010000000100")
+cases.append(b"U009U002B0010000000100")
+cases.append(b"U001U002B0090000000100")
+cases.append(b"U001U002B0010000002000")
+cases.append(b"U001U002B0010000000000")
+cases.append(b"U001U002B00100000002.5")
+cases.append(b"U001U002B001       150")
+cases.append(b"")
+cases.append(b"U001U002B0010000000100U003U002B0020000000050")
+cases.append(b"U001U002B0010000000100\nU003U002B0020000000050\n")
+cases.append(b"U001U002B007200")
+cases.append(b"U001U002B001ABCDEFGHIJ")
+cases.append(b"U001U002B0020000000050")
+cases.append(b"U002U001B0030000000020")
+cases.append(b"U001U002B0030000000020")
+cases.append(b"U001U002B0019999999999")
+cases.append(b"    U002B0010000000100")
+cases.append(b"U001U002B0010000002.50")
+cases.append(b"U001U002B0010000120.5 ")
+cases.append(b"U001U002B001120.50    ")
+cases.append(b"U001U001B0010000000100")
+cases.append(b"U001U002B001..........")
+cases.append(b"U001U002B001.50       ")
+cases.append(b"U001U002B001          ")
+cases.append(b"U001U002B001         5")
+cases.append(b"U001U002B001+200      ")
+cases.append(b"U001U002B001-200      ")
+cases.append(b"U001U002B00112.3.4    ")
+cases.append(b"U001U002B00199999999.9")
+cases.append(b"U001U002B00100000000.0")
+cases.append(b"U001U002B0012.5       ")
+cases.append(b"U003U002B0020000000001")
+cases.append(b"U001U002B001200       ")
+# buyer balance small subtract larger pure
+cases.append(b"U001U002B0010000005000")
+# ids with different case
+cases.append(b"u001U002B0010000000100")
+# book id match second
+cases.append(b"U001U002B0020000000300")
+# multiple books same id? not in data
+# amount exactly balance
+cases.append(b"U001U002B0010000001180")
+# seller balance overflow add
+cases.append(b"U001U002B0019999999000")
+# whitespace buyer found? no
+cases.append(b"U001U002B0010000000.50")
+cases.append(b"U002U003B0010000000010")  # seller not owner
+# trailing extra bytes beyond 22 ignored for first record only if >=22
+cases.append(b"U001U002B0010000000010EXTRA")
+# newline only
+cases.append(b"\n")
+# short ids
+cases.append(b"U001")
+cases.append(b"U001U002B0010000000100\x00\x00")
+
+def run_case(raw, label):
+    base = tempfile.mkdtemp(prefix="cmp_")
+    for kind in ("cob", "py"):
+        d = os.path.join(base, kind)
+        os.makedirs(os.path.join(d, "data"))
+        os.makedirs(os.path.join(d, "src"))
+        for n in os.listdir(ORIG_DATA):
+            shutil.copy(os.path.join(ORIG_DATA, n), os.path.join(d, "data", n))
+        open(os.path.join(d, "src", "INPUT.DAT"), "wb").write(raw)
+    cob_dir = os.path.join(base, "cob")
+    shutil.copy(COB, os.path.join(cob_dir, "program"))
+    p1 = subprocess.run(["./program"], cwd=cob_dir, capture_output=True)
+    py_dir = os.path.join(base, "py")
+    p2 = subprocess.run(["python3", PY], cwd=py_dir, capture_output=True)
+    diffs = []
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        b1=open(os.path.join(cob_dir,"data",n),"rb").read()
+        b2=open(os.path.join(py_dir,"data",n),"rb").read()
+        if b1!=b2:
+            diffs.append((n,b1,b2))
+    if p1.returncode!=p2.returncode or p1.stdout!=p2.stdout or p1.stderr!=p2.stderr or diffs:
+        print("MISMATCH", label, "input", raw)
+        print("  cob rc", p1.returncode, "py rc", p2.returncode)
+        print("  cob out", p1.stdout)
+        print("  py  out", p2.stdout)
+        print("  cob err", p1.stderr)
+        print("  py  err", p2.stderr)
+        for n,b1,b2 in diffs:
+            print("  FILE", n)
+            print("   cob", b1)
+            print("   py ", b2)
+        return False
+    else:
+        print("OK", label, "rc", p1.returncode)
+        return True
+
+ok = True
+for i,c in enumerate(cases):
+    if not run_case(c, f"case{i}"):
+        ok = False
+
+base = tempfile.mkdtemp(prefix="cmpmiss_")
+for kind in ("cob","py"):
+    d=os.path.join(base,kind)
+    os.makedirs(os.path.join(d,"data"))
+    for n in os.listdir(ORIG_DATA):
+        shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+shutil.copy(COB, os.path.join(base,"cob","program"))
+p1=subprocess.run(["./program"], cwd=os.path.join(base,"cob"), capture_output=True)
+p2=subprocess.run(["python3", PY], cwd=os.path.join(base,"py"), capture_output=True)
+if (p1.returncode,p1.stdout,p1.stderr)!=(p2.returncode,p2.stdout,p2.stderr):
+    print("MISMATCH missing file")
+    print("cob", p1.returncode, p1.stdout, p1.stderr)
+    print("py ", p2.returncode, p2.stdout, p2.stderr)
+    ok=False
+else:
+    print("OK missing file")
+
+# missing transactions file with valid txn: OPEN EXTEND creates it
+base = tempfile.mkdtemp(prefix="cmpnotrans_")
+for kind in ("cob","py"):
+    d=os.path.join(base,kind)
+    os.makedirs(os.path.join(d,"data"))
+    os.makedirs(os.path.join(d,"src"))
+    for n in os.listdir(ORIG_DATA):
+        if n!="TRANSACTIONS.DAT":
+            shutil.copy(os.path.join(ORIG_DATA, n), os.path.join(d, "data", n))
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+shutil.copy(COB, os.path.join(base,"cob","program"))
+p1=subprocess.run(["./program"], cwd=os.path.join(base,"cob"), capture_output=True)
+p2=subprocess.run(["python3", PY], cwd=os.path.join(base,"py"), capture_output=True)
+same=True
+for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    b1=open(os.path.join(base,"cob","data",n),"rb").read()
+    b2=open(os.path.join(base,"py","data",n),"rb").read()
+    if b1!=b2:
+        same=False
+        print("notrans file diff", n, b1, b2)
+if (p1.returncode,p1.stdout,p1.stderr)!=(p2.returncode,p2.stdout,p2.stderr) or not same:
+    print("MISMATCH no trans file")
+    print("cob", p1.returncode, p1.stdout, p1.stderr)
+    print("py ", p2.returncode, p2.stdout, p2.stderr)
+    ok=False
+else:
+    print("OK missing transactions file")
+
+# missing accounts
+base = tempfile.mkdtemp(prefix="cmpnoacc_")
+for kind in ("cob","py"):
+    d=os.path.join(base,kind)
+    os.makedirs(os.path.join(d,"data"))
+    os.makedirs(os.path.join(d,"src"))
+    for n in os.listdir(ORIG_DATA):
+        if n!="ACCOUNTS.DAT":
+            shutil.copy(os.path.join(ORIG_DATA, n), os.path.join(d, "data", n))
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+shutil.copy(COB, os.path.join(base,"cob","program"))
+p1=subprocess.run(["./program"], cwd=os.path.join(base,"cob"), capture_output=True)
+p2=subprocess.run(["python3", PY], cwd=os.path.join(base,"py"), capture_output=True)
+if (p1.returncode,p1.stdout,p1.stderr)!=(p2.returncode,p2.stdout,p2.stderr):
+    print("MISMATCH missing accounts")
+    print("cob", p1.returncode, p1.stdout, p1.stderr)
+    print("py ", p2.returncode, p2.stdout, p2.stderr)
+    ok=False
+else:
+    print("OK missing accounts")
+
+print("ALL OK" if ok else "FAILED")
+PY
+$ python3 - << 'PY'
+MOD=10**10
+
+def accum(raw):
+    raw=raw.ljust(10)[:10]
+    # right to left with carry of the raw (ord-ord0) which may be negative
+    digits=[]
+    carry=0
+    for i,ch in enumerate(reversed(raw)):
+        v=(ord(ch)-ord('0'))+carry
+        # normalize to digit 0-9 and carry
+        # Python divmod toward negative infinity? 
+        d = v % 10
+        c = (v - d)//10   # toward -inf if we use // but v-d is multiple of 10
+        # actually if we want mathematical floor:
+        c = v // 10  # floor div
+        d = v - c*10  # 0..9
+        digits.append(d)
+        carry=c
+    # leftover carry
+    # value = carry * 10**10 + digits
+    val = carry * (10**10)
+    p=1
+    for d in digits:
+        val += d*p
+        p*=10
+    return val, digits[::-1], carry
+
+samples = {
+"..........": None,
+".50       ": None,
+"+200      ": None,
+"-200      ": None,
+"00000000.0": None,
+"0000000.50": None,
+"          ": None,
+"         5": None,
+"00000002.5": 185,  # known get_llint? earlier 0-ws = 185 so value 185
+"ABCDEFGHIJ": 19012345676,
+"120.50    ": 1198500000, # after space->0 "120.500000"
+"2.5       ": 1850000000,
+"12.3.4    ": 1182840000,
+"99999999.9": 9999999889,
+"0000002.50": 1850,
+}
+# For transaction path, spaces/NUL become 0 BEFORE arithmetic (MOVE to V99).
+# So compute on normalized field.
+
+def norm(s):
+    return ''.join('0' if c in ' \x00' else c for c in s.ljust(10)[:10])
+
+for s,exp in list(samples.items()):
+    ns=norm(s)
+    val,digs,carry=accum(ns)
+    print(f"{s!r:16} norm {ns!r:16} val {val:20d} digits {''.join(str(d) for d in digs)} carry {carry}")
+
+# Now simulate sub/add and compare to known COBOL results
+# buyer start 1180 seller 1800
+known = {
+"..........": ("8514872114","8514875094"),
+".50       ": ("9237094336","9237097316"),
+"+200      ": ("5937094336","5937097316"),
+"-200      ": ("7937094336","7937097316"),
+"00000000.0": ("0737094316","0737097296"),
+"0000000.50": ("0737094186","0737097166"),
+"          ": ("0000001180","0000001800"),
+"         5": ("0000001175","0000001805"),
+"00000002.5": ("0000000995","0000001985"),
+"ABCDEFGHIJ": ("9012344496","9012347476"),
+"120.50    ": ("1198498820","1198501800"),
+"2.5       ": ("1849998820","1850001800"),
+"12.3.4    ": ("1182838820","1182841800"),
+"99999999.9": ("9999998709","0000001689"),  # seller add may overflow? from earlier probe BAL max+ was not this. Let's recompute from earlier program run only for ones we have.
+"0000002.50": ("0000000670","0000003650"),
+"0000000200": ("0000000980","0000002000"),
+"200       ": ("1999998820","2000001800"),
+}
+
+def store(v):
+    if v<0: v=-v
+    return f"{v%MOD:010d}"
+
+print("--- compare ---")
+for s,(eb,es) in known.items():
+    ns=norm(s)
+    val,_,_=accum(ns)
+    b=store(1180-val)
+    a=store(1800+val)
+    print(s, "OK" if (b==eb and a==es) else f"BAD b {b} vs {eb} a {a} vs {es} val {val}")
+PY
+$ # Keep helper next to the app so the script is self-contained and doesn't depend on /tmp.
+mkdir -p /app/bin
+cp /tmp/cobnum.c /app/bin/cobnum.c
+gcc -O2 -o /app/bin/cobnum /app/bin/cobnum.c -lcob
+ls -la /app/bin
+# quick sanity
+python3 - << 'PY'
+import subprocess
+p=subprocess.Popen(["/app/bin/cobnum"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def call(chunks):
+    p.stdin.write(b"".join(chunks)); p.stdin.flush()
+    return p.stdout.read(10)
+print(call([b"S", b"0000001180", b".........."]))
+print(call([b"A", b"0000001800", b".........."]))
+print(call([b"M", b".........."]))
+print(call([b"S", b"0000001180", b".50       "]))
+print(call([b"S", b"0000001180", b"00000000.0"]))
+print(call([b"S", b"0000001180", b"+200      "]))
+print(call([b"S", b"0000001180", b"-200      "]))
+print(call([b"M", b"       150"]))
+print(call([b"S", b"0000001180", b"200\x00\x00\x00\x00\x00\x00\x00"]))
+p.stdin.write(b"Q"); p.stdin.flush(); p.wait()
+PY
+> write /app/program.py
+$ python3 - << 'PY'
+import os, shutil, subprocess, tempfile
+
+ORIG_DATA = "/tmp/data_orig"
+COB = "/tmp/program"
+PY = "/app/program.py"
+
+cases = []
+cases.append(open("/app/src/INPUT.DAT","rb").read())
+cases.append(b"U001U002B0010000000150")
+cases.append(b"U001U002B0010000000150\n")
+cases.append(b"U003U002B0010000000100")
+cases.append(b"U002U002B0010000000100")
+cases.append(b"U001U003B0010000000100")
+cases.append(b"U009U002B0010000000100")
+cases.append(b"U001U002B0090000000100")
+cases.append(b"U001U002B0010000002000")
+cases.append(b"U001U002B0010000000000")
+cases.append(b"U001U002B00100000002.5")
+cases.append(b"U001U002B001       150")
+cases.append(b"")
+cases.append(b"U001U002B0010000000100U003U002B0020000000050")
+cases.append(b"U001U002B0010000000100\nU003U002B0020000000050\n")
+cases.append(b"U001U002B007200")
+cases.append(b"U001U002B001ABCDEFGHIJ")
+cases.append(b"U001U002B0020000000050")
+cases.append(b"U002U001B0030000000020")
+cases.append(b"U001U002B0030000000020")
+cases.append(b"U001U002B0019999999999")
+cases.append(b"    U002B0010000000100")
+cases.append(b"U001U002B0010000002.50")
+cases.append(b"U001U002B0010000120.5 ")
+cases.append(b"U001U002B001120.50    ")
+cases.append(b"U001U001B0010000000100")
+cases.append(b"U001U002B001..........")
+cases.append(b"U001U002B001.50       ")
+cases.append(b"U001U002B001          ")
+cases.append(b"U001U002B001         5")
+cases.append(b"U001U002B001+200      ")
+cases.append(b"U001U002B001-200      ")
+cases.append(b"U001U002B00112.3.4    ")
+cases.append(b"U001U002B00199999999.9")
+cases.append(b"U001U002B00100000000.0")
+cases.append(b"U001U002B0012.5       ")
+cases.append(b"U003U002B0020000000001")
+cases.append(b"U001U002B001200       ")
+cases.append(b"U001U002B0010000005000")
+cases.append(b"u001U002B0010000000100")
+cases.append(b"U001U002B0020000000300")
+cases.append(b"U001U002B0010000001180")
+cases.append(b"U001U002B0019999999000")
+cases.append(b"U001U002B0010000000.50")
+cases.append(b"U002U003B0010000000010")
+cases.append(b"U001U002B0010000000010EXTRA")
+cases.append(b"\n")
+cases.append(b"U001")
+cases.append(b"U001U002B0010000000100\x00\x00")
+cases.append(b"U001U002B00120 0      ")
+cases.append(b"U001U002B001ABC.50    ")
+cases.append(b"U002U002B001..........")  # same party + weird amount
+cases.append(b"U001U002B00100000002.5U003U002B0020000000050")
+
+def run_case(raw, label):
+    base = tempfile.mkdtemp(prefix="cmp_")
+    for kind in ("cob", "py"):
+        d = os.path.join(base, kind)
+        os.makedirs(os.path.join(d, "data"))
+        os.makedirs(os.path.join(d, "src"))
+        for n in os.listdir(ORIG_DATA):
+            shutil.copy(os.path.join(ORIG_DATA, n), os.path.join(d, "data", n))
+        open(os.path.join(d, "src", "INPUT.DAT"), "wb").write(raw)
+    cob_dir = os.path.join(base, "cob")
+    shutil.copy(COB, os.path.join(cob_dir, "program"))
+    p1 = subprocess.run(["./program"], cwd=cob_dir, capture_output=True)
+    py_dir = os.path.join(base, "py")
+    p2 = subprocess.run(["python3", PY], cwd=py_dir, capture_output=True)
+    diffs = []
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        b1=open(os.path.join(cob_dir,"data",n),"rb").read()
+        b2=open(os.path.join(py_dir,"data",n),"rb").read()
+        if b1!=b2:
+            diffs.append((n,b1,b2))
+    if p1.returncode!=p2.returncode or p1.stdout!=p2.stdout or p1.stderr!=p2.stderr or diffs:
+        print("MISMATCH", label, "input", raw)
+        print("  cob rc", p1.returncode, "py rc", p2.returncode)
+        print("  cob out", p1.stdout)
+        print("  py  out", p2.stdout)
+        print("  cob err", p1.stderr)
+        print("  py  err", p2.stderr)
+        for n,b1,b2 in diffs:
+            print("  FILE", n)
+            print("   cob", b1)
+            print("   py ", b2)
+        return False
+    else:
+        print("OK", label, "rc", p1.returncode)
+        return True
+
+ok = True
+for i,c in enumerate(cases):
+    if not run_case(c, f"case{i}"):
+        ok = False
+
+def compare_tree(setup, label):
+    base = tempfile.mkdtemp(prefix="cmpx_")
+    for kind in ("cob","py"):
+        d=os.path.join(base,kind)
+        os.makedirs(os.path.join(d,"data"))
+        os.makedirs(os.path.join(d,"src"), exist_ok=True)
+        setup(d)
+    shutil.copy(COB, os.path.join(base,"cob","program"))
+    p1=subprocess.run(["./program"], cwd=os.path.join(base,"cob"), capture_output=True)
+    p2=subprocess.run(["python3", PY], cwd=os.path.join(base,"py"), capture_output=True)
+    diffs=[]
+    names=sorted(set(os.listdir(os.path.join(base,"cob","data")))|set(os.listdir(os.path.join(base,"py","data"))))
+    for n in names:
+        f1=os.path.join(base,"cob","data",n); f2=os.path.join(base,"py","data",n)
+        b1=open(f1,"rb").read() if os.path.exists(f1) else None
+        b2=open(f2,"rb").read() if os.path.exists(f2) else None
+        if b1!=b2:
+            diffs.append((n,b1,b2))
+    if (p1.returncode,p1.stdout,p1.stderr)!=(p2.returncode,p2.stdout,p2.stderr) or diffs:
+        print("MISMATCH", label)
+        print(" cob", p1.returncode, p1.stdout, p1.stderr)
+        print(" py ", p2.returncode, p2.stdout, p2.stderr)
+        for n,b1,b2 in diffs:
+            print(" ", n, b1, b2)
+        return False
+    print("OK", label, "rc", p1.returncode)
+    return True
+
+def miss_input(d):
+    for n in os.listdir(ORIG_DATA):
+        shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+if not compare_tree(miss_input, "missing input"):
+    ok=False
+
+def no_trans(d):
+    os.makedirs(os.path.join(d,"src"), exist_ok=True)
+    for n in os.listdir(ORIG_DATA):
+        if n!="TRANSACTIONS.DAT":
+            shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+if not compare_tree(no_trans, "missing transactions"):
+    ok=False
+
+def no_acc(d):
+    for n in os.listdir(ORIG_DATA):
+        if n!="ACCOUNTS.DAT":
+            shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+if not compare_tree(no_acc, "missing accounts"):
+    ok=False
+
+def no_books(d):
+    for n in os.listdir(ORIG_DATA):
+        if n!="BOOKS.DAT":
+            shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+if not compare_tree(no_books, "missing books"):
+    ok=False
+
+# empty accounts file
+def empty_acc(d):
+    for n in os.listdir(ORIG_DATA):
+        shutil.copy(os.path.join(ORIG_DATA,n), os.path.join(d,"data",n))
+    open(os.path.join(d,"data","ACCOUNTS.DAT"),"wb").write(b"")
+    open(os.path.join(d,"src","INPUT.DAT"),"wb").write(b"U001U002B0010000000100")
+if not compare_tree(empty_acc, "empty accounts"):
+    ok=False
+
+print("ALL OK" if ok else "FAILED")
+PY
+> edit /app/program.py
+The Python script `/app/program.py` reproduces the COBOL `BOOKFORUM` program. It reads one record from `src/INPUT.DAT`, validates the buyer, seller, and book owner, and then updates `data/ACCOUNTS.DAT`, `data/BOOKS.DAT`, and `data/TRANSACTIONS.DAT`.
+
+Numeric `MOVE`, `ADD`, and `SUBTRACT` operations go through GnuCOBOL's `libcob` via `/app/bin/cobnum`, so the resulting data files match the COBOL program.

@@ -1,0 +1,32 @@
+$ cd . && git status | head -3; ls; grep -n "hook" -i requests/models.py requests/sessions.py requests/api.py | head -60
+$ cd . && sed -n 140,155p requests/models.py; cat requests/hooks.py
+$ cd . && sed -n 460,476p requests/models.py
+$ cd . && python - <<'EOF'
+import re
+p='requests/models.py'
+s=open(p).read()
+s=s.replace("""        for (k, v) in list(hooks.items()):
+            self.register_hook(event=k, hook=v)
+""","""        for (k, v) in list(hooks.items()):
+            if hasattr(v, '__call__'):
+                v = [v]
+            for hook in v:
+                self.register_hook(event=k, hook=hook)
+""",1)
+open(p,'w').write(s)
+EOF
+python -c "
+import requests
+from requests.models import Request
+f=lambda r:r
+g=lambda r:r
+r=Request(url='http://x', hooks={'response':[f,g]})
+print(r.hooks['response'])
+r=Request(url='http://x', hooks={'response':f})
+print(r.hooks['response'])
+"
+python -m pytest -q tests/test_requests.py 2>&1 | tail -3
+$ cd . && git stash -q && python -m pytest -q tests/test_requests.py 2>&1 | tail -1; git stash pop -q && git diff --stat
+The fix is in place: `Request.__init__()` in `requests/models.py` now accepts a list of hook functions as a value in the `hooks` dict, and registers each one. A single callable still works as before. I checked both forms directly. The 16 failures in `tests/test_requests.py` were already there before the change, so they aren't from this fix.
+
+I didn't add a regression test for the list form, and I didn't run a session-level request with a list of hooks. Sessions pass their hooks into `Request`, so they should get the same behaviour, but I haven't confirmed that.

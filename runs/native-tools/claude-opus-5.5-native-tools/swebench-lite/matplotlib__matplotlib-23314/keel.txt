@@ -1,0 +1,42 @@
+$ grep -n "def draw" -A25 lib/mpl_toolkits/mplot3d/axes3d.py | head -50
+$ cd lib/mpl_toolkits/mplot3d && sed -n 380,389p axes3d.py && python - <<'EOF'
+import re
+s=open('axes3d.py').read()
+s=s.replace("""    def draw(self, renderer):
+        self._unstale_viewLim()
+""","""    def draw(self, renderer):
+        if renderer is None:
+            raise RuntimeError('No renderer defined')
+        if not self.get_visible():
+            return
+        self._unstale_viewLim()
+""",1)
+open('axes3d.py','w').write(s)
+EOF
+$ cd /tmp && python -c "
+import matplotlib; matplotlib.use('agg')
+import matplotlib.pyplot as plt, numpy as np
+fig,(a,b)=plt.subplots(1,2,subplot_kw={'projection':'3d'})
+a.scatter(1,1,1);b.scatter(1,1,1,c='r');a.set_visible(False)
+fig.canvas.draw();im=np.asarray(fig.canvas.buffer_rgba())
+print((im[:, :im.shape[1]//2,:3]!=255).sum())
+" && cd - && python -m pytest -q lib/mpl_toolkits/tests/test_mplot3d.py -x 2>&1 | tail -2
+$ cat >> lib/mpl_toolkits/tests/test_mplot3d.py <<'EOF'
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes(fig_test, fig_ref):
+    ax = fig_test.subplots(subplot_kw=dict(projection='3d'))
+    ax.set_visible(False)
+EOF
+grep -n "check_figures_equal" lib/mpl_toolkits/tests/test_mplot3d.py | head -2; python -m pytest -q lib/mpl_toolkits/tests/test_mplot3d.py -k invisible 2>&1 | tail -1
+`set_visible(False)` now hides a 3D subplot.
+
+**Cause:** 3D axes use their own `Axes3D.draw` (in `lib/mpl_toolkits/mplot3d/axes3d.py`). Unlike 2D axes, it never checked whether the axes was visible, so it drew everything regardless.
+
+**Fix:** `Axes3D.draw` now returns right away when the axes is hidden. I also added the same "no renderer" error that 2D axes raise.
+
+**Checks:**
+- I rendered the example from the issue without opening a window. The hidden subplot's half of the figure came out blank.
+- I added a regression test, `test_invisible_axes`, to `lib/mpl_toolkits/tests/test_mplot3d.py`. It checks that a figure with a hidden 3D axes looks the same as an empty figure.
+- All 117 tests in that file pass.

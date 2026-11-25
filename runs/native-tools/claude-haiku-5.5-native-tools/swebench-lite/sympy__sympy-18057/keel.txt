@@ -1,0 +1,43 @@
+$ cd sympy 2>/dev/null; pwd; cd ~ 2>/dev/null; cd "$OLDPWD"; git rev-parse --show-toplevel 2>/dev/null; ls; sed -n 360,420p sympy/core/sympify.py
+$ cd /testbed/sympy; sed -n 280,400p core/sympify.py; grep -n "__eq__" -A25 core/expr.py | head -60; grep -n "__eq__" -A20 core/basic.py | head -40
+$ cd /testbed/sympy; sed -n 315,340p core/basic.py; grep -n "def _sympify" -A30 core/sympify.py | tail -8; grep -rn "sympify(other)" core/*.py | head -30
+$ cd /testbed/sympy; sed -i '124s/other = sympify(other)/other = _sympify(other)/' core/expr.py && sed -n 120,130p core/expr.py && grep -n "^from .sympify\|_sympify" core/expr.py | head -3; cd /testbed && python -c "
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+class D:
+    def __repr__(self): return 'x'
+print(sympy.Symbol('x') == C(), sympy.Symbol('x') != D(), sympy.Symbol('x') == sympy.Symbol('x'), sympy.Integer(2)==2, sympy.Float(2.0)==2.0, sympy.Symbol('x')+1 == 1+sympy.Symbol('x'))
+"
+$ cd /testbed && timeout 900 python -m pytest -q sympy/core/tests/test_expr.py sympy/core/tests/test_basic.py sympy/core/tests/test_sympify.py sympy/core/tests/test_arit.py sympy/core/tests/test_relational.py sympy/core/tests/test_numbers.py 2>&1 | tail -15
+$ cd /testbed && python -c "
+import sympy.core.tests.test_expr as a, sympy.core.tests.test_basic as b, sympy.core.tests.test_sympify as c, sympy.core.tests.test_arit as d, sympy.core.tests.test_relational as e, sympy.core.tests.test_numbers as f
+import sys
+for m in [a,b,c,d,e,f]:
+    for n in dir(m):
+        if n.startswith('test_'):
+            try: getattr(m,n)()
+            except Exception as ex: print(m.__name__, n, type(ex).__name__, ex)
+print('done')
+" 2>&1 | tail -20
+$ cd /testbed && ls bin 2>/dev/null; python -c "
+import sympy
+sympy.test('sympy/core')" 2>&1 | tail -15
+$ cd /testbed && python -c "import sympy; sympy.test('sympy/core')" 2>&1 | grep -E "^(_{5,} |sympy/)" | sort > /tmp/after.txt; git stash -q && python -c "import sympy; sympy.test('sympy/core')" 2>&1 | grep -E "^(_{5,} |sympy/)" | sort > /tmp/before.txt; git stash pop -q && git diff --stat && diff /tmp/before.txt /tmp/after.txt && echo SAME; cat /tmp/after.txt
+$ cd /testbed/sympy && cat core/tests/test_var.py | head -30; grep -n "def var" -A60 core/symbol.py | grep -n "sympify\|eval\|Symbol" 
+$ cd /testbed/sympy && sed -i "s/    assert v == \['d', 'e', 'fg'\]/    assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]/" core/tests/test_var.py && cd /testbed && python -c "import sympy; sympy.test('sympy/core')" 2>&1 | grep -E "^sympy/core/tests/test_var|tests finished" ; cat > /tmp/t.py <<'EOF'
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+class D:
+    def __repr__(self): return 'x'
+assert (sympy.Symbol('x') == C()) is False
+assert sympy.Symbol('x') != D()
+print("ok")
+EOF
+python /tmp/t.py
+The fix is complete, and the summary I gave above still holds.
+
+- **Fix:** `Expr.__eq__` in `sympy/core/expr.py` now uses the strict `_sympify` instead of `sympify`. Arbitrary objects are no longer converted by evaluating their repr, so `Symbol('x') == C()` returns `False` for the `'x.y'` repr, and an object whose repr is `'x'` compares unequal to `Symbol('x')`.
+- **Test update:** `test_var` in `sympy/core/tests/test_var.py` compared Symbols against plain strings, which only passed because of the old string parsing. It now compares against `Symbol` objects.
+- **Verification:** The `sympy/core` suite passes apart from two exceptions that also occur on the unmodified code. I checked the repro by hand but did not add a permanent regression test for it.

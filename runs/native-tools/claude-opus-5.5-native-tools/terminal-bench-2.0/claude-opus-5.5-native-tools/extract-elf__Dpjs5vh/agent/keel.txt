@@ -1,0 +1,54 @@
+$ cd /app; ls; file a.out; readelf -lS a.out | head -60; which node; node --version
+$ cd /app; cat hi.c; readelf -l a.out | grep -A1 LOAD
+$ cd /app; cat > extract.js <<'EOF'
+const fs = require('fs');
+const buf = fs.readFileSync(process.argv[2]);
+if (buf.readUInt32BE(0) !== 0x7f454c46) throw new Error('not ELF');
+const is64 = buf[4] === 2, le = buf[5] === 1;
+const u16 = o => le ? buf.readUInt16LE(o) : buf.readUInt16BE(o);
+const u32 = o => le ? buf.readUInt32LE(o) : buf.readUInt32BE(o);
+const uN = o => is64 ? Number(le ? buf.readBigUInt64LE(o) : buf.readBigUInt64BE(o)) : u32(o);
+const out = {};
+function addRange(addr, off, size) {
+  for (let i = 0; i + 4 <= size; i += 4) {
+    if (off + i + 4 > buf.length) break;
+    out[addr + i] = u32(off + i);
+  }
+}
+const phoff = uN(is64 ? 0x20 : 0x1c);
+const phentsize = u16(is64 ? 0x36 : 0x2a), phnum = u16(is64 ? 0x38 : 0x2c);
+let used = false;
+for (let i = 0; i < phnum; i++) {
+  const p = phoff + i * phentsize;
+  if (u32(p) !== 1) continue; // PT_LOAD
+  let off, vaddr, filesz;
+  if (is64) { off = uN(p + 8); vaddr = uN(p + 16); filesz = uN(p + 32); }
+  else { off = u32(p + 4); vaddr = u32(p + 8); filesz = u32(p + 16); }
+  addRange(vaddr, off, filesz); used = true;
+}
+if (!used) {
+  // fall back to allocated sections
+  const shoff = uN(is64 ? 0x28 : 0x20);
+  const shentsize = u16(is64 ? 0x3a : 0x2e), shnum = u16(is64 ? 0x3c : 0x30);
+  for (let i = 0; i < shnum; i++) {
+    const s = shoff + i * shentsize;
+    const type = u32(s + 4);
+    const flags = uN(s + 8);
+    if (type === 8 || !(flags & 2)) continue;
+    const addr = uN(s + (is64 ? 16 : 12)), off = uN(s + (is64 ? 24 : 16)), size = uN(s + (is64 ? 32 : 20));
+    addRange(addr, off, size);
+  }
+}
+process.stdout.write(JSON.stringify(out));
+EOF
+node extract.js a.out > out.json; head -c 300 out.json; echo; node -e 'console.log(Object.keys(require("./out.json")).length)'; xxd -s 0x1060 -l 8 a.out
+I wrote `/app/extract.js`. Running `node extract.js /app/a.out > out.json` produces a JSON object of 698 addresses with integer values. I couldn't compare it with the reference solution, so whether the values match is unconfirmed.
+
+**How it works:** the script reads the parts of the binary that get loaded into memory when the program runs. It takes each 4-byte value and records it under the address where it would sit in memory. Keys are decimal addresses and values are unsigned integers, as in your example. If a binary doesn't list what it loads, the script falls back to the sections marked as loaded into memory.
+
+**Things that might differ from the reference:**
+- **Starting address:** this binary is built to load at any address, so its addresses start at 0 (e.g. `{"0": 1179403647, "4": 65794, ...}`). Your example starts at 4194304, which is typical of binaries loaded at a fixed address. If the reference adds a base like that to every address, none of my keys will match. I used the program's own addresses unchanged.
+- **Skipped bytes:** if a section's length isn't a multiple of 4, its last 1–3 bytes are left out.
+- **Zeroed variables:** 8 bytes of memory that the program only sets to zero when it starts aren't in the file, so they aren't in the output.
+
+The last two affect only a few addresses, well within the 25% you're allowed to miss.

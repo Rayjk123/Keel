@@ -1,0 +1,969 @@
+$ file a.out && hexdump -C a.out | head -50
+$ ls -la a.out && head -c 200 a.out | od -A x -t x1z -v
+$ readelf -S a.out 2>/dev/null || objdump -h a.out
+$ echo "=== .data section (address 0x4000) ===" && hexdump -C a.out | grep -A 20 "00004000"
+$ echo "=== .data section (address 0x4000) ===" && xxd a.out | grep -A 20 "4000"
+$ echo "=== .data section (address 0x4000) ===" && od -A x -t x1z -v a.out | grep -A 20 "4000"
+$ dd if=a.out bs=1 skip=$((0x3000)) count=32 2>/dev/null | od -A x -t x1z -v
+$ dd if=a.out bs=1 skip=$((0x3000)) count=64 2>/dev/null | od -A x -t x1z -v
+$ dd if=a.out bs=1 skip=$((0x1000)) count=512 2>/dev/null | od -A x -t x1z -v | head -100
+$ dd if=a.out bs=1 skip=$((0x3000)) count=256 2>/dev/null | hexdump -e '16/1 "%02x" "\n"'
+$ python3 -c "
+data = open('a.out', 'rb').read()
+# Look for numeric sequences
+# Print some of the 32-bit integers we can find
+for offset in range(0x3000, min(len(data), 0x4000), 4):
+    val = int.from_bytes(data[offset:offset+4], 'little')
+    if (val & 0xFF000000) != 0:  # Only print if there's a high byte set (suggesting it's a value, not just zero)
+        print(f'0x{offset:x}: {val}')
+"
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+// Read the binary file
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+
+// Map to store addresses and their values (address is the offset from the data start)
+const memoryMap = {};
+
+// Extract interesting 32-bit integer values
+// Looking at all offsets that seem to contain data (not just zeros)
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    // Check if we have significant bytes (not just all zeros)
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    // Skip offsets that are clearly in regions we don't care about
+    // We're interested in the data section and nearby areas
+    // Skip the .rodata section (starts at ~0x2000)
+    if (offset >= 0x2000 && offset < 0x2100) continue;
+    
+    // Only store if there's at least one byte that's not zero
+    // This helps filter out padding
+    if ((b0 | b1 | b2 | b3) !== 0) {
+        // Get the 32-bit little-endian value
+        const value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        
+        // Store the value
+        memoryMap[offset.toString()] = value;
+    }
+}
+
+// Convert to JSON and output
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+$ node extract.js a.out | head -50
+$ python3 -c "
+import re
+
+# Read the output of our extract script
+# Get just the unique addresses we found
+allAddresses = set()
+
+with open('a.out', 'rb') as f:
+    data = f.read()
+    for offset in range(0, len(data) - 3):
+        b0 = data[offset]
+        b1 = data[offset + 1]
+        b2 = data[offset + 2]
+        b3 = data[offset + 3]
+        if (b0 | b1 | b2 | b3) != 0 and offset >= 0x3000:  # Only data section and nearby
+            allAddresses.add(offset)
+
+print('Number of addresses in data section:', len(allAddresses))
+print('Sample addresses:', sorted(list(allAddresses))[:20])
+"
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+// Read the binary file
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+
+// Base address for the data section (from ELF header)
+const BASE_ADDRESS = 0x400000;
+
+// Map to store memory addresses and their values
+const memoryMap = {};
+
+// Extract interesting 32-bit integer values
+// Looking at all offsets that seem to contain data
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    // Skip the .rodata section (starts at ~0x2000)
+    if (offset >= 0x2000 && offset < 0x2100) continue;
+    
+    // Only process offsets in the data section and nearby areas
+    // (around 0x3000 and above based on what we saw earlier)
+    if (offset < 0x3000) continue;
+    
+    // Skip offset beyond the file size
+    if (offset + 3 >= buffer.length) break;
+    
+    // Check if we have significant bytes (not just zeros)
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    // Only store if there's at least one byte that's not zero
+    if ((b0 | b1 | b2 | b3) !== 0) {
+        // Get the 32-bit little-endian value
+        const value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        
+        // Calculate the actual memory address
+        const memAddress = BASE_ADDRESS + offset;
+        
+        // Store the value
+        memoryMap[memAddress.toString()] = value;
+    }
+}
+
+// Convert to JSON and output
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+$ node extract.js a.out | head -30
+$ python3 -c "
+# Values we found earlier at specific addresses
+testValues = {
+    0x4008: 8,  # from direct hexdump
+    0x4194304: 1784774249,  # from example in description
+    0x4194308: 1718378344,
+    0x419431c: 38161477,  # offset 4194312 = 0x400008 + 0x4194304
+}
+
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+print('Checking specific addresses:')
+for addr, expected in testValues.items():
+    if str(addr) in output:
+        actual = output[str(addr)]
+        match = '✓' if actual == expected else '✗'
+        print(f'{match} Address {addr}: expected {expected}, got {actual}')
+    else:
+        print(f'✗ Address {addr}: not found in output')
+"
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Get addresses that are multiples of 4 in the range around 4194304
+addressesAround4194304 = [(int(k), v) for k, v in sorted(output.items()) if 4194300 <= int(k) <= 4194330]
+
+print('Addresses around 4194304:')
+for addr, val in addressesAround4194304[:20]:
+    print(f'  {addr}: {val}')
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Get sample of addresses
+sampleAddresses = sorted([int(k) for k in output.keys()])[:30]
+
+print('Sample addresses from output:')
+for addr in sampleAddresses:
+    print(f'  {addr}: {output[str(addr)]}')
+
+print('\nFirst few addresses:')
+print([int(k) for k in output.keys()][:20])
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+data = result.stdout
+
+# Check base address calculation
+print(f"Base address from script: 0x{0x400000:x}")
+print(f"First address from output: {4206597}")
+print(f"Difference: {4206597 - 0x400000}")
+
+# Check what the value should be at offset 0x3008
+rawBytes = open('a.out', 'rb').read()
+val = int.from_bytes(rawBytes[0x3008:0x300c], 'little')
+print(f"\nValue at offset 0x3008 (raw): 0x{0x3008:x}")
+print(f"Value as 32-bit little-endian: 0x{val:x} ({val})")
+
+# Account for base address
+if val == 8:
+    print("\nGreat! The value at offset 0x3008 is 8.")
+    
+# Check what value would give us 4206597 when added to base
+print(f"\nAddress 4206597 = 0x{4206597:x}")
+print(f"Base + offset = 0x400000 + 0x{4206597 - 0x400000:x}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Convert to a set to see unique addresses
+addrList = sorted([int(k) for k in output.keys()])
+
+print("First 30 addresses from output:")
+for addr in addrList[:30]:
+    print(f"  {addr}")
+
+print("\n\nAnalyzing patterns:")
+print(f"Address 0: {0x400000}, First address: {addrList[0]}, Gap: {addrList[0] - 0x400000}")
+
+# Check some specific values
+print("\nChecking some interesting values:")
+for addr in addrList:
+    if addr >= 0x400000 and addr < 0x100000 and addr != 0x400000:
+        print(f"  0x{addr:x}: {output[str(addr)]}")
+        break
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# The example in the task shows addresses starting at 4194304
+# Let me see if 4194304 is in our output
+if '4194304' in output:
+    print(f"✓ 4194304 found: {output['4194304']}")
+else:
+    print("✗ 4194304 NOT found in output")
+
+# Let me also check what address is right after the gap
+addrList = sorted([int(k) for k in output.keys()])[:50]
+print("\nFirst 50 addresses:")
+for addr in addrList:
+    print(f"  {addr}")
+
+# Let me understand the pattern - notice that 4206597 = 0x403005
+# This looks like it could be reading 32-bit values and treating the high bytes as addresses
+print(f"\n4206597 in hex: 0x{4206597:x} = 0x{4206597-0x1000000:x} or similar...")
+EOF
+$ python3 << 'EOF'
+# Let me manually check what's happening
+rawBytes = open('a.out', 'rb').read()
+
+# Check offset 0x3000 onwards
+print("Checking offsets around 0x3000:")
+for offset in range(0x3000, 0x3030, 4):
+    try:
+        addr = int.from_bytes(rawBytes[offset:offset+4], 'little')
+        # Check if this looks like a potential memory address
+        if 0x400000 <= addr < 0x10000000:
+            print(f"  Offset 0x{offset:x} -> address: {addr}, value: 0x{addr:x}")
+    except:
+        pass
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# Let me look for 4194304 in the binary
+four194304 = b''
+for b in [0x41, 0x46, 0x48, 0x50, 0x4c, 0x4d]:  # ASCII for 'AHPLM'
+    four194304 += bytes([b])
+print(f"Looking for pattern...")
+
+# Common patterns might not be exact matches
+print(f"\nChecking for specific values in binary:")
+for offset in range(len(rawBytes) - 3):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val == 4194304:
+        print(f"  Found 4194304 at offset 0x{offset:x}")
+    if val == 1718378344:
+        print(f"  Found 1718378344 at offset 0x{offset:x}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+addrList = sorted([int(k) for k in output.keys()])
+
+# Check the 5th address
+if len(addrList) >= 5:
+    print(f"5th address: {addrList[4]}")
+    print(f"Value at that address: {output[str(addrList[4])]}")
+    
+    # What if we interpret some value at the raw binary as an address?
+    rawBytes = open('a.out', 'rb').read()
+    
+    # Let's try reading 4 bytes starting from offset 0x3000
+    print(f"\nValue at offset 0x300c (4 bytes from 0x3008):")
+    val = int.from_bytes(rawBytes[0x300c:0x3010], 'little')
+    print(f"  decimal: {val}, hex: 0x{val:x}")
+    
+# Check if some of the raw bytes interpreted as addresses match
+print(f"\nChecking raw offsets as addresses:")
+for offset in range(0x3000, 0x3040):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val >= 4200000 and val < 4300000:
+        print(f"  offset 0x{offset:x} -> {val}")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# Let's check offset 0x3000 and see what we get
+print("Checking offset 0x3000:")
+offset = 0x3000
+if offset + 4 <= len(rawBytes):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    print(f"  Value: {val} (0x{val:x})")
+
+# Calculate what 4206597 would be as offset
+print(f"\n4206597 = 0x{4206597:x}")
+print(f"Offset from 0x400000: 0x{4206597 - 0x400000:x}")
+
+# Check if this matches a pattern
+print(f"\nChecking if 4206597 as offset contains data:")
+offset_val = int.from_bytes(rawBytes[4206597:4206601], 'little')
+print(f"Value at offset 4206597: {offset_val}")
+
+# Let's look at the actual bytes
+print(f"\nBytes 0x{4206597:x} to 0x{4206597+4:x}:")
+for i in range(4):
+    b = rawBytes[4206597 + i]
+    print(f"  byte[{i}]: 0x{b:02x} = {b}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+addrList = sorted([int(k) for k in output.keys()])[:100]
+
+print("First 100 addresses and their values:")
+for i, addr in enumerate(addrList[:100]):
+    if i == 0:
+        print(f"  {addr}: {output[str(addr)]}")
+    if i < 10:
+        print(f"  {addr}: {output[str(addr)]}")
+
+print(f"\n\nLooking at the pattern...")
+print(f"Address 0x{addrList[0]:x} might relate to...")
+print(f"  0x{addrList[0] & 0xFFFF:x} and 0x{addrList[0] >> 16:x}")
+
+# Check if the address itself is stored somewhere
+rawBytes = open('a.out', 'rb').read()
+
+# The first address is 4206597 = 0x403005
+# Maybe we're reading a pattern repeating every 4 bytes?
+print(f"\nChecking for the pattern at various offsets:")
+pattern = rawBytes[0x3000:0x3008]
+print(f"Bytes at 0x3000: {pattern.hex()}")
+
+# Check if 4206597 appears as a value
+print("\nLooking for 4206597 anywhere in the binary:")
+for offset in range(len(rawBytes) - 3):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val == 4206597:
+        print(f"  Found at offset 0x{offset:x}")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# Check what we saw earlier - byte 0x3008 was 08
+print(f"Byte at offset 0x3008 should be 0x08 (which is decimal 8)")
+print(f"Value from binary: {int.from_bytes(rawBytes[0x3008:0x300c], 'little')}")
+
+# Let's look at the .interp section to understand better
+print(f"\nContents of .interp section (offset 0x318, size 0x1c):")
+interp_bytes = rawBytes[0x318:0x334]
+try:
+    interp_str = interp_bytes.decode('ascii')
+    print(f"  ASCII: {repr(interp_str)}")
+except:
+    print(f"  Bytes: {interp_bytes.hex()}")
+
+# The section table showed .interp at 0x318
+# Let's double-check the section parsing
+import struct
+# Basic ELF parsing
+e_phoff = int.from_bytes(rawBytes[0x1C:0x20], 'little')
+print(f"\nProgram header at offset: 0x{e_phoff:x}")
+
+print(f"\nChecking offset 0x3000 again:")
+dump = rawBytes[0x3000:0x31C]
+print(f"Bytes (hex): {dump.hex()}")
+for i, b in enumerate(dump):
+    if i == 8:
+        print(f"  byte[8]: 0x{b:02x}")
+EOF
+$ dd if=a.out bs=1 skip=$((0x3000)) count=1 2>/dev/null
+$ dd if=a.out bs=1 skip=$((0x3000)) count=32 2>/dev/null | od -A no -t d4 -v
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+addrList = sorted([int(k) for k in output.keys()])
+
+print(f"First address in output: {addrList[0]}")
+print(f"Value at that address: {output[str(addrList[0])]}")
+
+# What if I understand it wrong and the addresses ARE the offset + base?
+# Let me recalculate:
+# 0x3000 offset -> value 0x4008 -> maybe address is 0x4008?
+
+print(f"\nChecking: If address is just 0x4008...")
+if '0x4008' not in output:  # This won't work, output keys are strings
+    pass
+
+print(f"\nLet's convert our key to hex")
+print(f"First address as hex: 0x{addrList[0]:x}")
+
+# Wait - let me check the math:
+print(f"\nChecking if address = (value & 0xFFFF) * 0x100 + offset")
+print(f"Or maybe address = offset from somewhere else...")
+
+# Let me just check raw bytes and see what addresses we should be getting
+rawBytes = open('a.out', 'rb').read()
+
+print("\nRaw data at offset 0x3000:")
+for offset in range(0x3000, 0x3010):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val != 0:
+        print(f"  0x{offset:x} -> {val} (0x{val:x}, dec {val})")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# The first output is 4206597 = 0x403005
+# Let's check if this value appears somewhere as actual data
+# Or maybe the keys ARE the lower 16 bits?
+
+print("Checking if 4206597 appears as a value in the binary:")
+for offset in range(len(rawBytes) - 3):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val == 4206597:
+        print(f"  Found at offset 0x{offset:x}")
+
+# Let me check what value appears at offset 0x4000 (the .data section)
+print(f"\nValues at offset 0x4000:")
+for offset in range(0x4000, 0x4010):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val != 0:
+        print(f"  0x{offset:x} -> {val}")
+
+# Wait - maybe I should re-read the ELF header
+# Let me check where .data actually is
+print(f"\nLet me check where .data section is (from readelf output earlier):")
+print(f"  .data at address 0x4000, offset 0x3000")
+print(f"  Binary offset 0x3000 maps to virtual address 0x4000")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# The first address in my output is 4206597 = 0x403005
+# Let's check what values I need to get
+# If virtual address is V and binary offset is O, and symmetrical:
+# Value at virtual address 4206597 (0x403005) should be:
+# The value at binary offset 4206597 - 0x3000 = 0x2305
+# But that might be reading the wrong place...
+
+# Let me try: address = (offset from 0x3000) + something
+# offset = 0x2305
+# address = 0x403005
+
+# Actually, wait - maybe the addresses are LITTLE ENDIAN?
+# 4206597 = 0x403005 = 0x05 0x30 0x40 0x00
+# If little-endian reading at 0x... gives us 0x00004005?
+
+print("Checking if addresses are the VALUE extracted from binary:")
+print("Offset 0x3008 gives value 16392 = 0x4008")
+print("But my output starts with 4206597... this is confusing.")
+
+# Let me re-think - maybe the "memory addresses" are raw numbers 
+# 16 or 32 bits from the binary, and they ARE the keys in JSON
+
+print("\nLet me extract ALL 32-bit values and see what we get:")
+valuesFound = set()
+for offset in range(0x3000, 0x3500):
+    if offset + 4 < len(rawBytes):
+        val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+        if val != 0:
+            valuesFound.add(val)
+
+print(f"Unique 32-bit values found (bytes 0x3000-0x3500):")
+sorted_vals = sorted(list(valuesFound))
+for v in sorted_vals[:50]:
+    print(f"  {v} (0x{v:x})")
+
+# Check if 4194304 is in there
+if 4194304 in valuesFound:
+    print(f"\n✓ 4194304 found!")
+else:
+    print(f"\n✗ 4194304 NOT found")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+print("First 30 entries in output:")
+for i in range(30):
+    key = sorted([int(k) for k in output.keys()])[i]
+    print(f"  {key}: {output[str(key)]}")
+
+# Check if 4194304 is there
+print(f"\nIs 4194304 in output? {('4194304' in output)}")
+if '4194304' in output:
+    print(f"  Value: {output['4194304']}")
+EOF
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+// Read the binary file
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+
+// Map to store memory addresses and their values
+// We'll use the raw 32-bit values as the keys
+const memoryMap = {};
+
+// Extract interesting 32-bit integer values
+// Looking at all offsets that seem to contain data
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    // Skip the .rodata section (starts at ~0x2000)
+    if (offset >= 0x2000 && offset < 0x2100) continue;
+    
+    // Only process offsets in the data section and nearby areas
+    // (around 0x3000 and above based on what we saw earlier)
+    if (offset < 0x3000) continue;
+    
+    // Skip offset beyond the file size
+    if (offset + 3 >= buffer.length) break;
+    
+    // Check if we have significant bytes (not just zeros)
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    // Only store if there's at least one byte that's not zero
+    // This filters out empty padding
+    if ((b0 | b1 | b2 | b3) !== 0) {
+        // Get the 32-bit little-endian value
+        const value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        
+        // Use the value itself as the key (not a calculated address)
+        memoryMap[value.toString()] = value;
+    }
+}
+
+// Convert to JSON and output
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+$ node extract.js a.out | head -30
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Check if 4194304 is there
+if '4194304' in output:
+    print(f"✓ 4194304 found: {output['4194304']}")
+else:
+    print(f"✗ 4194304 NOT found")
+
+# Check if we have some of the values we found earlier
+valuesToCheck = [
+    16843334,  # from earlier inspection
+    1179403647,  # from earlier inspection
+    4194304,
+    1649748000,
+]
+
+print(f"\nChecking specific values:")
+for val in valuesToCheck:
+    if str(val) in output:
+        print(f"  ✓ {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ {val}: NOT found")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Check values we found earlier
+valuesToCheck = [
+    775106848,  # from earlier inspection at offset 0x3020
+    758132275,
+    1969386806,
+    846558318,
+    775172734,
+    539571248,
+    858665777,
+    4293984260,
+]
+
+print(f"Checking values from earlier inspection:")
+for val in valuesToCheck:
+    if str(val) in output:
+        print(f"  ✓ {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ {val}: NOT found")
+
+# Let me also see some values around those they should be
+print(f"\nSample of first few values:")
+sample = sorted([int(k) for k in output.keys()])[:20]
+for val in sample:
+    print(f"  {val}: {output[str(val)]}")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# Check what value 4293984260 might have as unsigned
+value = 4293984260
+print(f"4293984260 in hex: 0x{value:x}")
+print(f"As signed 32-bit: {-value & 0xFFFFFFFF}")
+
+# Check if the original value appears anywhere
+print("\nLooking for this pattern in binary:")
+for offset in range(0x3000, 0x3100):
+    val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+    if val == value:
+        print(f"Found at offset 0x{offset:x} as unsigned little-endian")
+        # What if it's being interpreted as signed?
+        signed = val if val < 0x80000000 else val - 0x100000000
+        print(f"As signed: {signed}")
+        break
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Check for both versions
+value = 4293984260
+signed_value = -983036
+
+if str(value) in output:
+    print(f"✓ Found unsigned version: {output[str(value)]}")
+else:
+    print(f"✗ Unsigned version {value} NOT found")
+    
+if str(signed_value) in output:
+    print(f"✓ Found signed version: {output[str(signed_value)]}")
+else:
+    print(f"✗ Signed version {signed_value} NOT found")
+
+# Let me check what the actual byte sequence is
+rawBytes = open('a.out', 'rb').read()
+val = int.from_bytes(rawBytes[0x305c:0x3060], 'little')
+print(f"\nRaw value at offset 0x305c: {val} (0x{val:x})")
+EOF
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+// Read the binary file
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+
+// Map to store memory addresses and their values
+const memoryMap = {};
+
+// Extract interesting 32-bit integer values
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    // Skip the .rodata section (starts at ~0x2000)
+    if (offset >= 0x2000 && offset < 0x2100) continue;
+    
+    // Only process offsets in the data section and nearby areas
+    if (offset < 0x3000) continue;
+    
+    if (offset + 3 >= buffer.length) break;
+    
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    if ((b0 | b1 | b2 | b3) !== 0) {
+        // Build the 32-bit value using bitwise OR to handle overflow correctly
+        const value = (b0) | 
+                      (b1 << 8) | 
+                      (b2 << 16) | 
+                      (b3 << 24);
+        
+        memoryMap[value.toString()] = value;
+    }
+}
+
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+value = 4293984260
+signed_value = -983036
+
+if str(value) in output:
+    print(f"✓ Unsigned version found: {output[str(value)]}")
+    print(f"  Expected: {value}")
+else:
+    print(f"✗ Unsigned version NOT found")
+    
+if str(signed_value) in output:
+    print(f"✓ Signed version found: {output[str(signed_value)]}")
+else:
+    print(f"✓ Signed version NOT found (expected)")
+
+# Also check 4194304
+if '4194304' in output:
+    print(f"\n✓ 4194304 found: {output['4194304']}")
+EOF
+$ node -e "
+const b0 = 0x00;
+const b1 = 0x04;
+const b2 = 0xf1;
+const b3 = 0xff;
+
+let value = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+console.log('b0, b1, b2, b3:', b0, b1, b2, b3);
+console.log('value:', value);
+console.log('value ^ 0xFFFFFFFF:', value ^ 0xFFFFFFFF + 1);
+"
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+const memoryMap = {};
+
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    if (offset >= 0x2000 && offset < 0x2100) continue;
+    if (offset < 0x3000) continue;
+    if (offset + 3 >= buffer.length) break;
+    
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    if ((b0 | b1 | b2 | b3) !== 0) {
+        // Use DataView to properly handle 32-bit little-endian values
+        // This avoids JavaScript's signed 32-bit overflow issues
+        const view = new DataView(new ArrayBuffer(4));
+        view.setUint8(0, b0);
+        view.setUint8(1, b1);
+        view.setUint8(2, b2);
+        view.setUint8(3, b3);
+        const value = view.getUint32(0, true); // true = little-endian
+        
+        memoryMap[value.toString()] = value;
+    }
+}
+
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Test values
+test_values = [
+    4293984260,   # unsigned
+    -983036,      # signed
+    4194304,      # from example
+]
+
+print("Testing values:")
+for val in test_values:
+    if str(val) in output:
+        print(f"  ✓ {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ {val}: NOT found")
+
+# Check some expected values
+expected_values = [775106848, 758132275, 1649748000]
+print("\nSample values:")
+for val in expected_values[:5]:
+    if str(val) in output:
+        print(f"  ✓ {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ {val}: NOT found")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Test values (both should check for the same unsigned value)
+test_values = [
+    4293984260,   # unsigned representation
+    -983036,      # signed representation (same value)
+    4194304,
+]
+
+print("Testing values:")
+for val in test_values:
+    if str(val) in output:
+        print(f"  ✓ Found {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ NOT found: {val}")
+
+# Check some expected values
+expected_values = [775106848, 758132275, 1649748000, 1969386806, 846558318, 4196352, 16392]
+print("\nExpected values from earlier inspection:")
+for val in expected_values:
+    if str(val) in output:
+        print(f"  ✓ {val}: {output[str(val)]}")
+    else:
+        print(f"  ✗ {val}: NOT found")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+addr_list = sorted([int(k) for k in output.keys()])
+
+print(f"Total unique values extracted: {len(addr_list)}")
+print(f"First 10 values:")
+for val in addr_list[:10]:
+    print(f"  {val}")
+    
+print(f"\nLast 10 values:")
+for val in addr_list[-10:]:
+    print(f"  {val}")
+
+# Let me count values > 10000 to see what else should be there
+print(f"\nValues greater than 10000: {len([v for v in addr_list if v > 10000])}")
+EOF
+$ python3 << 'EOF'
+import subprocess
+result = subprocess.run(['node', 'extract.js', 'a.out'], capture_output=True, text=True)
+import json
+output = json.loads(result.stdout)
+
+# Values I found earlier at different offsets
+test_values = [
+    # From manual hex inspect
+    16843334,
+    38161477,
+    16926284,
+    16793088,
+    1610612736,
+    50331648,
+    1075266112,
+    
+    # From earlier python inspection
+    1179403647,
+    38161477,
+    1649748000,
+    1970564725,
+    775106848,
+    758132275,
+    1969386806,
+    846558318,
+    775172734,
+    539571248,
+    858665777,
+]
+
+print("Checking values from earlier manual inspection:")
+for val in test_values:
+    if str(val) in output:
+        print(f"  ✓ {val}")
+    else:
+        print(f"  ✗ {val} NOT found")
+EOF
+$ python3 << 'EOF'
+rawBytes = open('a.out', 'rb').read()
+
+# Check for values that weren't found
+missing_values = [16843334, 38161477, 16926284, 16793088, 1075266112, 1179403647]
+
+print("Looking for missing values in binary:")
+for target_val in missing_values:
+    found = False
+    for offset in range(len(rawBytes) - 3):
+        val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+        if val == target_val:
+            print(f"  Found {target_val} at offset 0x{offset:x}")
+            found = True
+            break
+    if not found:
+        print(f"  NOT FOUND: {target_val} in binary")
+    
+print("\n\nChecking offset ranges that might contain other values:")
+for offset in [0x3020, 0x3024, 0x3028, 0x302c]:
+    if offset+4 <= len(rawBytes):
+        val = int.from_bytes(rawBytes[offset:offset+4], 'little')
+        print(f"  Offset 0x{offset:x}: {val}")
+EOF
+$ cat > extract.js << 'EOF'
+const fs = require('fs');
+const binaryPath = process.argv[2];
+
+const data = fs.readFileSync(binaryPath);
+const buffer = Buffer.from(data);
+const memoryMap = {};
+
+// Extract all 32-bit integer values
+// We'll capture values that seem like data, and skip pure text/strings in headers
+for (let offset = 0; offset < buffer.length - 3; offset++) {
+    const b0 = buffer[offset];
+    const b1 = buffer[offset + 1];
+    const b2 = buffer[offset + 2];
+    const b3 = buffer[offset + 3];
+    
+    // Skip offsets that are clearly in the ELF header (text strings)
+    // These are ASCII text values that aren't numeric data
+    if (offset < 0x40) {
+        // If the bytes look like ASCII text (32-126), skip them
+        if (b0 >= 32 && b0 <= 126 && 
+            b1 >= 32 && b1 <= 126 && 
+            b2 >= 32 && b2 <= 126 && 
+            b3 >= 32 && b3 <= 126) {
+            continue;
+        }
+    }
+    
+    // Skip excessive zeros (padding/computed sections)
+    if (b0 === 0 && b1 === 0 && b2 === 0 && b3 === 0) {
+        continue;
+    }
+    
+    // Use DataView to properly handle 32-bit little-endian values
+    const view = new DataView(new ArrayBuffer(4));
+    view.setUint8(0, b0);
+    view.setUint8(1, b1);
+    view.setUint8(2, b2);
+    view.setUint8(3, b3);
+    const value = view.getUint32(0, true); // true = little-endian
+    
+    memoryMap[value.toString()] = value;
+}
+
+console.log(JSON.stringify(memoryMap, null, 2));
+EOF
+stopped: step limit reached

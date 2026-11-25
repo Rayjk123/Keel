@@ -1,0 +1,162 @@
+$ cd /app && ls -la && head -30 * | head -80
+$ cd /app && wc -l graphene.dat; awk 'NR%100==0' graphene.dat | head -40; tail -3 graphene.dat
+$ cd /app && python3 -c "
+import numpy as np
+d=np.loadtxt('graphene.dat',converters={0:lambda s:float(s.replace(b',',b'.')),1:lambda s:float(s.replace(b',',b'.'))})
+x,y=d.T
+print(x[:3],x[-3:],len(x))
+import sys
+for i in range(0,len(x),40): print(i,x[i],y[i])
+"
+$ cd /app && pip install numpy scipy 2>&1 | tail -1
+$ cd /app && awk 'NR%40==0' graphene.dat | tr ',' '.' | awk '{printf "%d %.0f %.0f\n",NR*40,$1,$2}' | head -100
+$ cd /app && tr ',' '.' < graphene.dat > /tmp/g.txt; python3 -c "
+import numpy as np
+x,y=np.loadtxt('/tmp/g.txt').T
+print(np.diff(x)[[0,1000,2000,3000,3500]])
+print(np.argmax(y),x[np.argmax(y)])
+" ; awk 'NR>3500' /tmp/g.txt | head -80
+$ cd /app && python3 -c "
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+x,y=np.loadtxt('/tmp/g.txt').T
+fig,a=plt.subplots(2,1,figsize=(12,8))
+a[0].plot(x,y,'.',ms=2);a[1].plot(1e7/x,y,'.',ms=2)
+plt.savefig('/tmp/p.png')
+" 2>&1 | tail -2; pip list 2>/dev/null | grep -i -E "matplotlib|scipy|numpy"
+$ cd /app && python3 -c "
+import numpy as np
+x,y=np.loadtxt('/tmp/g.txt').T
+for f in (1/x,):
+  d=np.diff(f); print(d[[0,500,1000,2000,3000,3560]])
+print(1e7/x[[0,-1]])
+"
+$ cd /app && python3 -c "
+import numpy as np
+x,y=np.loadtxt('/tmp/g.txt').T
+d=-np.diff(x)
+for i in range(0,3560,200): print(i,x[i],d[i],d[i]/x[i]**2*1e6, d[i]/x[i]**1.5)
+"
+$ cd /app && python3 -c "
+import numpy as np
+from scipy.signal import find_peaks
+x,y=np.loadtxt('/tmp/g.txt').T
+s=np.convolve(y,np.ones(15)/15,'same')
+for i in range(0,3565,60): print(i,round(x[i],1),round(s[i]))
+"
+$ cd /app && python3 -c "
+import numpy as np
+x,y=np.loadtxt('/tmp/g.txt').T
+for i in range(0,330,3): print(i,round(x[i],1),round(y[i]))
+"
+$ cd /app && python3 -c "
+import numpy as np
+x,y=np.loadtxt('/tmp/g.txt').T
+for i in range(105,125): print(i,round(x[i],1),round(y[i]))
+print()
+for i in range(272,312): print(i,round(x[i],1),round(y[i]))
+print(np.argsort(y)[-8:], x[np.argsort(y)[-8:]])
+"
+$ cd /app && cat > /tmp/fit.py <<'E'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt('/tmp/g.txt').T
+def L(x,x0,g,A,o): return o+A*g**2/((x-x0)**2+g**2)   # A = peak height above offset
+def fit(lo,hi,p0):
+    m=(x>lo)&(x<hi)
+    p,_=curve_fit(L,x[m],y[m],p0=p0,maxfev=20000)
+    r=y[m]-L(x[m],*p); print(p, r.std())
+    return p
+G=fit(17000,22000,[19250,300,60000,15000])
+D=fit(9500,11800,[10450,200,6000,12000])
+E
+python3 /tmp/fit.py
+$ cd /app && cat >> /tmp/fit.py <<'E'
+print('--- excluding plateau')
+def fit2(lo,hi,p0,cap):
+    m=(x>lo)&(x<hi)&(y<cap)
+    p,_=curve_fit(L,x[m],y[m],p0=p0,maxfev=20000)
+    print(p,(y[m]-L(x[m],*p)).std()); return p
+G=fit2(16500,22000,[19250,300,60000,15000],77000)
+D=fit2(9500,11800,[10450,200,6000,12000],18000)
+res={k:dict(x0=float(p[0]),gamma=float(abs(p[1])),amplitude=float(p[2]),offset=float(p[3])) for k,p in (('G',G),('2D',D))}
+json.dump(res,open('/app/results.json','w'),indent=2)
+E
+python3 /tmp/fit.py; cat results.json
+$ cd /app && cat > /tmp/fit2.py <<'E'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt('/tmp/g.txt').T
+def L(x,x0,g,A,o): return o+A*g**2/((x-x0)**2+g**2)
+def fit(lo,hi,p0,cap):
+    m=(x>lo)&(x<hi)&(y<cap)
+    p,_=curve_fit(L,x[m],y[m],p0=p0,maxfev=50000)
+    print(p,(y[m]-L(x[m],*p)).std(), m.sum()); return p
+for lo,hi in [(17500,20800),(17000,21000),(18000,20500)]:
+    print('G',lo,hi); fit(lo,hi,[19250,300,60000,15000],77500)
+for lo,hi in [(10000,11000),(9800,11200),(9500,11800)]:
+    print('2D',lo,hi); fit(lo,hi,[10450,200,6000,12000],18400)
+E
+python3 /tmp/fit2.py
+$ cd /app && cat > /tmp/fit3.py <<'E'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt('/tmp/g.txt').T
+def mk(sat):
+    return lambda x,x0,g,A,o: np.minimum(o+A*g**2/((x-x0)**2+g**2),sat)
+def L(x,x0,g,A,o): return o+A*g**2/((x-x0)**2+g**2)
+def fit(lo,hi,p0,sat):
+    m=(x>lo)&(x<hi)
+    p,_=curve_fit(mk(sat),x[m],y[m],p0=p0,maxfev=50000)
+    print(p,(y[m]-mk(sat)(x[m],*p)).std()); return p
+for lo,hi in [(17500,21000),(16500,22000),(18000,20500)]:
+    fit(lo,hi,[19250,300,150000,12000],79000)
+for lo,hi in [(10000,11000),(9800,11200),(9500,11800)]:
+    fit(lo,hi,[10450,200,20000,10000],18700)
+E
+python3 /tmp/fit3.py
+$ cd /app && cat > /tmp/final.py <<'E'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt('/tmp/g.txt').T
+def L(x,x0,g,A,o): return o+A*g**2/((x-x0)**2+g**2)
+def fit(lo,hi,p0):
+    m=(x>lo)&(x<hi)
+    p,_=curve_fit(L,x[m],y[m],p0=p0,maxfev=20000); return p
+res={}
+for k,(lo,hi,p0) in {'G':(17000,22000,[19250,300,60000,15000]),'2D':(9500,11800,[10450,200,6000,12000])}.items():
+    p=fit(lo,hi,p0)
+    res[k]=dict(x0=float(p[0]),gamma=float(abs(p[1])),amplitude=float(p[2]),offset=float(p[3]))
+json.dump(res,open('/app/results.json','w'),indent=2)
+E
+python3 /tmp/final.py; cat results.json
+$ cd /app && cat > /tmp/final.py <<'E'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt('/tmp/g.txt').T
+# both peaks are clipped (detector saturation plateau), so model the clipping
+def mk(sat):
+    return lambda x,x0,g,A,o: np.minimum(o+A*g**2/((x-x0)**2+g**2),sat)
+res={}
+cfg={'G':(17500,21000,[19250,300,150000,12000],79000),'2D':(10000,11000,[10450,200,20000,10000],18700)}
+for k,(lo,hi,p0,sat) in cfg.items():
+    m=(x>lo)&(x<hi)
+    p,_=curve_fit(mk(sat),x[m],y[m],p0=p0,maxfev=50000)
+    res[k]=dict(x0=float(p[0]),gamma=float(abs(p[1])),amplitude=float(p[2]),offset=float(p[3]))
+json.dump(res,open('/app/results.json','w'),indent=2)
+E
+python3 /tmp/final.py; cat results.json
+`/app/results.json` is written with the G and 2D fits. The G values are rough and uncertain.
+
+| Peak | x0 | gamma | amplitude | offset |
+|---|---|---|---|---|
+| G | 19198.8 | 194.8 | 188,832 | 13,913 |
+| 2D | 10419.5 | 151.9 | 30,973 | 9,223 |
+
+- **Model:** Each peak is a Lorentzian, `offset + A·γ²/((x−x0)²+γ²)`. `amplitude` is the height above the offset, and `gamma` is the half-width at half-maximum. I fitted on the x values exactly as they appear in the file, after converting the decimal commas to points.
+- **Clipped tops:** Both peaks have flat tops, at about 79,000 counts for G and 18,700 for 2D. I treated this as detector saturation and capped the fitted curve at those levels. That is why the amplitudes are larger than the highest measured values. If the flat tops are real signal, the amplitudes and widths will be off.
+- **G peak uncertainty:** Its gamma ranged from about 190 to 410 depending on the fit window and model. The residuals stay large, at about 4,000 to 5,000 counts. The values in the file come from a 17,500–21,000 window.
+- **2D fit:** The capped model cut the residual scatter from about 1,100 to about 250 counts compared with a plain Lorentzian.
+- **Unusual x-axis:** The x values run from about 47,000 down to 1,650 and are unevenly spaced. The peaks land at 19,200 and 10,420, which are not the usual Raman shifts for graphene. I did not convert the axis.

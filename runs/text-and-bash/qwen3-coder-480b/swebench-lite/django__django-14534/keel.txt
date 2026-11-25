@@ -1,0 +1,157 @@
+$ find . -name "*.py" | grep -E "(widget|bound)" | head -20
+$ cat ./django/forms/boundfield.py
+$ cat ./django/forms/widgets.py | grep -A 10 -B 5 "class.*Widget"
+$ cat ./django/forms/widgets.py | grep -A 30 "def subwidgets"
+$ cat ./django/forms/widgets.py | grep -A 50 "def optgroups"
+$ cat ./django/forms/widgets.py | grep -A 15 "def id_for_label" | head -20
+$ cat ./django/forms/widgets.py | sed -n '/class ChoiceWidget/,/class .*Widget/p' | grep -A 10 "def id_for_label"
+$ sed -i "s|@property\n    def id_for_label(self):\n        return 'id_%s_%s' % (self.data\['name'\], self.data\['index'\])|@property\n    def id_for_label(self):\n        return self.data['attrs'].get('id', 'id_%s_%s' % (self.data['name'], self.data['index']))|" ./django/forms/boundfield.py
+$ cat ./django/forms/boundfield.py | grep -A 5 "def id_for_label"
+$ grep -n "def id_for_label" ./django/forms/boundfield.py
+$ sed -n '275,285p' ./django/forms/boundfield.py
+$ sed -i '280s|return '\''id_%s_%s'\'' % (self.data\['\''name'\''], self.data\['\''index'\''])|return self.data['\''attrs'\''].get('\''id'\'', '\''id_%s_%s'\'' % (self.data['\''name'\''], self.data['\''index'\'']))|' ./django/forms/boundfield.py
+$ sed -n '275,285p' ./django/forms/boundfield.py
+$ python -m pytest tests/forms_tests/widget_tests/test_checkboxselectmultiple.py -v
+$ cd .. && python -m django.tests.forms_tests.widget_tests.test_checkboxselectmultiple
+$ cd django && PYTHONPATH=. python -m unittest tests.forms_tests.widget_tests.test_checkboxselectmultiple
+$ ls -la
+$ find . -name "runtests.py" -o -name "manage.py" | head -5
+$ python ./tests/runtests.py forms_tests.widget_tests.test_checkboxselectmultiple --verbosity=2
+$ python ./tests/runtests.py forms_tests.widget_tests --verbosity=2
+$ cat ../tests/forms_tests/widget_tests/test_checkboxselectmultiple.py | grep -A 20 -B 5 "separate_ids"
+$ cat ./tests/forms_tests/widget_tests/test_checkboxselectmultiple.py | grep -A 20 -B 5 "separate_ids"
+$ cat > test_fix.py << 'EOF'
+#!/usr/bin/env python
+import os
+import sys
+import django
+from django.conf import settings
+
+# Configure Django settings
+if not settings.configured:
+    settings.configure(
+        DEBUG=True,
+        DATABASES={
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': ':memory:',
+            }
+        },
+        INSTALLED_APPS=[
+            'django.contrib.contenttypes',
+            'django.contrib.auth',
+        ],
+        USE_TZ=True,
+    )
+
+django.setup()
+
+from django import forms
+from django.forms.widgets import CheckboxSelectMultiple
+
+# Test the fix
+class TestForm(forms.Form):
+    choices = forms.MultipleChoiceField(
+        choices=[('1', 'Option 1'), ('2', 'Option 2'), ('3', 'Option 3')],
+        widget=CheckboxSelectMultiple(attrs={'id': 'my_custom_id'}),
+    )
+
+form = TestForm()
+bound_field = form['choices']
+
+# Check that subwidgets have correct IDs
+subwidgets = list(bound_field.subwidgets)
+print("Number of subwidgets:", len(subwidgets))
+
+for i, widget in enumerate(subwidgets):
+    print(f"Subwidget {i}: id_for_label = {widget.id_for_label}")
+    # With the fix, this should respect the custom ID from attrs
+    expected_id = f"my_custom_id_{i}"
+    actual_id = widget.id_for_label
+    print(f"  Expected: {expected_id}, Actual: {actual_id}, Match: {expected_id == actual_id}")
+
+print("\nTest completed successfully!")
+EOF
+$ python test_fix.py
+$ cat > test_fallback.py << 'EOF'
+#!/usr/bin/env python
+import os
+import sys
+import django
+from django.conf import settings
+
+# Configure Django settings
+if not settings.configured:
+    settings.configure(
+        DEBUG=True,
+        DATABASES={
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': ':memory:',
+            }
+        },
+        INSTALLED_APPS=[
+            'django.contrib.contenttypes',
+            'django.contrib.auth',
+        ],
+        USE_TZ=True,
+    )
+
+django.setup()
+
+from django import forms
+from django.forms.widgets import CheckboxSelectMultiple
+
+# Test the fallback behavior (when no custom ID is provided)
+class TestForm(forms.Form):
+    choices = forms.MultipleChoiceField(
+        choices=[('1', 'Option 1'), ('2', 'Option 2')],
+        widget=CheckboxSelectMultiple(),  # No custom ID
+    )
+
+form = TestForm()
+bound_field = form['choices']
+
+# Check that subwidgets fall back to the original behavior
+subwidgets = list(bound_field.subwidgets)
+print("Number of subwidgets:", len(subwidgets))
+
+for i, widget in enumerate(subwidgets):
+    print(f"Subwidget {i}: id_for_label = {widget.id_for_label}")
+    # Without custom ID, it should fall back to the original format: id_<fieldname>_<index>
+    expected_id = f"id_choices_{i}"
+    actual_id = widget.id_for_label
+    print(f"  Expected: {expected_id}, Actual: {actual_id}, Match: {expected_id == actual_id}")
+
+print("\nFallback test completed successfully!")
+EOF
+$ python test_fallback.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Perfect! Both the custom ID behavior and the fallback behavior are working correctly.
+
+## Summary
+
+I have successfully fixed the issue in the Django repository where `BoundWidget.id_for_label` was ignoring the ID set by `ChoiceWidget.options`. 
+
+### What was the problem?
+The `BoundWidget.id_for_label` property was hardcoded to always return `'id_%s_%s' % (self.data['name'], self.data['index'])`, completely ignoring any custom ID that might be set in `self.data['attrs']['id']` by the widget.
+
+### What was the fix?
+I modified the `id_for_label` property in the `BoundWidget` class (located in `./django/forms/boundfield.py`) to respect the custom ID if present, while maintaining backward compatibility:
+
+```python
+@property
+def id_for_label(self):
+    return self.data['attrs'].get('id', 'id_%s_%s' % (self.data['name'], self.data['index']))
+```
+
+### How does this work?
+1. If a custom ID is provided through widget attributes, it uses that ID (respecting what the user explicitly set)
+2. If no custom ID is provided, it falls back to the original behavior (`id_<fieldname>_<index>`)
+
+### Testing
+1. All existing Django widget tests continue to pass
+2. Custom ID behavior works correctly - subwidgets now use the explicitly set ID with appropriate indexing
+3. Fallback behavior works correctly - when no custom ID is provided, it maintains the original naming scheme
+
+This fix ensures that when users override the `auto_id` parameter when initializing a form or set custom IDs on widgets, those IDs are properly respected when rendering labels for subwidgets in widgets like `CheckboxSelectMultiple`.

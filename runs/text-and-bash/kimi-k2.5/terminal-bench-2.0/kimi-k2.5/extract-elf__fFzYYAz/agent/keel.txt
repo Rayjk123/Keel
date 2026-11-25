@@ -1,0 +1,752 @@
+$ file /app/a.out && ls -la /app/a.out && xxd /app/a.out | head -50
+$ ls -la /app/a.out && head -c 100 /app/a.out | xxd
+$ od -A x -t x1z -v /app/a.out | head -100
+$ size /app/a.out
+$ od -A x -t x1 -v /app/a.out > /tmp/hexdump.txt && wc -l /tmp/hexdump.txt
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// ELF64 header offsets
+const ELF_MAGIC = 0x7f454c46; // \x7fELF
+const EI_CLASS = 4;
+const ELFCLASS64 = 2;
+const E_MACHINE = 18;
+const EM_X86_64 = 62;
+const E_SHOFF = 40;
+const E_SHEENTSIZE = 58;
+const E_SHNUM = 60;
+const E_SHSTRNDX = 62;
+
+// Section header offsets (for 64-bit)
+const SH_NAME = 0;
+const SH_TYPE = 4;
+const SH_FLAGS = 8;
+const SH_ADDR = 16;
+const SH_OFFSET = 24;
+const SH_SIZE = 32;
+const SH_ENTSIZE = 56;
+
+// Section types
+const SHT_PROGBITS = 1; // Program data
+const SHT_SYMTAB = 2;   // Symbol table
+const SHT_STRTAB = 3;   // String table
+const SHT_NOBITS = 8;   // BSS
+
+// Check ELF magic
+const magic = data.readUInt32LE(0);
+if (magic !== ELF_MAGIC) {
+    console.error('Not a valid ELF file');
+    process.exit(1);
+}
+
+// Check 64-bit
+if (data[EI_CLASS] !== ELFCLASS64) {
+    console.error('Not a 64-bit ELF file');
+    process.exit(1);
+}
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(E_SHOFF);
+const shentsize = data.readUInt16LE(E_SHEENTSIZE);
+const shnum = data.readUInt16LE(E_SHNUM);
+const shstrndx = data.readUInt16LE(E_SHSTRNDX);
+
+const result = {};
+
+// Parse section headers
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const nameIdx = data.readUInt32LE(offset + SH_NAME);
+    const type = data.readUInt32LE(offset + SH_TYPE);
+    const addr = Number(data.readBigUInt64LE(offset + SH_ADDR));
+    const fileOffset = Number(data.readBigUInt64LE(offset + SH_OFFSET));
+    const size = Number(data.readBigUInt64LE(offset + SH_SIZE));
+    
+    // Extract data from PROGBITS sections (initialized data like .data, .rodata)
+    // and also NOBITS for BSS (though it's zero-initialized)
+    if (type === SHT_PROGBITS || type === SHT_NOBITS) {
+        if (size > 0 && addr > 0) {
+            // Read 4-byte words from this section
+            for (let j = 0; j < size; j += 4) {
+                const fOffset = fileOffset + j;
+                const memAddr = addr + j;
+                
+                if (fOffset + 4 <= data.length) {
+                    const value = data.readUInt32LE(fOffset);
+                    result[memAddr.toString()] = value;
+                } else if (type === SHT_NOBITS) {
+                    // BSS section - values are zero
+                    result[memAddr.toString()] = 0;
+                }
+            }
+        }
+    }
+}
+
+console.log(JSON.stringify(result));
+EOF
+$ cd /app && node extract.js /app/a.out | head -c 2000
+$ od -A n -t x4 /app/a.out | head -5
+$ head -c 20 /app/a.out | od -t x1
+$ cat > /app/extract_debug.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+console.log('File size:', data.length);
+console.log('First 20 bytes:', data.slice(0, 20).toString('hex'));
+console.log('Magic as uint32le:', data.readUInt32LE(0).toString(16));
+console.log('Class byte:', data[4]);
+EOF
+node /app/extract_debug.js /app/a.out
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// ELF64 header offsets
+// Magic is 0x7f454c46 (7f 'E' 'L' 'F') which reads as 0x464c457f when readUInt32LE
+const ELF_MAGIC_LE = 0x464c457f; // \x7fELF read as little-endian uint32
+const ELF_MAGIC_BE = 0x7f454c46; // \x7fELF read as big-endian uint32
+const EI_CLASS = 4;
+const ELFCLASS64 = 2;
+const E_MACHINE = 18;
+const EM_X86_64 = 62;
+const E_SHOFF = 40;
+const E_SHEENTSIZE = 58;
+const E_SHNUM = 60;
+const E_SHSTRNDX = 62;
+
+// Section header offsets (for 64-bit)
+const SH_NAME = 0;
+const SH_TYPE = 4;
+const SH_FLAGS = 8;
+const SH_ADDR = 16;
+const SH_OFFSET = 24;
+const SH_SIZE = 32;
+
+// Section types
+const SHT_PROGBITS = 1; // Program data
+const SHT_SYMTAB = 2;   // Symbol table
+const SHT_STRTAB = 3;   // String table
+const SHT_NOBITS = 8;   // BSS
+
+// Check ELF magic
+const magic = data.readUInt32LE(0);
+if (magic !== ELF_MAGIC_LE) {
+    console.error('Not a valid ELF file, magic:', magic.toString(16));
+    process.exit(1);
+}
+
+// Check 64-bit
+if (data[EI_CLASS] !== ELFCLASS64) {
+    console.error('Not a 64-bit ELF file');
+    process.exit(1);
+}
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(E_SHOFF);
+const shentsize = data.readUInt16LE(E_SHEENTSIZE);
+const shnum = data.readUInt16LE(E_SHNUM);
+const shstrndx = data.readUInt16LE(E_SHSTRNDX);
+
+const result = {};
+
+// Parse section headers
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const nameIdx = data.readUInt32LE(offset + SH_NAME);
+    const type = data.readUInt32LE(offset + SH_TYPE);
+    const addr = Number(data.readBigUInt64LE(offset + SH_ADDR));
+    const fileOffset = Number(data.readBigUInt64LE(offset + SH_OFFSET));
+    const size = Number(data.readBigUInt64LE(offset + SH_SIZE));
+    
+    // Extract data from PROGBITS sections (initialized data like .data, .rodata)
+    // and also NOBITS for BSS (though it's zero-initialized)
+    if (type === SHT_PROGBITS || type === SHT_NOBITS) {
+        if (size > 0 && addr > 0) {
+            // Read 4-byte words from this section
+            for (let j = 0; j < size; j += 4) {
+                const fOffset = fileOffset + j;
+                const memAddr = addr + j;
+                
+                if (type === SHT_NOBITS) {
+                    // BSS section - values are zero
+                    result[memAddr.toString()] = 0;
+                } else if (fOffset + 4 <= data.length) {
+                    const value = data.readUInt32LE(fOffset);
+                    result[memAddr.toString()] = value;
+                }
+            }
+        }
+    }
+}
+
+console.log(JSON.stringify(result));
+EOF
+node /app/extract.js /app/a.out | head -c 5000
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// ELF64 header offsets
+const ELF_MAGIC_LE = 0x464c457f; // \x7fELF read as little-endian uint32
+const EI_CLASS = 4;
+const ELFCLASS64 = 2;
+const E_MACHINE = 18;
+const EM_X86_64 = 62;
+const E_SHOFF = 40;
+const E_SHEENTSIZE = 58;
+const E_SHNUM = 60;
+const E_SHSTRNDX = 62;
+
+// Section header offsets (for 64-bit)
+const SH_NAME = 0;
+const SH_TYPE = 4;
+const SH_FLAGS = 8;
+const SH_ADDR = 16;
+const SH_OFFSET = 24;
+const SH_SIZE = 32;
+
+// Section types
+const SHT_PROGBITS = 1; // Program data
+const SHT_SYMTAB = 2;   // Symbol table
+const SHT_STRTAB = 3;   // String table
+const SHT_NOBITS = 8;   // BSS
+const SHT_INIT_ARRAY = 14;
+const SHT_FINI_ARRAY = 15;
+
+// Check ELF magic
+const magic = data.readUInt32LE(0);
+if (magic !== ELF_MAGIC_LE) {
+    console.error('Not a valid ELF file, magic:', magic.toString(16));
+    process.exit(1);
+}
+
+// Check 64-bit
+if (data[EI_CLASS] !== ELFCLASS64) {
+    console.error('Not a 64-bit ELF file');
+    process.exit(1);
+}
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(E_SHOFF);
+const shentsize = data.readUInt16LE(E_SHEENTSIZE);
+const shnum = data.readUInt16LE(E_SHNUM);
+const shstrndx = data.readUInt16LE(E_SHSTRNDX);
+
+const result = {};
+const debug = [];
+
+// Parse section headers
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const nameIdx = data.readUInt32LE(offset + SH_NAME);
+    const type = data.readUInt32LE(offset + SH_TYPE);
+    const addr = Number(data.readBigUInt64LE(offset + SH_ADDR));
+    const fileOffset = Number(data.readBigUInt64LE(offset + SH_OFFSET));
+    const size = Number(data.readBigUInt64LE(offset + SH_SIZE));
+    
+    // Include more section types that contain initialized data
+    const includeTypes = [
+        SHT_PROGBITS,    // Regular program data
+        SHT_INIT_ARRAY,  // Constructor array
+        SHT_FINI_ARRAY,  // Destructor array
+    ];
+    
+    if (includeTypes.includes(type) && size > 0 && addr > 0) {
+        debug.push({type, addr, fileOffset, size, nameIdx});
+        // Read 4-byte words from this section
+        for (let j = 0; j < size; j += 4) {
+            const fOffset = fileOffset + j;
+            const memAddr = addr + j;
+            
+            if (fOffset + 4 <= data.length) {
+                const value = data.readUInt32LE(fOffset);
+                result[memAddr.toString()] = value;
+            }
+        }
+    }
+    
+    // Handle BSS separately (NOBITS - no data in file but address space exists)
+    if (type === SHT_NOBITS && size > 0 && addr > 0) {
+        debug.push({type: 'NOBITS(BSS)', addr, fileOffset: 0, size, nameIdx});
+        for (let j = 0; j < size; j += 4) {
+            const memAddr = addr + j;
+            result[memAddr.toString()] = 0;
+        }
+    }
+}
+
+console.log(JSON.stringify(result));
+EOF
+node /app/extract.js /app/a.out | python3 -m json.tool | head -50
+$ node /app/extract.js /app/a.out | python3 -c "import json,sys; d=json.load(sys.stdin); print('Number of entries:', len(d))"
+$ cat > /app/debug.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(40);
+const shentsize = data.readUInt16LE(58);
+const shnum = data.readUInt16LE(60);
+const shstrndx = data.readUInt16LE(62);
+
+// Get section string table
+const strtabOff = Number(shoff) + shstrndx * shentsize;
+const strtabFileOff = Number(data.readBigUInt64LE(strtabOff + 24));
+
+console.log('Number of sections:', shnum);
+console.log('String table file offset:', strtabFileOff);
+
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const nameIdx = data.readUInt32LE(offset);
+    const type = data.readUInt32LE(offset + 4);
+    const addr = Number(data.readBigUInt64LE(offset + 16));
+    const fileOffset = Number(data.readBigUInt64LE(offset + 24));
+    const size = Number(data.readBigUInt64LE(offset + 32));
+    
+    // Read section name from string table
+    let name = '';
+    let nOff = strtabFileOff + nameIdx;
+    while (nOff < data.length && data[nOff] !== 0) {
+        name += String.fromCharCode(data[nOff]);
+        nOff++;
+    }
+    
+    const typeNames = {
+        0: 'NULL',
+        1: 'PROGBITS',
+        2: 'SYMTAB',
+        3: 'STRTAB',
+        4: 'RELA',
+        5: 'HASH',
+        6: 'DYNAMIC',
+        7: 'NOTE',
+        8: 'NOBITS',
+        9: 'REL',
+        10: 'SHLIB',
+        11: 'DYNSYM',
+        14: 'INIT_ARRAY',
+        15: 'FINI_ARRAY',
+        17: 'GNU_HASH',
+        18: 'VERSYM',
+        19: 'VERNEED'
+    };
+    
+    console.log(`Section ${i}: ${name}, type=${typeNames[type] || type}, addr=${addr}, offset=${fileOffset}, size=${size}`);
+}
+EOF
+node /app/debug.js /app/a.out
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// ELF64 header offsets
+const ELF_MAGIC_LE = 0x464c457f;
+const E_SHOFF = 40;
+const E_SHEENTSIZE = 58;
+const E_SHNUM = 60;
+
+// Section header offsets (for 64-bit)
+const SH_NAME = 0;
+const SH_TYPE = 4;
+const SH_ADDR = 16;
+const SH_OFFSET = 24;
+const SH_SIZE = 32;
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(E_SHOFF);
+const shentsize = data.readUInt16LE(E_SHEENTSIZE);
+const shnum = data.readUInt16LE(E_SHNUM);
+
+const result = {};
+
+// Parse section headers and extract all sections with non-zero addresses
+// (this includes code, data, rodata, etc.)
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const type = data.readUInt32LE(offset + SH_TYPE);
+    const addr = Number(data.readBigUInt64LE(offset + SH_ADDR));
+    const fileOffset = Number(data.readBigUInt64LE(offset + SH_OFFSET));
+    const size = Number(data.readBigUInt64LE(offset + SH_SIZE));
+    
+    // Skip sections without memory addresses
+    if (addr === 0 && type !== 8) continue; // type 8 is NOBITS (BSS) which has addr but no file offset
+    
+    // SHT_NOBITS (8) is BSS - has address but no content in file (all zeros)
+    if (type === 8) {
+        // Extract all 4-byte aligned addresses from BSS
+        for (let j = 0; j < size; j += 4) {
+            const memAddr = addr + j;
+            result[memAddr.toString()] = 0;
+        }
+        continue;
+    }
+    
+    // For all other sections with non-zero addresses, extract the data
+    if (size > 0 && fileOffset + size <= data.length) {
+        for (let j = 0; j < size; j += 4) {
+            const fOffset = fileOffset + j;
+            const memAddr = addr + j;
+            
+            // Only process if we can read 4 bytes
+            if (fOffset + 4 <= data.length) {
+                const value = data.readUInt32LE(fOffset);
+                result[memAddr.toString()] = value;
+            }
+        }
+    }
+}
+
+console.log(JSON.stringify(result));
+EOF
+node /app/extract.js /app/a.out | python3 -c "import json,sys; d=json.load(sys.stdin); print('Number of entries:', len(d)); print('Sample:', {k:d[k] for k in list(d.keys())[:5]})"
+$ node /app/extract.js /app/a.out > /tmp/out.json && python3 -c "
+import json
+with open('/tmp/out.json') as f:
+    d = json.load(f)
+    
+# Check format
+print('First 5 entries:')
+for k in sorted(d.keys(), key=int)[:5]:
+    print(f'{k}: {d[k]} (type: {type(d[k]).__name__})')
+    
+print()
+print('All keys appear to be numeric:', all(k.isdigit() for k in d.keys()))
+print('All values are integers:', all(isinstance(v, int) for v in d.values()))
+print('Total entries:', len(d))
+"
+$ node /app/extract.js /app/a.out | head -c 200
+$ cd /app && node extract.js /app/a.out > out.json && python3 -c "
+import json
+with open('out.json') as f:
+    d = json.load(f)
+print('Total entries:', len(d))
+print('First 3 keys:', [k for k in sorted(d.keys(), key=int)[:3]])
+print('Sample values:', {k: d[k] for k in ['4194304'] if k in d})  # Check for address mentioned in example
+"
+$ head -c 100 /app/a.out | od -A x -t x1 | head -10
+$ cat > /app/check_phdr.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// ELF64 header offsets
+const E_PHOFF = 32;
+const E_PHENTSIZE = 54;
+const E_PHNUM = 56;
+
+// Program header offsets
+const P_TYPE = 0;
+const P_FLAGS = 4;
+const P_OFFSET = 8;
+const P_VADDR = 16;
+const P_PADDR = 24;
+const P_FILESZ = 32;
+const P_MEMSZ = 40;
+
+// Parse ELF header
+const phoff = data.readBigUInt64LE(E_PHOFF);
+const phentsize = data.readUInt16LE(E_PHENTSIZE);
+const phnum = data.readUInt16LE(E_PHNUM);
+
+console.log('Program headers at offset:', Number(phoff));
+console.log('Number of program headers:', phnum);
+console.log('Program header entry size:', phentsize);
+
+const PT_LOAD = 1;
+
+console.log('\nProgram Headers:');
+for (let i = 0; i < phnum; i++) {
+    const offset = Number(phoff) + i * phentsize;
+    
+    const type = data.readUInt32LE(offset + P_TYPE);
+    const flags = data.readUInt32LE(offset + P_FLAGS);
+    const fileOffset = Number(data.readBigUInt64LE(offset + P_OFFSET));
+    const vAddr = Number(data.readBigUInt64LE(offset + P_VADDR));
+    const pAddr = Number(data.readBigUInt64LE(offset + P_PADDR));
+    const fileSz = Number(data.readBigUInt64LE(offset + P_FILESZ));
+    const memSz = Number(data.readBigUInt64LE(offset + P_MEMSZ));
+    
+    const typeNames = {
+        0: 'NULL',
+        1: 'LOAD',
+        2: 'DYNAMIC',
+        3: 'INTERP',
+        4: 'NOTE',
+        5: 'SHLIB',
+        6: 'PHDR',
+        7: 'TLS',
+        1685382481: 'GNU_EH_FRAME',
+        1685382482: 'GNU_STACK',
+        1685382483: 'GNU_RELRO'
+    };
+    
+    console.log(`Segment ${i}: type=${typeNames[type] || type}, vaddr=0x${vAddr.toString(16)} (${vAddr}), offset=0x${fileOffset.toString(16)}, filesz=${fileSz}, memsz=${memSz}, flags=${flags.toString(16)}`);
+}
+EOF
+node /app/check_phdr.js /app/a.out
+$ # Check the bytes at offset 4 in the file
+dd if=/app/a.out bs=1 count=8 2>/dev/null | od -A x -t x4
+# Check what 1784774249 is in hex
+printf '%x\n' 1784774249
+$ strings /app/a.out 2>/dev/null | head -50
+# Check for any source files
+ls -la /app/ 2>/dev/null
+$ cat /app/hi.c
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(40);
+const shentsize = data.readUInt16LE(58);
+const shnum = data.readUInt16LE(60);
+
+const result = {};
+
+// Parse section headers and extract all sections with file content
+// Skip NULL sections and sections without file content
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const type = data.readUInt32LE(offset + 4);
+    const addr = Number(data.readBigUInt64LE(offset + 16));
+    const fileOffset = Number(data.readBigUInt64LE(offset + 24));
+    const size = Number(data.readBigUInt64LE(offset + 32));
+    
+    // Skip NULL sections (type 0) and sections without file content
+    // Also skip sections that don't have memory addresses (like comment section)
+    if (type === 0) continue;  // SHT_NULL
+    
+    // For SHT_NOBITS (BSS), the data is all zeros
+    if (type === 8) {
+        if (addr > 0 && size > 0) {
+            for (let j = 0; j < size; j += 4) {
+                const memAddr = addr + j;
+                result[memAddr.toString()] = 0;
+            }
+        }
+        continue;
+    }
+    
+    // Skip sections without file content or memory address
+    if (fileOffset === 0 || size === 0 || addr === 0) continue;
+    
+    // Skip if section extends past file
+    if (fileOffset + size > data.length) continue;
+    
+    // Extract 4-byte words
+    for (let j = 0; j < size; j += 4) {
+        const fOffset = fileOffset + j;
+        const memAddr = addr + j;
+        
+        if (fOffset + 4 <= data.length) {
+            const value = data.readUInt32LE(fOffset);
+            result[memAddr.toString()] = value;
+        }
+    }
+}
+
+console.log(JSON.stringify(result));
+EOF
+node /app/extract.js /app/a.out | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('Total entries:', len(d))
+"
+$ cat > /app/extract.js << 'EOF'
+const fs = require('fs');
+
+const filePath = process.argv[2] || '/app/a.out';
+const data = fs.readFileSync(filePath);
+
+// Parse ELF header
+const shoff = data.readBigUInt64LE(40);
+const shentsize = data.readUInt16LE(58);
+const shnum = data.readUInt16LE(60);
+
+const result = {};
+
+// Parse section headers and extract data using virtual addresses
+for (let i = 0; i < shnum; i++) {
+    const offset = Number(shoff) + i * shentsize;
+    
+    const type = data.readUInt32LE(offset + 4);
+    const addr = Number(data.readBigUInt64LE(offset + 16));
+    const fileOffset = Number(data.readBigUInt64LE(offset + 24));
+    const size = Number(data.readBigUInt64LE(offset + 32));
+    
+    // Skip NULL sections
+    if (type === 0) continue;
+    
+    // Handle BSS (NOBITS) - zero-initialized data
+    if (type === 8) {
+        if (addr > 0 && size > 0) {
+            for (let j = 0; j < size; j += 4) {
+                const memAddr = addr + j;
+                result[memAddr.toString()] = 0;
+            }
+        }
+        continue;
+    }
+    
+    // Skip sections without file content or memory address
+    if (fileOffset === 0 || size === 0 || addr === 0) continue;
+    
+    // Skip if section extends past file
+    if (fileOffset + size > data.length) continue;
+    
+    // Extract 4-byte words using the virtual address
+    for (let j = 0; j < size; j += 4) {
+        const fOffset = fileOffset + j;
+        const memAddr = addr + j;
+        
+        if (fOffset + 4 <= data.length) {
+            const value = data.readUInt32LE(fOffset);
+            result[memAddr.toString()] = value;
+        }
+    }
+}
+
+// Also include program header information
+// But the sections should cover all the necessary data
+
+console.log(JSON.stringify(result));
+EOF
+node /app/extract.js /app/a.out | wc -c
+$ node /app/extract.js /app/a.out | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('Total entries:', len(d))
+addrs = sorted(int(k) for k in d.keys())
+print('Min addr:', min(addrs))
+print('Max addr:', max(addrs))
+print('First few entries:')
+for addr in list(addrs)[:5]:
+    print(f'  {addr}: {d[str(addr)]}')
+"
+$ cd /app && node extract.js /app/a.out > out.json && python3 -c "
+import json
+with open('out.json') as f:
+    d = json.load(f)
+print('File created successfully')
+print('Total entries:', len(d))
+# Verify format
+keys = list(d.keys())
+values = list(d.values())
+print('Keys format (string):', type(keys[0]).__name__)
+print('Values format (int):', type(values[0]).__name__)
+"
+$ head -c 100 /app/out.json
+$ cat > /tmp/check_sections.js << 'EOF'
+const fs = require('fs');
+const data = fs.readFileSync('/app/a.out');
+
+const shoff = Number(data.readBigUInt64LE(40));
+const shentsize = data.readUInt16LE(58);
+const shnum = data.readUInt16LE(60);
+
+const typeNames = {
+    0: 'NULL',
+    1: 'PROGBITS',
+    2: 'SYMTAB',
+    3: 'STRTAB',
+    4: 'RELA',
+    5: 'HASH',
+    6: 'DYNAMIC',
+    7: 'NOTE',
+    8: 'NOBITS',
+    9: 'REL',
+    10: 'SHLIB',
+    11: 'DYNSYM',
+    14: 'INIT_ARRAY',
+    15: 'FINI_ARRAY'
+};
+
+console.log('Sections with addresses:');
+let totalBytes = 0;
+for (let i = 0; i < shnum; i++) {
+    const offset = shoff + i * shentsize;
+    const type = data.readUInt32LE(offset + 4);
+    const addr = Number(data.readBigUInt64LE(offset + 16));
+    const fileOffset = Number(data.readBigUInt64LE(offset + 24));
+    const size = Number(data.readBigUInt64LE(offset + 32));
+    
+    if (addr > 0) {
+        console.log(`  ${typeNames[type] || type}: addr=0x${addr.toString(16)}, size=${size}`);
+        totalBytes += size;
+    }
+}
+console.log(`Total bytes: ${totalBytes}`);
+console.log(`Approx entries (4-byte aligned): ${Math.ceil(totalBytes/4)}`);
+EOF
+node /tmp/check_sections.js
+$ cd /app && rm -f out.json && node extract.js /app/a.out > out.json && cat /app/out.json | python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+print('Success! Extracted', len(d), 'memory values')
+print('Format check:')
+print('  Keys are strings:', all(isinstance(k, str) for k in d.keys()))
+print('  Values are integers:', all(isinstance(v, int) for v in d.values()))
+print('  Addresses are numeric strings:', all(k.isdigit() for k in d.keys()))
+"
+$ # Verify a few values by checking the raw bytes
+# Address 792 (0x318) is the .interp section: /lib64/ld-linux-x86-64.so.2
+# First 4 bytes should be 0x2f6c6962 = "/lib" in little-endian 
+printf '/lib' | od -A x -t x4
+# or in decimal
+printf '/lib' | od -A n -t u4
+$ # Address 4096 (0x1000) is .init section
+od -j 4096 -N 8 -A x -t x4 /app/a.out
+# Get the value from our output
+node /app/extract.js /app/a.out | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('Value at 4096:', d.get('4096'))
+"
+$ printf '%04x\n' 4196274163
+dd if=/app/a.out bs=1 skip=4096 count=8 2>/dev/null | od -A x -t x1
+$ cd /app && cat extract.js | head -20
+$ cd /app && node extract.js /app/a.out > out.json && echo "Output file size:" && wc -c out.json
+$ ls -la /app/extract.js /app/out.json
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The solution is complete. Let me provide a summary:
+
+I've created the `extract.js` script that:
+1. Parses the ELF64 binary header to locate section headers
+2. Iterates through all sections with memory addresses
+3. Extracts 4-byte words (uint32 little-endian) from each section
+4. Handles SHT_NOBITS (BSS) sections by outputting zero values
+5. Outputs a JSON object with memory addresses as string keys and integer values
+
+The script extracts 498 memory values from the binary, covering all initialized data sections including:
+- .interp, .note sections
+- .gnu.hash, .dynsym, .dynstr, .gnu.version, .gnu.version_r
+- .rela.dyn, .rela.plt
+- .init, .plt, .plt.got, .plt.sec, .text, .fini
+- .rodata, .eh_frame_hdr, .eh_frame
+- .init_array, .fini_array, .dynamic, .got, .data, .bss
+
+The output format matches the requirements: `{"4194304": 1784774249, ...}` with string keys and integer values.

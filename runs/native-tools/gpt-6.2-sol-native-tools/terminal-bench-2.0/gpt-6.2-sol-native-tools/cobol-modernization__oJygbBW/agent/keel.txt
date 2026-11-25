@@ -1,0 +1,95 @@
+$ pwd; ls -la; ls -l src data; which cobc; file data/*; git status --short
+> read /app/src/program.cbl
+$ cobc -V; python3 - <<'PY'
+from pathlib import Path
+for p in [*Path('data').glob('*'),Path('src/INPUT.DAT')]: print(p,repr(p.read_bytes()))
+PY
+mkdir -p /tmp/bookforum-oracle; cobc -x -o /tmp/bookforum-oracle/bookforum src/program.cbl; cp -r data src /tmp/bookforum-oracle; cd /tmp/bookforum-oracle; ./bookforum; echo status=$?
+$ cat > /tmp/bookforum-oracle/probe.py <<'PY'
+from pathlib import Path
+from subprocess import run
+from tempfile import TemporaryDirectory
+base=Path('/app/data')
+def probe(label, inp=b'U001U002B0010000000200', a=(base/'ACCOUNTS.DAT').read_bytes(), b=(base/'BOOKS.DAT').read_bytes(), t=(base/'TRANSACTIONS.DAT').read_bytes()):
+ with TemporaryDirectory() as d:
+  wd=Path(d); (wd/'src').mkdir(); (wd/'data').mkdir()
+  fs=[wd/'src/INPUT.DAT',*(wd/'data'/f'{f}.DAT' for f in ['ACCOUNTS','BOOKS','TRANSACTIONS'])]
+  for f,x in zip(fs,[inp,a,b,t]):
+   if x is not None: f.write_bytes(x)
+  p=run(['/tmp/bookforum-oracle/bookforum'],cwd=wd,capture_output=True)
+  print(label,p.returncode,p.stdout,p.stderr,[(f.name,f.read_bytes() if f.exists() else None) for f in fs[1:] if not f.exists() or f.read_bytes() != {'ACCOUNTS.DAT': a,'BOOKS.DAT':b,'TRANSACTIONS.DAT':t}[f.name]])
+if __name__=='__main__':
+ for val in [b'',b'2',b'200',b'2\n',b'    200   ',b'200       ',b'000000 200',b'00000-0200',b'abcdefghij',b'9999999999',b'0000001181',b'00000002\x00\x00',b'000000000}',b'000000000A',b'000000000\xff',b'000000000/']:
+  probe(repr(val),b'U001U002B001'+val)
+ probe('same',b'U002U002B0010000002000')
+ probe('empty',b'');probe('missing input',None);probe('missing accts',a=None);probe('missing books',b=None);probe('missing trans',t=None)
+ probe('partial books',b=(base/'BOOKS.DAT').read_bytes()+b'B001xy')
+ probe('partial books validated',b=b'B001'+b' '*20+b'U00')
+ probe('partial accts',a=(base/'ACCOUNTS.DAT').read_bytes()+b'U001xy')
+ probe('partial accts validated',a=(base/'ACCOUNTS.DAT').read_bytes()[34:]+b'U001xy')
+ probe('partial trans',t=b'abc')
+ for val in [b'200       ',b'    200   ',b'abcdefghij',b'000000-200',b'000000000}',b'000000000\x00',b'\x00'*10,b'\xff'*10,b'000000000\xff']:
+  buf=(base/'ACCOUNTS.DAT').read_bytes(); probe('balance '+repr(val),a=buf[:24]+val+buf[34:58]+val+buf[68:])
+PY
+python3 /tmp/bookforum-oracle/probe.py
+$ python3 /tmp/bookforum-oracle/probe.py | head -16; cd /tmp/bookforum-oracle; cobc -C -o /tmp/bookforum-oracle/generated.c src/program.cbl; grep -nE 'cob_(move|decimal|read|rewrite|sub|add)' generated.c
+$ cat > /tmp/bookforum-oracle/probe2.py <<'PY'
+from probe import *
+for val in [b'\x00'*10,b'\xff'*10,b' '*10,b'  2 3\x00  \x00 ',b'\x00000000001',b'000000000\x01',b'   000000/',b'00 0000001',b'000000000 ',b'         /']:
+ probe('amt '+repr(val),b'U001U002B001'+val)
+ buf=(base/'ACCOUNTS.DAT').read_bytes(); probe('bal '+repr(val),a=buf[:24]+val+buf[34:58]+val+buf[68:])
+for pad in [b' ',b'\x00',b'1',b'2']:
+ probe('partial input pad='+repr(pad),inp=b'U001U002B00',b=b'B00'+pad+b' '*20+b'U002')
+ probe('partial first book pad='+repr(pad),inp=b'U001U00'+pad+b'B0010000000200',b=b'B001'+b' '*20+b'U00',a=b'U00'+pad+b' '*20+b'0000000000'+(base/'ACCOUNTS.DAT').read_bytes())
+ probe('partial account pad='+repr(pad),inp=b'X00'+pad+b'U002B0010000000200',a=(base/'ACCOUNTS.DAT').read_bytes()+b'X00')
+ probe('partial book pad='+repr(pad),inp=b'U001U002X00'+pad+b'0000000200',b=(base/'BOOKS.DAT').read_bytes()+b'X00')
+PY
+python3 /tmp/bookforum-oracle/probe2.py
+$ ls /usr/share/doc/gnucobol*; which objdump; ldconfig -p | grep libcob; nm -D /lib/x86_64-linux-gnu/libcob.so.4 | grep -E '(decimal_set|move_display|numdisp)'
+$ objdump -d --start-address=0x22110 --stop-address=0x22370 /lib/x86_64-linux-gnu/libcob.so.4
+$ objdump -d --start-address=0x223c0 --stop-address=0x22438 /lib/x86_64-linux-gnu/libcob.so.4; objdump -d --start-address=0x22580 --stop-address=0x225c0 /lib/x86_64-linux-gnu/libcob.so.4; grep -n 'NOT AT\|status\|memcmp' /tmp/bookforum-oracle/generated.c | head -40
+$ cd /tmp/bookforum-oracle; python3 - <<'PY'
+from probe import *
+probe('stale account',inp=b'X003U002B0010000000200',a=(base/'ACCOUNTS.DAT').read_bytes()+b'X00')
+probe('stale book',inp=b'U001U002X0030000000200',b=(base/'BOOKS.DAT').read_bytes()+b'X00')
+probe('same after overdraft',inp=b'U002U002B0010000002000')
+probe('same zero',inp=b'U002U002B0010000000000')
+PY
+sed -n '100,150p;215,247p;649,666p;714,737p' generated.c; grep -nE 'memset.*b_(7|12|17|23)|[b_](12|17|23)\[' generated.c*
+> write /app/program.py
+> edit /app/program.py
+$ cat > /tmp/bookforum-oracle/compare.py <<'PY'
+from probe import *
+import random, shutil, sys
+r=random.Random(301)
+a=(base/'ACCOUNTS.DAT').read_bytes(); b=(base/'BOOKS.DAT').read_bytes(); t=(base/'TRANSACTIONS.DAT').read_bytes(); i=b'U001U002B0010000000200'
+files=['src/INPUT.DAT','data/ACCOUNTS.DAT','data/BOOKS.DAT','data/TRANSACTIONS.DAT']
+cases=[((Path('/app')/files[0]).read_bytes(),a,b,t),(i+a,a,b,t),(b'',a,b,t),(None,a,b,t),(i,None,b,t),(i,a,None,t),(i,a,b,None),(i,a,b,b'x'),(i,a+a,b+b,t),(i,a,b[:24]+b'U003'+b,t),(i,a+b'U001',b,t),(i,a,b+b'B001',t),(i,a+b'n',b+b'n',t),(b'U002U002'+i[8:],a,b,t),(i[:11],a,b'B00\x00'+b[4:],t),(i[:12],a,b,t),(i,a,b'B001'+b' '*20+b'U00',t), (i,b'U002'+a[4:34]+a[34:]+b'U001',b,t)]
+choices=[b'0'*10,b'\xff'*10,b'\x00'*10,b' '*10,b'9999999999',b'000000000/',b'000000000\xff',b'abcdefghij']
+for n in range(450):
+ def field():
+  return r.choice(choices) if r.random()<0.2 else bytes(r.choices(r.choice([list(range(256)),b' 00000123456/+\x00\xff', b'0123456789']),k=10))
+ amount=field(); amount=amount[:r.randrange(11)] if r.random()<0.1 else amount
+ balances=field(),field()
+ cases.append((i[:12]+amount,a[:24]+balances[0]+a[34:58]+balances[1]+a[68:],b,t))
+with TemporaryDirectory() as d:
+ wd=Path(d); (wd/'src').mkdir(); (wd/'data').mkdir(); shutil.copy('/app/program.py',wd)
+ def execute(exe, case):
+  for name,data in zip(files,case):
+   path=wd/name; path.unlink(missing_ok=True)
+   if data is not None: path.write_bytes(data)
+  p=run(exe,cwd=wd,capture_output=True)
+  return p.returncode,p.stdout,p.stderr,tuple((wd/name).read_bytes() if (wd/name).exists() else None for name in files)
+ mismatches=0
+ for case in cases:
+  co=execute(['/tmp/bookforum-oracle/bookforum'],case)
+  py=execute([sys.executable,str(wd/'program.py')],case)
+  if py!=co:
+   mismatches+=1
+   if mismatches<=12: print('mismatch',case, '\nCO',co,'\nPY',py)
+ print(len(cases),'cases;',mismatches,'mismatches')
+ sys.exit(bool(mismatches))
+PY
+python3 /tmp/bookforum-oracle/compare.py
+$ chmod +x /app/program.py; sha256sum data/*.DAT; /app/program.py; sha256sum data/*.DAT; ls -l /app/program.py
+Implemented `/app/program.py` and verified that all three `.DAT` files matched the GnuCOBOL output byte for byte across 468 test cases.

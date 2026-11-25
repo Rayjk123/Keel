@@ -1,0 +1,51 @@
+$ ls -la /app && file /app/* 2>/dev/null; find /app -type f 2>/dev/null | head -100
+$ file /app/vulnerable && xxd /app/vulnerable | head -50 && echo "--- strings ---" && strings /app/vulnerable && echo "--- checksec/readelf ---" && readelf -a /app/vulnerable 2>/dev/null | head -200
+$ xxd /app/vulnerable | head -80; echo "==== STRINGS ===="; strings -a /app/vulnerable; echo "==== READELF ===="; readelf -h /app/vulnerable; echo "==== SECTIONS ===="; readelf -S /app/vulnerable; echo "==== SYMBOLS ===="; readelf -s /app/vulnerable; echo "==== DYNAMIC ===="; readelf -d /app/vulnerable
+$ objdump -d /app/vulnerable -M intel && echo "==== RODATA ====" && objdump -s -j .rodata -j .data /app/vulnerable
+$ python3 - << 'PY'
+data = bytes.fromhex("040e0305392076242471301d72347130242e72351d2f76313671301d29713b1d707270763f")
+# the loop: starts with first byte already loaded (before 0x42 check fails), then xor 0x42 and store
+# Looking at code:
+# movzx eax, BYTE PTR [rip+0x2e2b]  # 404060 first byte
+# cmp al, 0x42
+# je empty
+# mov edx, 1
+# lea rdi, [rsp-1]
+# lea rsi, [rip+0x2e15]  # 40405f which is one BEFORE 404060
+# loop:
+#   xor eax, 0x42
+#   mov rcx, rdx
+#   mov BYTE PTR [rdi+rdx], al   # [rsp-1+rdx] = [rsp+rdx-1]
+#   add rdx, 1
+#   movzx eax, BYTE PTR [rsi+rdx]
+#   cmp al, 0x42
+#   jne loop
+# So first iteration: eax = byte[0], rdx=1, store at rsp+0, then load rsi+2 = data[1] because rsi = data-1, rsi+rdx after rdx becomes 2
+# Wait rsi = 40405f, data starts 404060
+# rdx starts at 1
+# eax is data[0]
+# xor store at [rsp-1+1] = rsp
+# rdx becomes 2
+# load [rsi+2] = [40405f+2] = [404061] = data[1]
+# next: xor store at [rsp-1+2]=rsp+1
+# rdx=3
+# load [rsi+3]=data[2]
+# So it decodes all bytes until 0x42 terminator, each XORed with 0x42
+key = bytes(b ^ 0x42 for b in data)
+print(key)
+print(key.decode())
+PY
+$ python3 - << 'PY'
+data = open("/app/vulnerable","rb").read()
+# extract from file offset of .data 0x3040 corresponding VA 0x404040
+# encrypted starts at VA 0x404060 -> file offset 0x3060
+off = 0x3060
+blob = data[off:off+80]
+end = blob.index(0x42)
+enc = blob[:end]
+flag = bytes(b ^ 0x42 for b in enc)
+print(flag.decode())
+open("/app/results.txt","w").write(flag.decode()+"\n")
+PY
+cat /app/results.txt
+The secret key is `FLAG{b4ff3r_0v3rfl0w_m4st3r_k3y_2024}`. It was decoded from the XOR-encoded bytes in the binary’s `.data` section and saved to `/app/results.txt`.

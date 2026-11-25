@@ -1,0 +1,198 @@
+$ find . -type f -name "*.py" | head -20
+$ find . -type f -name "*.py" -path "*/requests/*" | grep -v build | grep -v __pycache__
+> read ./requests/models.py
+> read ./requests/hooks.py
+$ find . -name "*.py" -path "*test*" | head -20
+$ grep -n "register_hook\|hooks" tests/test_requests.py | head -50
+> read tests/test_requests.py
+$ cd . && python -m pytest tests/test_requests.py::RequestsTestCase::test_multiple_hooks -v 2>&1 | head -50
+$ cd . && python -m pytest tests/test_requests.py -k "test_multiple_hooks" -v 2>&1
+$ cd . && python -c "
+from requests.models import Request
+
+# Test single hook
+def hook1(r):
+    print('hook1 called')
+    return r
+
+def hook2(r):
+    print('hook2 called')
+    return r
+
+# Create request with multiple hooks as a list
+req = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+print('Hooks registered:', req.hooks)
+
+# Try calling hooks manually
+for h in req.hooks['response']:
+    print('Calling hook:', h)
+"
+
+$ cd . && python -c "
+from requests.hooks import dispatch_hook
+
+def hook1(r):
+    print('hook1 called')
+    return r
+
+def hook2(r):
+    print('hook2 called')
+    return r
+
+# Test with hooks wrapped in extra list (current behavior)
+hooks_dict = {'response': [[hook1, hook2]]}
+result = dispatch_hook('response', hooks_dict, 'test_data')
+print('Result:', result)
+"
+
+> read tests/test_requests.py
+$ cd . && grep -n "def get\|hooks" requests/api.py | head -30
+> read ./requests/api.py
+> read ./requests/sessions.py
+$ grep -n "from_key_val_list" requests/utils.py
+> read ./requests/utils.py
+> edit ./requests/models.py
+$ cd . && python -c "
+from requests.models import Request
+
+# Test single hook
+def hook1(r):
+    print('hook1 called')
+    return r
+
+def hook2(r):
+    print('hook2 called')
+    return r
+
+# Create request with multiple hooks as a list
+req = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+print('Hooks registered:', req.hooks)
+
+# Try calling hooks manually
+for h in req.hooks['response']:
+    print('Hook:', h)
+
+# Test dispatch_hook
+from requests.hooks import dispatch_hook
+result = dispatch_hook('response', req.hooks, 'test_data')
+print('Dispatch result:', result)
+
+# Test with single hook
+print('\n--- Test single hook ---')
+req2 = Request(url='http://example.com', hooks={'response': hook1})
+print('Hooks registered:', req2.hooks)
+result = dispatch_hook('response', req2.hooks, 'test_data2')
+print('Dispatch result:', result)
+"
+
+$ cd . && python -m pytest tests/test_requests.py -k "hook" -v 2>&1
+$ cd . && python -m pytest tests/test_requests.py -v 2>&1 | tail -30
+$ diff ./requests/models.py ./build/lib/requests/models.py | head -30
+> edit ./build/lib/requests/models.py
+> read ./build/lib/requests/models.py
+> edit ./build/lib/requests/models.py
+$ cd . && python -c "
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+print('=== Test 1: Multiple hooks as a list ===')
+def hook1(r):
+    print('  hook1 called with:', r)
+    return r + '_modified_by_hook1'
+
+def hook2(r):
+    print('  hook2 called with:', r)
+    return r + '_modified_by_hook2'
+
+req = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+print('Hooks:', req.hooks['response'])
+result = dispatch_hook('response', req.hooks, 'test_data')
+print('Result:', result)
+
+print()
+print('=== Test 2: Single hook (not a list) ===')
+req2 = Request(url='http://example.com', hooks={'response': hook1})
+print('Hooks:', req2.hooks['response'])
+result = dispatch_hook('response', req2.hooks, 'test_data')
+print('Result:', result)
+
+print()
+print('=== Test 3: Multiple hooks via register_hook calls ===')
+req3 = Request(url='http://example.com')
+req3.register_hook('response', hook1)
+req3.register_hook('response', hook2)
+print('Hooks:', req3.hooks['response'])
+result = dispatch_hook('response', req3.hooks, 'test_data')
+print('Result:', result)
+
+print()
+print('=== Test 4: Register a list of hooks via register_hook ===')
+req4 = Request(url='http://example.com')
+req4.register_hook('response', [hook1, hook2])
+print('Hooks:', req4.hooks['response'])
+result = dispatch_hook('response', req4.hooks, 'test_data')
+print('Result:', result)
+
+print()
+print('=== Test 5: Mix of lists and single hooks ===')
+def hook3(r):
+    print('  hook3 called with:', r)
+    return r + '_modified_by_hook3'
+
+req5 = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+req5.register_hook('response', hook3)
+print('Hooks:', req5.hooks['response'])
+result = dispatch_hook('response', req5.hooks, 'test_data')
+print('Result:', result)
+
+print()
+print('All tests passed!')
+"
+
+$ cd . && python -c "
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+print('=== Test: Multiple hooks as a tuple ===')
+def hook1(r):
+    print('  hook1 called')
+    return r
+
+def hook2(r):
+    print('  hook2 called')
+    return r
+
+req = Request(url='http://example.com', hooks={'response': (hook1, hook2)})
+print('Hooks:', req.hooks['response'])
+result = dispatch_hook('response', req.hooks, 'test_data')
+print('Result:', result)
+print('Test passed!')
+"
+
+$ cd . && python -m pytest tests/test_requests.py -k "hook" -v 2>&1
+## Summary
+
+Fixed the issue where the `Request.__init__()` method did not properly parse the `hooks` argument when dictionary values were lists of hook functions.
+
+**The Problem**: When passing `hooks={'response': [hook1, hook2]}` to `Request`, the `register_hook` method would append the entire list as a single item, creating `[[hook1, hook2]]`. This caused a `TypeError: 'list' object is not callable` when hooks were dispatched.
+
+**The Fix**: Modified `register_hook` in `requests/models.py` to check if the hook is a list or tuple. If so, it iterates and adds each hook individually. Otherwise, it adds the single hook as before.
+
+```python
+def register_hook(self, event, hook):
+    """Properly register a hook."""
+
+    if isinstance(hook, (list, tuple)):
+        hooks = hook
+    else:
+        hooks = [hook]
+
+    for h in hooks:
+        self.hooks[event].append(h)
+```
+
+All existing hook-related tests pass, and the fix supports:
+- Single hooks passed directly
+- Lists of hooks
+- Tuples of hooks
+- Mixing lists and single hooks via multiple `register_hook` calls

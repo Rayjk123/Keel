@@ -1,0 +1,108 @@
+$ ls -la; git status --short; wc -l *.tex synonyms.txt; which pdflatex
+> read main.tex
+> read input.tex
+> read synonyms.txt
+$ d=$(mktemp -d); echo "$d"; pdflatex -interaction=nonstopmode -halt-on-error -output-directory="$d" main.tex; grep -A3 -F 'Overfull \hbox' "$d/main.log"
+$ d=$(mktemp -d); cp *.tex synonyms.txt "$d"; echo "$d" >/tmp/tex-workdir; cd "$d"; cp input.tex original; cat > search.py <<'PY'
+from pathlib import Path
+import re, subprocess, itertools, sys, random
+from concurrent.futures import ThreadPoolExecutor
+orig=Path('original').read_text().splitlines(keepends=True)
+families=[s.split(', ') for s in Path('synonyms.txt').read_text().splitlines()]
+syn={w:[v for v in family if v!=w] for family in families for w in family}
+main=Path('main.tex').resolve()
+def check(item):
+    text, swaps=item
+    import threading
+    d=Path(str(threading.get_ident())); d.mkdir(exist_ok=True)
+    (d/'input.tex').write_text(text)
+    p=subprocess.run(['pdflatex','-interaction=nonstopmode','-halt-on-error',str(main)],cwd=d,stdout=subprocess.PIPE)
+    output=p.stdout.decode(errors='replace'); assert not p.returncode,output
+    return output.count('Overfull \\hbox'), swaps, text
+
+def vary(text, choices):
+    for i,j,w in sorted(choices,reverse=True): text=text[:i]+w+text[j:]
+    return text, choices
+
+for n in map(int,sys.argv[1:]):
+    text=orig[n-1]; options=[[(m.start(),m.end(),w) for w in syn[m[0]]] for m in re.finditer(r'\b[A-Za-z]+\b',text) if m[0] in syn]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for k in [1,2,3]:
+            if k==2 and n==7:
+                combos=[(a,b) for a,b in itertools.combinations(options,2) if any(text[c[0][0]:c[0][1]] in ['creative','temperament','impressionability','name'] for c in (a,b))]
+            elif k==3:
+                combos=list(itertools.combinations(options,k)); random.Random(5).shuffle(combos)
+            else: combos=itertools.combinations(options,k)
+            items=(vary(text,vals) for group in combos for vals in itertools.product(*group))
+            best=100
+            while batch:=list(itertools.islice(items,64)):
+                results=list(ex.map(check,batch))
+                count,swaps,sol=min(results,key=lambda x:x[0]);
+                if count<best:
+                    best=count; print(n,k,count,[(text[i:j],w) for i,j,w in swaps],flush=True)
+                if count==0:
+                    Path(f'solution{n}').write_text(sol); break
+            if best==0: break
+PY
+python search.py 5 7 13 19
+$ cd "$(cat /tmp/tex-workdir)"; python3 search.py 5 13 19 7
+$ command -v perl ruby node awk sed; cd "$(cat /tmp/tex-workdir)"; cat > trial <<'SH'
+#!/bin/bash
+n=$1; shift
+sed -n "${n}p" original | sed "$@" > input.tex
+pdflatex -interaction=batchmode -halt-on-error main.tex >/dev/null || exit 2
+grep -A1 'Overfull \\hbox' main.log
+SH
+chmod +x trial
+./trial 5 -e 's/curious/odd/;s/unsought/uninvited/'; ./trial 7 -e 's/riotous/wild/;s/excursions/trips/;s/responsiveness/sensitivity/;s/temperament/mood/'; ./trial 13 -e 's/wisdom/insight/'; ./trial 19 -e 's/pathfinder/pioneer/'
+$ cd "$(cat /tmp/tex-workdir)"; cat > search.js <<'JS'
+const fs=require('fs'), {spawnSync}=require('child_process');
+const lines=fs.readFileSync('original','utf8').split('\n');
+const syn=Object.fromEntries(fs.readFileSync('synonyms.txt','utf8').trim().split('\n').flatMap(l=>{const ws=l.split(', ');return ws.map(w=>[w,ws.filter(v=>v!==w)])}));
+const n=+process.argv[2], base=lines[n-1];
+const re=new RegExp(process.argv[3]||'.');
+const seed=Object.fromEntries(process.argv.slice(4).map(p=>p.split('=')));
+const text=base.replace(/\b[A-Za-z]+\b/g,w=>seed[w]||w);
+const options=[...text.matchAll(/\b[A-Za-z]+\b/g)].filter(m=>syn[m[0]]&&re.test(m[0]));
+const d=String(n);fs.mkdirSync(d,{recursive:true});
+let best=100;
+function run(s, swaps){
+  fs.writeFileSync(d+'/input.tex',s+'\n');
+  const p=spawnSync('pdflatex',['-interaction=batchmode','-halt-on-error','../main.tex'],{cwd:d}); if(p.status!==0)throw Error(p.stdout);
+  const log=fs.readFileSync(d+'/main.log','utf8'); const warnings=log.match(/Overfull \\hbox[^\n]*\n[^\n]*/g)||[];
+  if(warnings.length<best){best=warnings.length; console.log(n,swaps,warnings);}
+  if(!warnings.length){fs.writeFileSync('solution'+n,s+'\n'); process.exit();}
+}
+function search(k,start,s,swaps){
+  if(!k)return run(s,swaps);
+  for(let i=start;i>=k-1;i--){const m=options[i]; for(const w of syn[m[0]])search(k-1,i-1,s.slice(0,m.index)+w+s.slice(m.index+m[0].length),[...swaps,[m[0],w]]);}
+}
+for(let k=0;k<=2;k++)search(k,options.length-1,text,Object.entries(seed));
+JS
+node search.js 5 'curious|unsought|unknown|college|victim|natures' & node search.js 7 'creative|name|temperament|impressionability|flabby|responsiveness|excursions|riotous' responsiveness=sensitivity excursions=trips temperament=mood & node search.js 13 'wisdom|electric|old|weatherbeaten|firm|country' & node search.js 19 pathfinder & wait
+$ cd "$(cat /tmp/tex-workdir)"; cp solution7 fallback7; sed -i "s/k<=2/k<=+(process.env.MAX||2)/" search.js; MAX=1 node search.js 7 .; MAX=1 node search.js 7 . riotous=wild excursions=trips responsiveness=sensitivity temperament=mood
+$ cd "$(cat /tmp/tex-workdir)"; MAX=2 node search.js 7 'responsiveness|excursions|riotous|impressionability|flabby|name|temperament|extraordinary' creative=imaginative
+$ d=$(cat /tmp/tex-workdir); cd "$d"; sed -e '5s/curious natures/curious characters/' -e '7s/riotous excursions/riotous outings/;7s/This responsiveness/This sensitivity/;7s/``creative temperament/``imaginative temperament/' -e '13s/the firm ordered/the organization ordered/' -e '19s/a pathfinder/a pioneer/' original > input.tex; pdflatex -interaction=nonstopmode -halt-on-error main.tex | grep -A2 -Ei 'overfull|output written'; cp input.tex combined; for w in awareness reaction attentiveness; do sed "s/This sensitivity/This $w/" combined > input.tex; pdflatex -interaction=nonstopmode -halt-on-error main.tex > /dev/null; echo "$w"; grep -A1 'Overfull \\hbox' main.log; done
+$ cd "$(cat /tmp/tex-workdir)"; MAX=1 node search.js 7 'heightened|promises|intricate|machines|impressionability|flabby|temperament|name|gorgeous|successful|series' creative=imaginative excursions=outings; MAX=1 node search.js 13 'firm'
+$ set -eu
+work=$(cat /tmp/tex-workdir)
+cmp main.tex "$work/main.tex"
+cmp synonyms.txt "$work/synonyms.txt"
+cp "$work/combined" input.tex
+node <<'JS'
+const fs=require('fs');
+const families=fs.readFileSync('synonyms.txt','utf8').trim().split('\n').map(line=>line.split(', '));
+const tokenize=s=>s.split(/([A-Za-z]+)/);
+const before=tokenize(fs.readFileSync(fs.readFileSync('/tmp/tex-workdir','utf8').trim()+'/original','utf8'));
+const after=tokenize(fs.readFileSync('input.tex','utf8'));
+if(before.length!==after.length) throw Error('Token count changed');
+for(const [i,word] of before.entries()) if(word!==after[i]) {
+ if(!families.some(f=>f.includes(word)&&f.includes(after[i]))) throw Error('Invalid substitution');
+ console.log(`${word} -> ${after[i]}`);
+}
+JS
+out=$(mktemp -d)
+pdflatex -interaction=nonstopmode -halt-on-error -output-directory="$out" main.tex
+if grep -iF 'overfull \hbox' "$out/main.log"; then exit 1; fi
+ls -la
+Made six allowed synonym substitutions in `input.tex` and verified that `main.tex` compiles with `pdflatex` without any `Overfull \hbox` warnings. `main.tex` and `synonyms.txt` were unchanged.

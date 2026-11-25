@@ -1,0 +1,505 @@
+$ find . -type d -name "xarray" -o -name "*stack*" | head -100 && rg -n "to_unstacked_dataset|to_stacked_array" --type py -g '!*.pyc' | head -80
+$ grep -n "to_unstacked_dataset\|to_stacked_array" -r --include='*.py' | head -80
+$ sed -n '1850,2000p' xarray/core/dataarray.py && echo "======= DATASET =======" && sed -n '3300,3550p' xarray/core/dataset.py && echo "======= TESTS =======" && sed -n '2980,3100p' xarray/tests/test_dataset.py
+$ sed -n '1850,1980p' xarray/core/dataarray.py && echo "======= create_test_stacked_array =======" && grep -n "def create_test_stacked_array" -r --include='*.py'
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+print(data)
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("--- stacked ---")
+print(stacked)
+print(stacked.indexes['y'])
+print(stacked.coords)
+try:
+    unstacked = stacked.to_unstacked_dataset('y')
+    print(unstacked)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+EOF
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(repr(stacked))
+print("--- sel a ---")
+a = stacked.sel(variable='a')
+print(repr(a))
+print("indexes", a.indexes)
+print("coords", a.coords)
+print("--- squeeze ---")
+a2 = a.squeeze(drop=True)
+print(repr(a2))
+print("indexes", dict(a2.indexes))
+print("coords", a2.coords)
+print("dims", a2.dims)
+print("--- variables ---")
+print(a2._coords)
+print("--- to_dataset? ---")
+# look at the y coordinate values
+print("y values", a.coords['y'].values, type(a.coords['y'].values), getattr(a.coords['y'].values, 'shape', None))
+print(a.y)
+print("--- after squeeze drop ---")
+print(a2.variables)
+print(list(a2.coords))
+EOF
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+
+# multi-dim case that works
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", sample_dims=["x"])
+print("--- stacked multi ---")
+print(stacked)
+print(stacked.indexes["z"])
+
+a = stacked.sel(variable="a")
+print("--- sel a ---")
+print(repr(a))
+a2 = a.squeeze(drop=True)
+print("--- squeeze ---")
+print(repr(a2))
+
+b = stacked.sel(variable="b").squeeze(drop=True)
+print("--- b squeeze ---")
+print(repr(b))
+
+print("--- unstacked ---")
+print(stacked.to_unstacked_dataset("z"))
+
+# single dim with extra dummy?
+print("\n\n==== single stacking dim but non-sample? wait only sample dims ===")
+
+# What if we have variables with only sample dims PLUS one extra dim of size 1? 
+print("==== case where one var has extra dim ===")
+arr1 = xr.DataArray(np.arange(3), coords=[("x", [0,1,2])])
+arr2 = xr.DataArray(np.arange(6).reshape(3,2), coords=[("x",[0,1,2]), ("z",[10,20])])
+data2 = xr.Dataset({"a": arr1, "b": arr2})
+stacked2 = data2.to_stacked_array("y", sample_dims=["x"])
+print(stacked2)
+print(stacked2.indexes["y"])
+print("--- unstacked ---")
+u = stacked2.to_unstacked_dataset("y")
+print(u)
+print("identical?", u.identical(data2))
+print("--- sel pieces ---")
+print(repr(stacked2.sel(variable="a").squeeze(drop=True)))
+print(repr(stacked2.sel(variable="b").squeeze(drop=True)))
+EOF
+$ grep -n "def drop\|def reset_index\|def drop_vars\|def squeeze" xarray/core/dataarray.py | head -40 && echo "==== git log ====" && git log -20 --oneline && echo "==== pandas version ====" && python -c "import pandas as pd; print(pd.__version__); import xarray; print(xarray.__version__)"
+$ sed -n '1722,1850p' xarray/core/dataarray.py && echo "======= DROP =======" && sed -n '2012,2100p' xarray/core/dataarray.py
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+
+idx = stacked.indexes['y']
+variables = idx.levels[0]
+variable_dim = idx.names[0]
+print("variables", variables, "variable_dim", variable_dim)
+
+data_dict = {}
+for k in variables:
+    da = stacked.sel({variable_dim: k}).squeeze(drop=True)
+    print("before drop", k, da.coords)
+    if 'y' in da.coords:
+        da = da.drop_vars('y')
+    print("after drop", repr(da), "name", da.name)
+    data_dict[k] = da
+
+ds = xr.Dataset(data_dict)
+print(ds)
+print("identical", ds.identical(data))
+print("broadcast_equals", ds.broadcast_equals(data))
+
+# also check multi-dim still ok if we always drop dim if present
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", sample_dims=["x"])
+print('dim z in sel?', 'z' in stacked.sel(variable='a').coords)
+print('dim z in squeeze b?', 'z' in stacked.sel(variable='b').squeeze(drop=True).coords)
+
+# what about name preservation and attrs
+print('stacked name', stacked.name)
+print(data['a'].name, data['b'].name)
+
+# single dim with attrs and different names
+a = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])], name='a', attrs={'u':'m'})
+b = xr.DataArray(np.arange(3)+10, coords=[("x", [0, 1, 2])], name='b', attrs={'u':'s'})
+data = xr.Dataset({"a": a, "b": b})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+print('attrs', stacked.attrs)
+print('a attrs after stack?', )
+# check if variable attrs survive
+print(stacked.sel(variable='a'))
+EOF
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+
+# level other than variable
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", sample_dims=["x"])
+print('levels', stacked.indexes['z'].names)
+try:
+    print(stacked.to_unstacked_dataset('z', level='y'))
+except Exception as e:
+    print(type(e), e)
+
+try:
+    print('--- level 1 ---')
+    print(stacked.to_unstacked_dataset('z', level=1))
+except Exception as e:
+    print(type(e), e)
+
+# manual single level multiindex
+mi = pd.MultiIndex.from_product([['a','b']], names=['variable']) if False else None
+import pandas as pd
+mi = pd.MultiIndex.from_arrays([['a','b']], names=['letter'])
+da = xr.DataArray([1,2], dims='z', coords={'z': mi})
+print('manual', da)
+print(da.to_unstacked_dataset('z'))
+
+# what if scalar coord dim name collides with an existing non-dim coordinate named same as stacked dim? unlikely
+
+# coords that are not dimensions
+ds = xr.Dataset(
+    {"a": ("x", [1,2,3]), "b": ("x", [4,5,6])},
+    coords={"x": [0,1,2], "meta": 5, "x_coord_extra": ("x", ['p','q','r'])}
+)
+print('DS', ds)
+st = ds.to_stacked_array('y', sample_dims=['x'])
+print(st)
+print('unstack attempt')
+try:
+    print(st.to_unstacked_dataset('y'))
+except Exception as e:
+    print(type(e), e)
+
+# sample dims empty? 
+ds2 = xr.Dataset({"a": 1, "b": 2})
+print('scalar vars', ds2)
+try:
+    st2 = ds2.to_stacked_array('y', sample_dims=[])
+    print(st2)
+    print(st2.to_unstacked_dataset('y'))
+except Exception as e:
+    print('scalar error', type(e), e)
+
+# one stacking dim of size 0? skip
+
+# variables with size-1 extra dim
+ds3 = xr.Dataset({
+    "a": xr.DataArray([1,2,3], dims='x'),
+    "b": xr.DataArray([[1],[2],[3]], dims=('x','z'), coords={'z':[7]})
+})
+st3 = ds3.to_stacked_array('y', sample_dims=['x'])
+print('size1', st3)
+print(st3.indexes['y'])
+u3 = st3.to_unstacked_dataset('y')
+print(u3)
+print('identical', u3.identical(ds3))
+
+# Check drop_vars if dim still a dimension
+print('--- if we drop dim when still dimension ---')
+arr = xr.DataArray(np.arange(4).reshape(2,2), dims=('x','y'), coords={'x':[0,1],'y':[0,1]})
+try:
+    print(arr.drop_vars('y'))
+except Exception as e:
+    print(type(e), e)
+EOF
+$ python - << 'EOF'
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+ds = xr.Dataset(
+    {"a": ("x", [1,2,3]), "b": ("x", [4,5,6])},
+    coords={"x": [0,1,2], "meta": 5, "x_coord_extra": ("x", ['p','q','r'])}
+)
+print('DS', ds)
+st = ds.to_stacked_array('y', sample_dims=['x'])
+print(st)
+print('unstack attempt')
+try:
+    print(st.to_unstacked_dataset('y'))
+except Exception as e:
+    print(type(e), e)
+
+print('\n==== scalar vars ====')
+ds2 = xr.Dataset({"a": 1, "b": 2})
+print(ds2)
+try:
+    st2 = ds2.to_stacked_array('y', sample_dims=[])
+    print(st2)
+    print(repr(st2))
+    print(st2.to_unstacked_dataset('y'))
+except Exception as e:
+    import traceback; traceback.print_exc()
+
+print('\n==== size1 extra dim ====')
+ds3 = xr.Dataset({
+    "a": xr.DataArray([1,2,3], dims='x'),
+    "b": xr.DataArray([[1],[2],[3]], dims=('x','z'), coords={'z':[7]})
+})
+st3 = ds3.to_stacked_array('y', sample_dims=['x'])
+print(st3)
+print(st3.indexes['y'])
+u3 = st3.to_unstacked_dataset('y')
+print(u3)
+print('identical', u3.identical(ds3))
+
+print('\n==== drop dim that is still dimension ====')
+arr = xr.DataArray(np.arange(4).reshape(2,2), dims=('x','y'), coords={'x':[0,1],'y':[0,1]})
+try:
+    print(arr.drop_vars('y'))
+except Exception as e:
+    print(type(e).__name__, e)
+
+print('\n==== single level after drop coord y if present, with extra scalar coord ====')
+idx = st.indexes['y']
+variables = idx.levels[0]
+variable_dim = idx.names[0]
+data_dict = {}
+for k in variables:
+    da = st.sel({variable_dim: k}).squeeze(drop=True)
+    print('DA', k, da)
+    if 'y' in da.coords and 'y' not in da.dims:
+        da = da.drop_vars('y')
+    data_dict[k] = da
+print(xr.Dataset(data_dict))
+print('identical original?', xr.Dataset(data_dict).identical(ds))
+EOF
+$ grep -n "MultiIndex\|level" xarray/core/indexing.py | head -50 && echo "==== dataset indexes ====" && grep -n "def sel\|def _sel\|class PandasMultiIndexingAdapter\|def isel" xarray/core/*.py | head -40
+$ sed -n '1000,1250p' xarray/core/dataarray.py
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print('drop True')
+print(repr(stacked.sel(variable='a', drop=True)))
+print('---')
+print(repr(stacked.sel({'variable':'a'}, drop=True).squeeze(drop=True)))
+
+# multi level drop
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", sample_dims=["x"])
+print('multi drop a')
+print(repr(stacked.sel(variable='a', drop=True)))
+print('multi drop b')
+print(repr(stacked.sel(variable='b', drop=True).squeeze(drop=True)))
+
+# scalar dataset
+ds2 = xr.Dataset({"a": 1, "b": 2})
+st2 = ds2.to_stacked_array('y', sample_dims=[])
+print('scalar drop')
+print(repr(st2.sel(variable='a', drop=True)))
+print(repr(st2.sel(variable='a', drop=True).squeeze(drop=True)))
+EOF
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+
+def roundtrip(data, sample_dims, new_dim='y'):
+    stacked = data.to_stacked_array(new_dim, sample_dims=sample_dims)
+    # monkey simulate fix
+    idx = stacked.indexes[new_dim]
+    level = 0
+    level_number = idx._get_level_number(level)
+    variables = idx.levels[level_number]
+    variable_dim = idx.names[level_number]
+    data_dict = {}
+    for k in variables:
+        data_dict[k] = stacked.sel({variable_dim: k}, drop=True).squeeze(drop=True)
+    return xr.Dataset(data_dict)
+
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+u = roundtrip(data, ['x'])
+print(u)
+print('identical', u.identical(data))
+
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+u = roundtrip(data, ['x'], 'z')
+print(u)
+print('identical multi', u.identical(data))
+
+# different dim
+a, = [None]
+import xarray.tests.test_dataset as t
+# maybe not import tests
+
+ds = xr.Dataset({
+    "a": xr.DataArray(np.arange(6).reshape(2,3), dims=('x','y'), coords={'y':['u','v','w']}),
+    "b": xr.DataArray([6,7], dims='x')
+})
+print('orig', ds)
+u = roundtrip(ds, ['x'], 'z')
+print(u)
+print('identical mixed', u.identical(ds))
+
+ds2 = xr.Dataset({"a": 1, "b": 2})
+u = roundtrip(ds2, [])
+print(u)
+print('identical scalar', u.identical(ds2))
+
+# with non-dim coords
+ds = xr.Dataset(
+    {"a": ("x", [1,2,3]), "b": ("x", [4,5,6])},
+    coords={"x": [0,1,2], "meta": 5, "x_coord_extra": ("x", ['p','q','r'])}
+)
+u = roundtrip(ds, ['x'])
+print(u)
+print('identical coords', u.identical(ds))
+
+# level != 0 still works with drop
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", sample_dims=["x"])
+idx = stacked.indexes['z']
+level_number = idx._get_level_number(1)
+variables = idx.levels[level_number]
+variable_dim = idx.names[level_number]
+print('level1 names', variable_dim, list(variables))
+data_dict = {}
+for k in variables:
+    data_dict[k] = stacked.sel({variable_dim: k}, drop=True).squeeze(drop=True)
+    print(k, data_dict[k])
+print(xr.Dataset(data_dict))
+EOF
+$ sed -n '140,200p' xarray/tests/test_dataset.py && echo "======= WHAT'S NEW? =======" && ls doc/whats-new* 2>/dev/null | head -20 && ls doc | head -40
+$ sed -n '1,120p' doc/whats-new.rst && echo "======= UNITS TEST =======" && sed -n '3460,3520p' xarray/tests/test_units.py
+$ python - << 'PY'
+from pathlib import Path
+
+p = Path("xarray/core/dataarray.py")
+text = p.read_text()
+old = '''        # pull variables out of datarray
+        data_dict = {}
+        for k in variables:
+            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
+
+        # unstacked dataset
+        return Dataset(data_dict)
+'''
+new = '''        # pull variables out of datarray
+        data_dict = {}
+        for k in variables:
+            data_dict[k] = self.sel({variable_dim: k}, drop=True).squeeze(drop=True)
+
+        # unstacked dataset
+        return Dataset(data_dict)
+'''
+if old not in text:
+    raise SystemExit('pattern not found')
+p.write_text(text.replace(old, new, 1))
+
+p = Path("xarray/tests/test_dataset.py")
+text = p.read_text()
+old = '''    def test_to_stacked_array_to_unstacked_dataset_different_dimension(self):
+        # test when variables have different dimensionality
+        a, b = create_test_stacked_array()
+        sample_dims = ["x"]
+        D = xr.Dataset({"a": a, "b": b.isel(y=0)})
+
+        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+'''
+new = '''    def test_to_stacked_array_to_unstacked_dataset_different_dimension(self):
+        # test when variables have different dimensionality
+        a, b = create_test_stacked_array()
+        sample_dims = ["x"]
+        D = xr.Dataset({"a": a, "b": b.isel(y=0)})
+
+        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+    def test_to_stacked_array_to_unstacked_dataset_single_dimension(self):
+        # test when variables have only the sample dimensions (no stacking dims)
+        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+        D = xr.Dataset({"a": arr, "b": arr})
+        sample_dims = ["x"]
+
+        y = D.to_stacked_array("features", sample_dims)
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+
+        # also works with no sample dimensions (scalar variables)
+        D = xr.Dataset({"a": 1, "b": 2})
+        y = D.to_stacked_array("features", sample_dims=[])
+        x = y.to_unstacked_dataset("features")
+        assert_identical(D, x)
+'''
+if old not in text:
+    raise SystemExit('test pattern not found')
+p.write_text(text.replace(old, new, 1))
+
+p = Path("doc/whats-new.rst")
+text = p.read_text()
+old = '''Bug fixes
+~~~~~~~~~
+- Fix errors combining attrs in :py:func:`open_mfdataset` (:issue:`4009`, :pull:`4173`)
+  By `John Omotani <https://github.com/johnomotani>`_
+'''
+new = '''Bug fixes
+~~~~~~~~~
+- Fix :py:meth:`DataArray.to_unstacked_dataset` for single-dimension variables
+  stacked with :py:meth:`Dataset.to_stacked_array`.
+- Fix errors combining attrs in :py:func:`open_mfdataset` (:issue:`4009`, :pull:`4173`)
+  By `John Omotani <https://github.com/johnomotani>`_
+'''
+if old not in text:
+    raise SystemExit('whatsnew pattern not found')
+p.write_text(text.replace(old, new, 1))
+print("updated")
+PY
+$ pytest xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_to_unstacked_dataset xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_to_unstacked_dataset_different_dimension xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_to_unstacked_dataset_single_dimension xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_dtype_dims xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_name xarray/tests/test_dataset.py::TestDataset::test_to_stacked_array_invalid_sample_dims xarray/tests/test_dataarray.py::TestDataArray::test_to_unstacked_dataset_raises_value_error -q
+$ python - << 'EOF'
+import numpy as np
+import xarray as xr
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+print(data.identical(unstacked))
+EOF
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The single-dimension stack/unstack roundtrip now succeeds, including the original example.
+
+`to_unstacked_dataset` previously left the stacked coordinate as a scalar after selecting a single-level MultiIndex. That happened when every variable only had the sample dimensions, so the stacked index contained only the variable level. Those scalars then conflicted during `Dataset` construction and raised `MergeError`.
+
+The method now passes `drop=True` to `sel`, which removes that leftover coordinate. Existing multi-dimension roundtrips still pass, and a regression test covers both single-dimension and scalar variables.

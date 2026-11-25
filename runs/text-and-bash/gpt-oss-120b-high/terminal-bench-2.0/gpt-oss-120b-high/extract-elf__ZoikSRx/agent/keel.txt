@@ -1,0 +1,88 @@
+$ cat > extract.js <<'EOF'
+#!/usr/bin/env node
+const fs = require('fs');
+const path = process.argv[2];
+if (!path) {
+    console.error('Usage: node extract.js <binary>');
+    process.exit(1);
+}
+const data = fs.readFileSync(path);
+if (data.length < 4 || data[0] !== 0x7f || data[1] !== 0x45 || data[2] !== 0x4c || data[3] !== 0x46) {
+    console.error('Not an ELF file');
+    process.exit(1);
+}
+const EI_CLASS = data[4];
+const EI_DATA = data[5];
+if (EI_DATA !== 1) {
+    console.error('Only little‑endian ELF supported');
+    process.exit(1);
+}
+function readUint16(off) { return data.readUInt16LE(off); }
+function readUint32(off) { return data.readUInt32LE(off); }
+function readUint64(off) { return Number(data.readBigUInt64LE(off)); }
+
+const PT_LOAD = 1;
+const PF_X = 1;
+let e_phoff, e_phentsize, e_phnum;
+if (EI_CLASS === 1) {               // 32‑bit ELF
+    e_phoff = readUint32(0x1c);
+    e_phentsize = readUint16(0x2a);
+    e_phnum = readUint16(0x2c);
+} else if (EI_CLASS === 2) {        // 64‑bit ELF
+    e_phoff = readUint64(0x20);
+    e_phentsize = readUint16(0x36);
+    e_phnum = readUint16(0x38);
+} else {
+    console.error('Unsupported ELF class');
+    process.exit(1);
+}
+
+let first = true;
+process.stdout.write('{');
+for (let i = 0; i < e_phnum; i++) {
+    const phOff = e_phoff + i * e_phentsize;
+    let p_type, p_flags, p_offset, p_vaddr, p_filesz, p_memsz;
+    if (EI_CLASS === 1) { // 32‑bit
+        p_type   = readUint32(phOff);
+        p_offset = readUint32(phOff + 4);
+        p_vaddr  = readUint32(phOff + 8);
+        p_filesz = readUint32(phOff + 16);
+        p_memsz  = readUint32(phOff + 20);
+        p_flags  = readUint32(phOff + 24);
+    } else {               // 64‑bit
+        p_type   = readUint32(phOff);
+        p_flags  = readUint32(phOff + 4);
+        p_offset = readUint64(phOff + 8);
+        p_vaddr  = readUint64(phOff + 16);
+        p_filesz = readUint64(phOff + 32);
+        p_memsz  = readUint64(phOff + 40);
+    }
+    if (p_type !== PT_LOAD) continue;
+    if ((p_flags & PF_X) !== 0) continue; // skip executable segments (.text)
+
+    // Dump initialized data (file‑backed)
+    const initWords = Math.floor(p_filesz / 4);
+    for (let w = 0; w < initWords; w++) {
+        const off = w * 4;
+        const addr = p_vaddr + off;
+        const val = data.readUInt32LE(p_offset + off);
+        if (!first) process.stdout.write(',');
+        first = false;
+        process.stdout.write(`"${addr}":${val}`);
+    }
+
+    // Dump zero‑filled part (e.g., .bss) if present
+    const zeroWords = Math.floor(p_memsz / 4) - initWords;
+    for (let w = 0; w < zeroWords; w++) {
+        const off = initWords * 4 + w * 4;
+        const addr = p_vaddr + off;
+        if (!first) process.stdout.write(',');
+        first = false;
+        process.stdout.write(`"${addr}":0`);
+    }
+}
+process.stdout.write('}');
+EOF
+$ ls -la
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Implemented **extract.js** to parse ELF binaries, extract non‑executable PT_LOAD segments, and output every 4‑byte word as a JSON object with decimal addresses and integer values. The script handles both 32‑ and 64‑bit little‑endian binaries, skips executable code sections, and includes zero‑filled BSS data.

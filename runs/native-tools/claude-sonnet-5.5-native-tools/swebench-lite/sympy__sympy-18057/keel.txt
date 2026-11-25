@@ -1,0 +1,75 @@
+$ grep -n "sympify\|def __eq__" sympy/core/expr.py | head -30; grep -n "def __eq__" -A40 sympy/core/basic.py | head -80; git log --oneline | head -3
+$ sed -n 115,140p sympy/core/expr.py; grep -n "def __eq__" -B3 -A25 sympy/core/numbers.py | grep -n "sympify" ; grep -n "unicode\|string" sympy/core/sympify.py | sed -n 1,40p
+$ sed -n 300,420p sympy/core/sympify.py
+$ cd sympy && python - <<'E'
+import re
+p='core/expr.py'
+s=open(p).read()
+s=s.replace("""        try:
+            other = sympify(other)
+            if not isinstance(other, Expr):
+                return False
+        except (SympifyError, SyntaxError):
+            return False
+        # check for pure""","""        try:
+            other = _sympify(other)
+            if not isinstance(other, Expr):
+                return False
+        except (SympifyError, SyntaxError):
+            return False
+        # check for pure""")
+open(p,'w').write(s)
+E
+cd ..; git diff --stat; python -c "
+import sympy
+class C:
+    def __repr__(self): return 'x.y'
+class D:
+    def __repr__(self): return 'x'
+print(sympy.Symbol('x')==C(), sympy.Symbol('x')!=D(), sympy.Symbol('x')==D())"
+$ grep -rn "def __eq__" -A8 sympy --include=*.py | grep -v tests | grep "[^_]sympify(" | head -20; python -m pytest -q -x sympy/core sympy/series sympy/matrices/tests/test_matrices.py 2>&1 | tail -15
+$ sed -n 38,60p sympy/matrices/dense.py; python bin/test sympy/core sympy/matrices sympy/series 2>&1 | tail -30
+$ python - <<'E'
+p='sympy/matrices/dense.py'
+s=open(p).read()
+s=s.replace("""    def __eq__(self, other):
+        other = sympify(other)
+""","""    def __eq__(self, other):
+        try:
+            other = sympify(other, strict=True)
+        except SympifyError:
+            return NotImplemented
+""",1)
+open(p,'w').write(s)
+E
+grep -n "SympifyError\|^from.*sympify" sympy/matrices/dense.py | head
+$ python bin/test sympy/matrices sympy/core/tests/test_expr.py sympy/core/tests/test_basic.py 2>&1 | tail -8; git stash -q; python bin/test sympy/core/tests/test_var.py 2>&1 | tail -4; git stash pop
+$ python bin/test sympy/core/tests/test_var.py 2>&1 | tail -3
+$ for i in 1 2; do python bin/test sympy/core/tests/test_var.py 2>&1 | tail -2; done; git stash -q;  python bin/test sympy/core/tests/test_var.py 2>&1 | tail -2; git stash pop -q
+$ python bin/test sympy/core/tests/test_var.py 2>&1 | head -20; sed -n 10,25p sympy/core/tests/test_var.py
+$ sed -i "s/assert v == \['d', 'e', 'fg'\]/assert v == [Symbol('d'), Symbol('e'), Symbol('fg')]/" sympy/core/tests/test_var.py
+cat >> sympy/core/tests/test_expr.py <<'E'
+
+
+def test_eq_does_not_use_repr():
+    class C(object):
+        def __repr__(self):
+            return 'x.y'
+
+    class D(object):
+        def __repr__(self):
+            return 'x'
+
+    assert Symbol('x') != C()
+    assert Symbol('x') != D()
+    assert not (Symbol('x') == D())
+E
+python bin/test sympy/core/tests/test_var.py sympy/core/tests/test_expr.py 2>&1 | tail -3
+The issue is fixed. `Symbol('x') == C()` now returns `False` instead of raising, and an object whose repr is `x` now compares unequal to `Symbol('x')`.
+
+- **`sympy/core/expr.py`:** `Expr.__eq__` now uses strict `_sympify`, which no longer falls back to parsing and evaluating `str(other)`.
+- **`sympy/matrices/dense.py`:** `DenseMatrix.__eq__` had the same flaw. It now uses strict `sympify` and returns `NotImplemented` when the object can't be converted.
+- **`sympy/core/tests/test_var.py`:** `test_var` only passed because `Symbol('d') == 'd'` parsed the string. It now compares against `Symbol('d')` and so on.
+- **`sympy/core/tests/test_expr.py`:** I added `test_eq_does_not_use_repr`, covering both reprs from the issue.
+
+The `sympy/matrices` tests, `test_expr.py`, `test_basic.py` and `test_var.py` pass after the changes. I didn't rerun the whole of `sympy/core` and `sympy/series` afterwards. The earlier run, made before the matrix change and the `test_var.py` edit, also showed two errors in `test_sympify.py` (`test_evaluate_false` and `test_issue_17811`). They are `ValueError: Name node can't be used with 'False' constant`, raised from `parse_expr` with `evaluate=False` on the installed Python 3.9. I didn't check whether they happen without my change.

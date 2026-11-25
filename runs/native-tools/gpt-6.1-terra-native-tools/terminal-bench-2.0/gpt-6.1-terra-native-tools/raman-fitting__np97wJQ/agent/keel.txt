@@ -1,0 +1,85 @@
+$ pwd; ls -la; ls -la /app
+$ find /app -maxdepth 3 -type f -printf '%p %s bytes\n' | head -100
+$ head -40 graphene.dat; echo '---'; tail -20 graphene.dat; file graphene.dat; wc -l graphene.dat
+$ python -c 'import scipy, numpy; print("scipy",scipy.__version__,"numpy",numpy.__version__)' 
+$ which python python3; python -m pip list | head -70; ls /usr/bin/python*
+$ awk 'NR%150==1 {print NR, $0}' graphene.dat
+$ python -m pip install numpy scipy -q
+$ find / -iname '*graphene*' -o -iname '*raman*' 2>/dev/null | head -50
+$ python - <<'PY'
+import numpy as np
+from scipy.signal import find_peaks, savgol_filter
+x,y=np.loadtxt('graphene.dat',converters={0:lambda s:float(s.replace(b',',b'.')),1:lambda s:float(s.replace(b',',b'.'))}).T
+print('range',x.min(),x.max(),y.min(),y.max())
+y2=savgol_filter(y,31,3)
+for p in find_peaks(y2,prominence=50,distance=30)[0]:
+ print(f'x={x[p]:.2f}  intensity={y2[p]:.1f}')
+print('around end:')
+for j in range(-300,0,20): print(x[j],y2[j])
+PY
+$ python - <<'PY'
+import numpy as np
+from scipy.signal import find_peaks, savgol_filter
+x,y=np.loadtxt((s.replace(',','.') for s in open('graphene.dat'))).T
+print('range',x.min(),x.max(),y.min(),y.max())
+y2=savgol_filter(y,31,3)
+for p in find_peaks(y2,prominence=50,distance=30)[0]:
+ print(f'x={x[p]:.2f}  intensity={y2[p]:.1f}')
+print('around end:')
+for j in range(-300,0,20): print(x[j],y2[j])
+PY
+$ python - <<'PY'
+import numpy as np
+x,y=np.loadtxt((s.replace(',','.') for s in open('graphene.dat'))).T
+for i in [0,1,2,30,500,1000,1500,2000,2500,3000,3564]: print(i,x[i],1e7/x[i],y[i])
+PY
+$ python - <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import savgol_filter
+x,y=np.loadtxt((s.replace(',','.') for s in open('graphene.dat'))).T
+x=1e7/x
+ys=savgol_filter(y,15,3)
+for lo,hi in [(1450,1700),(2500,2850)]:
+ print('\n',lo,hi)
+ for z in np.arange(lo,hi+1,10):
+  i=np.argmin(abs(x-z)); print(f'{x[i]:.1f} {ys[i]:.1f}',end=' | ')
+ print()
+ def f(x,x0,g,a,c):return a*g*g/((x-x0)**2+g*g)+c
+ for span in [(lo,hi),((1500 if lo==1450 else 2550),(1650 if lo==1450 else 2800)),((1530 if lo==1450 else 2600),(1630 if lo==1450 else 2750)),((1550 if lo==1450 else 2630),(1620 if lo==1450 else 2730))]:
+  m=(x>span[0])&(x<span[1]); xx=x[m]; yy=y[m]
+  p,c=curve_fit(f,xx,yy,p0=[1580 if lo==1450 else 2670,15,4000 if lo==1450 else 10000,np.min(yy)],maxfev=10000)
+  print(span, p, 'rms',np.std(yy-f(xx,*p)))
+PY
+$ python - <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+x,y=np.loadtxt((s.replace(',','.') for s in open('graphene.dat'))).T
+x=1e7/x
+for name, ranges in [('G',[(1450,1700),(1500,1650),(1530,1630),(1550,1620)]),('2D',[(2500,2850),(2550,2800),(2600,2750),(2630,2730)])]:
+ print(name)
+ for lo,hi in ranges:
+  m=(x>=lo)&(x<=hi); xx=x[m];yy=y[m]
+  def f(x,x0,g,a,c,s):return a*g*g/((x-x0)**2+g*g)+c+s*(x-x0)
+  p,c=curve_fit(f,xx,yy,p0=[1580 if name=='G' else 2670,10 if name=='G' else 20,8000 if name=='G' else 12000,6000 if name=='G' else 1500,-5],maxfev=10000)
+  print(lo,hi,p,'rms',np.std(yy-f(xx,*p)))
+PY
+$ python - <<'PY'
+import numpy as np, json
+from scipy.optimize import curve_fit
+x,y=np.loadtxt((line.replace(',','.') for line in open('/app/graphene.dat'))).T
+# Data's first column is wavelength in nm; convert to Raman shift, cm^-1.
+x=1e7/x
+# Peak-height Lorentzian, gamma = HWHM. Offset is the fitted baseline at x0.
+def model(x,x0,gamma,amplitude,offset,slope):
+    return offset+slope*(x-x0)+amplitude*gamma**2/((x-x0)**2+gamma**2)
+results={}
+for name,lo,hi,guess in [('G',1450,1700,[1580,9,8300,5700,-6]),('2D',2500,2850,[2670,18,12000,1300,-2])]:
+    m=(x>=lo)&(x<=hi)
+    p,cov=curve_fit(model,x[m],y[m],p0=guess,bounds=([lo,0,0,-np.inf,-np.inf],[hi,np.inf,np.inf,np.inf,np.inf]),maxfev=10000)
+    results[name]=dict(zip(['x0','gamma','amplitude','offset'],map(float,p[:4])))
+    print(name,'n=',sum(m),'params=',p,'rms=',np.sqrt(np.mean((y[m]-model(x[m],*p))**2)))
+with open('/app/results.json','w') as f: json.dump(results,f,indent=2); f.write('\n')
+PY
+cat /app/results.json; python -m json.tool /app/results.json >/dev/null
+Fitted the G and 2D peaks and saved their parameters to `/app/results.json`.

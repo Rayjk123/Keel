@@ -1,0 +1,25 @@
+$ grep -n "hook" requests/models.py | head -40; grep -n "def register_hook" -A15 requests/models.py
+$ cd requests && python - <<'E'
+s=open('models.py').read()
+s=s.replace('''        self.hooks[event].append(hook)
+''','''        if isinstance(hook, collections.Callable):
+            self.hooks[event].append(hook)
+        elif hasattr(hook, '__iter__'):
+            self.hooks[event].extend(h for h in hook if isinstance(h, collections.Callable))
+''',1)
+open('models.py','w').write(s)
+E
+head -30 models.py | grep import; cat hooks.py | sed -n 1,200p | grep -n "hook" ; grep -n "hooks" sessions.py
+$ cd requests && sed -i "s/isinstance(hook, collections.Callable)/hasattr(hook, '__call__')/; s/isinstance(h, collections.Callable)/hasattr(h, '__call__')/" models.py && sed -n 460,475p models.py && cd .. && python -c "
+import requests
+from requests.models import Request
+f=lambda r:None; g=lambda r:None
+r=Request('http://x.com',hooks={'response':[f,g]}); print(r.hooks['response'])
+r=Request('http://x.com',hooks={'response':f}); print(r.hooks['response'])
+"
+The fix is done. `Request(..., hooks=...)` now takes either a single function or a list of functions for each event.
+
+- **Change:** in `requests/models.py`, `Request.register_hook()` adds a single function as before, or adds every callable in a list. `Request.__init__()` uses it for each entry in `hooks`. Anything that isn't callable is skipped without an error.
+- **Checked:** a quick script showed `hooks={'response': [f, g]}` registers both functions and `hooks={'response': f}` still works. I didn't run the test suite or a real request end to end.
+- **Sessions:** session hooks go through the same code, so a session should now accept a list per event too, but I haven't tested that.
+- **Still open:** if a request and its session both set hooks for the same event, the request's hooks replace the session's instead of being added to them. That logic is in `sessions.py` and I didn't change it.

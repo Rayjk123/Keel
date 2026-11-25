@@ -1,0 +1,112 @@
+$ pwd; ls -la /app /app/src /app/data; command -v cobc || true
+> read /app/src/program.cbl
+$ file /app/src/INPUT.DAT /app/data/*; for f in /app/src/INPUT.DAT /app/data/*; do echo "--- $f"; xxd -g1 "$f" | head -50; done
+$ for f in /app/src/INPUT.DAT /app/data/*; do echo ---$f; od -An -tx1c "$f"; done
+$ cobc -x -o /tmp/bookforum /app/src/program.cbl && cobc -V | head -3
+$ mkdir -p /tmp/cobtest/{data,src}; cp /app/data/* /tmp/cobtest/data/; cp /app/src/INPUT.DAT /tmp/cobtest/src/; cd /tmp/cobtest && /tmp/bookforum; echo status=$?; ls -l data/*; od -An -tc data/ACCOUNTS.DAT; od -An -tc data/TRANSACTIONS.DAT
+$ cat >/tmp/probe.py <<'PY'
+from pathlib import Path
+import subprocess
+p=Path('/tmp/cobtest'); d=p/'data'; s=p/'src'
+def run(inp, accounts=None,books=None,trans=b''):
+ (s/'INPUT.DAT').write_bytes(inp)
+ (d/'ACCOUNTS.DAT').write_bytes(accounts if accounts is not None else b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'9999999990')
+ (d/'BOOKS.DAT').write_bytes(books if books is not None else b'B001'+b'T'*20+b'U002')
+ (d/'TRANSACTIONS.DAT').write_bytes(trans)
+ r=subprocess.run(['/tmp/bookforum'],cwd=p,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ print('IN',repr(inp), 'OUT',r.returncode,repr(r.stdout),repr(r.stderr));print(*[f'{f.name}: {f.read_bytes()!r}' for f in d.iterdir()],sep='\n')
+run(b'U001U002B0010000000200')
+run(b'U001U002B0010000000200', accounts=b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'0000000010')
+run(b'U001U001B0010000000020', books=b'B001'+b'T'*20+b'U001')
+for x in [b'U001U002B001200',b'U001U002B001',b'',b'U001U002B00100000000A1', b'U001U002B0019999999999']:
+ run(x)
+PY
+python /tmp/probe.py
+$ cd /tmp && cobc -C /app/src/program.cbl && grep -n -A18 -B8 -E 'INPUT-AMOUNT|WS-AMOUNT|ACCOUNT-BALANCE' program.c | head -180
+$ grep -n -E 'cob_move|cob_add|cob_sub|cob_read|cob_rewrite' /tmp/program.c
+$ sed -n '95,155p;395,445p;555,580p' /tmp/program.c; cat /tmp/program.c.h | tail -100
+$ cat > /tmp/probe2.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+for inp in [b'U001U002B0011',b'U001U002B001  123',b'U001U002B00100000000 1',b'U001U002B00100000000-1', b'U001U002B0010000000001EXTRA',b'U001U002B0010000000200']:
+ run(inp)
+print('PARTIAL account');run(b'U001U002B0010000000005', accounts=b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'55')
+print('PARTIAL book');run(b'U001U002B0010000000005',books=b'B001'+b'T'*20+b'U002'+b'B001'+b'Z'*5)
+PY
+python /tmp/probe2.py
+$ cat >/tmp/probe3.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+# partial accounts with distinct record IDs, verify matched based on inherited fields
+for a in [b'U001',b'U001'+b'A'*20, b'U001'+b'A'*20+b'0000000100'+b'U002',b'U001'+b'A'*20+b'0000000100'+b'X',b'U001'+b'A'*20+b'0000000100'+b'U001']:
+ run(b'U001U001B0010000000005',accounts=a,books=b'B001'+b'T'*20+b'U001')
+# duplicate seller records after full
+run(b'U001U002B0010000000005',accounts=b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'0000000100'+b'X')
+PY
+python /tmp/probe3.py
+$ cat > /tmp/probe4.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+for acc in [b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'0000000100'+b'U',b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'0000000100'+b'U00', b'U001'+b'A'*20+b'0000000100'+b'U002'+b'B'*20+b'0000000100'+b'X']:
+ run(b'U001U002B0010000000005',accounts=acc)
+run(b'U001U002B0010000000005', books=b'B001'+b'T'*20+b'U002'+b'B')
+PY
+python /tmp/probe4.py
+$ python - <<'PY'
+print((2**64-29)%10**10, (2**32-29)%10**10)
+PY
+cat >/tmp/probe5.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+for amount in [b'000000000A',b'000000000-',b'00000000-1',b'          ',b'00000 0010']:
+ run(b'U001U002B001'+amount)
+PY
+python /tmp/probe5.py
+> write /app/program.py
+$ cat > /tmp/compare.py <<'PY'
+import os,random,subprocess,pathlib,shutil
+random.seed(42)
+a=pathlib.Path('/app'); t=pathlib.Path('/tmp/cobtest');
+orig={str(p.relative_to(a)):p.read_bytes() for p in [a/'src/INPUT.DAT',*(a/'data').iterdir()]}
+try:
+ for i in range(400):
+  ids=[b'U001',b'U002',b'U003']; bs=[b'B001',b'B002']
+  buyer=random.choice(ids); seller=random.choice(ids); book=random.choice(bs)
+  n=random.randrange(4)
+  ac=b''.join(random.choice(ids)+b'N'*20+f'{random.randrange(10**10):010}'.encode() for _ in range(n))
+  bo=b''.join(random.choice(bs)+b'T'*20+random.choice(ids) for _ in range(random.randrange(4)))
+  if random.random()<.2: ac += random.choice(ids)[:random.randrange(1,5)]
+  if random.random()<.2: bo += random.choice(bs)[:random.randrange(1,5)]
+  amt=random.choice([f'{random.randrange(10**10):010}'.encode(),b'  12', b'00000000A1',b'00000000-1'])
+  inp=buyer+seller+book+amt; trans=b'TRANS'
+  for root in (a,t):
+   (root/'src/INPUT.DAT').write_bytes(inp)
+   for name,content in [('ACCOUNTS.DAT',ac),('BOOKS.DAT',bo),('TRANSACTIONS.DAT',trans)]: (root/'data'/name).write_bytes(content)
+  r1=subprocess.run(['/tmp/bookforum'],cwd=t,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+  r2=subprocess.run(['python3','/app/program.py'],cwd=a,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+  for name in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:
+   x=(t/'data'/name).read_bytes(); y=(a/'data'/name).read_bytes()
+   if x!=y:
+    print('MISMATCH',i,inp,repr(ac),repr(bo),name,repr(x),repr(y),r1.stdout,r1.stderr,r2.stdout,r2.stderr);raise SystemExit(1)
+ print('All 400 differential cases passed')
+finally:
+ for name,content in orig.items(): (a/name).write_bytes(content)
+PY
+python /tmp/compare.py
+$ cat >/tmp/invalid_balance.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+for bal in [b'00000000A1',b'00000000-1',b'0000000 01',b'          ',b'100000000A']:
+ run(b'U001U002B0010000000005', accounts=b'U001'+b'A'*20+bal+b'U002'+b'B'*20+bal)
+PY
+python /tmp/invalid_balance.py
+python - <<'PY'
+import sys
+sys.path.insert(0,'/app'); from program import display_number_value,balance_bytes
+for a in [b'00000000A1',b'00000000-1',b'0000000 01',b'          ',b'100000000A']:
+ n=display_number_value(a);print(a,n,balance_bytes(n-5),balance_bytes(n+5))
+PY
+$ cat >/tmp/probe6.py <<'PY'
+exec(open('/tmp/probe.py').read().split('run(b\'U001U002B0010000000200\')')[0])
+for bal in [b' 000000001',b'0000000 01',b'000000000 ',b'  123  456',b' 00000000 ',b'000000  01']:
+ run(b'U001U002B0010000000005', accounts=b'U001'+b'A'*20+bal+b'U002'+b'B'*20+bal)
+PY
+python /tmp/probe6.py
+> edit /app/program.py
+$ python /tmp/compare.py; python -m py_compile /app/program.py; ls -la /app/data
+Implemented `/app/program.py` and verified it against GnuCOBOL using 400 differential test cases.

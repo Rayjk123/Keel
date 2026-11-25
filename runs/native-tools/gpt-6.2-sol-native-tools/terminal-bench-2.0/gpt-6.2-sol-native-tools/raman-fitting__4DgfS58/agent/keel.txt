@@ -1,0 +1,91 @@
+$ pwd; ls -la; ls -la /app; find . -maxdepth 2 -type f | head -60
+> read graphene.dat
+$ python - <<'PY'
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
+x,y=np.array([list(map(float,l.replace(',','.').split())) for l in open('graphene.dat')]).T
+print(x.min(),x.max(),y.min(),y.max()); print(x[-10:]);
+for a,b in [(1450,1750),(2450,2900)]:
+ s=(x>a)&(x<b); X=x[s];Y=y[s]; Z=gaussian_filter1d(Y,3); p,props=find_peaks(Z,prominence=300); print(len(X),list(zip(X[p],Z[p],props['prominences']))); print(list(zip(X[::5],Y[::5])))
+PY
+$ which -a python python3; ls /opt; command -v gnuplot; python - <<'PY'
+from statistics import mean
+rows=[list(map(float,l.replace(',','.').split())) for l in open('graphene.dat')]; x,y=zip(*rows)
+print(min(x),max(x),min(y),max(y));print(x[-10:]);
+for a,b in [(1450,1750),(2450,2900)]:
+ r=[(x,y) for x,y in rows if a<x<b]; print(len(r),max(r,key=lambda p:p[1]));print([(round(x,2),round(y)) for x,y in r[::5]])
+PY
+$ python - <<'PY'
+r=[list(map(float,l.replace(',','.').split())) for l in open('graphene.dat')]; from statistics import mean
+for i in range(0,len(r),50):
+ x,y=max(r[i:i+50],key=lambda p:p[1]);print(i,round(r[i][0],1),round(x,1),round(y),round(mean(p[1] for p in r[i:i+50])))
+print('smooth peaks:'); s=[(r[i][0],mean(y for x,y in r[i-4:i+5])) for i in range(4,len(r)-4)]; print(sorted((t for i,t in enumerate(s) if 20<i<len(s)-20 and t[1]==max(y for x,y in s[i-20:i+21])),key=lambda p:-p[1])[:40]);
+PY
+$ file graphene.dat; ls -la /; python - <<'PY'
+r=[list(map(float,l.replace(',','.').split())) for l in open('graphene.dat')];
+for i in [0,50,110,111,112,113,114,115,116,117,250,280,285,290,295,300,500,545,551,554,557,560,1000,1080,1081,1082,1083,1084,1085,1500,3500,3564]:
+ x,y=r[i]; print(i,x,1e7/x,y)
+PY
+$ python - <<'PY'
+r=[(1e7/float(a),float(b)) for a,b in (l.replace(',','.').split() for l in open('graphene.dat'))];
+for a,b in [(1450,1720),(2470,2850)]:
+ for i,(x,y) in enumerate(r):
+  if a<x<b and (i%4==0 or abs(x-(1580 if a<2000 else 2670))<25):print(i,round(x,2),round(y))
+PY
+$ cat >/tmp/fit_graphene.py <<'PY'
+from math import sqrt, exp
+import json
+
+with open('/app/graphene.dat') as f:
+    rows = [(1e7 / x, y) for x, y in (map(float, line.replace(',', '.').split()) for line in f)]
+
+def fit(low, high, center, model):
+    xs, ys = zip(*[(x, y) for x, y in rows if low <= x <= high])
+    n = len(xs)
+    mean_y = sum(ys) / n
+    def score(x0, gamma):
+        if gamma <= 0:
+            return (float('inf'), 0, 0)
+        q = [model((x-x0)/gamma) for x in xs]
+        mean_q = sum(q)/n
+        amp = sum((v-mean_q)*(y-mean_y) for v,y in zip(q,ys)) / sum((v-mean_q)**2 for v in q)
+        offset = mean_y - amp*mean_q
+        sse = sum((y - amp*v - offset)**2 for v,y in zip(q,ys))
+        return sse, amp, offset
+    x0, gamma = center, (high-low)/8
+    step = 5
+    while step > 1e-6:
+        options = [(x0, gamma)] + [(x0+i*step,gamma+j*step) for i in (-1,0,1) for j in (-1,0,1) if i or j]
+        best = min(options, key=lambda p:score(*p)[0])
+        if best == (x0,gamma):
+            step /= 2
+        else:
+            x0, gamma = best
+    sse, amp, offset = score(x0,gamma)
+    return dict(x0=x0, gamma=gamma, amplitude=amp, offset=offset), sqrt(sse/n)
+
+lorentz = lambda t: 1/(1+t*t)
+gauss = lambda t: exp(-0.69314718056*t*t)
+for key, center, widths in [('G',1581,[30,40,50,60]), ('2D',2670,[60,80,100,120])]:
+    for w in widths:
+        print(key,w,*(fit(center-w, center+w, center, m) for m in [lorentz,gauss]))
+PY
+python /tmp/fit_graphene.py
+$ python - <<'PY'
+import json, math
+from pathlib import Path
+ns = {}
+exec(Path('/tmp/fit_graphene.py').read_text().split('for key, center, widths')[0], ns)
+results = {}
+for name, low, high, center in [('G',1540,1620,1580), ('2D',2590,2750,2670)]:
+    params, rmse = ns['fit'](low, high, center, ns['lorentz'])
+    assert low < params['x0'] < high and params['gamma'] > 0 and params['amplitude'] > 0
+    print(name, 'RMSE:', rmse)
+    results[name] = {k: round(v, 6) for k, v in params.items()}
+p = Path('/app/results.json')
+p.write_text(json.dumps(results, indent=2, allow_nan=False) + '\n')
+assert json.loads(p.read_text()) == results
+print(p.read_text())
+PY
+Fit the G and 2D Raman peaks with Lorentzian profiles and verified that `/app/results.json` contains all four requested parameters for each peak.

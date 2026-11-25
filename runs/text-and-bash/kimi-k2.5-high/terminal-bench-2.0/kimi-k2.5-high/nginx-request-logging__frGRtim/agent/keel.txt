@@ -1,0 +1,82 @@
+$ apt-get update && apt-get install -y nginx && mkdir -p /var/www/html && echo "Welcome to the benchmark webserver" > /var/www/html/index.html && echo "Page not found - Please check your URL" > /var/www/html/404.html
+$ cat > /etc/nginx/conf.d/benchmark-site.conf << 'EOF'
+server {
+    listen 8080;
+    server_name localhost;
+
+    root /var/www/html;
+    index index.html;
+
+    error_log /var/log/nginx/benchmark-error.log;
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+
+    error_page 404 /404.html;
+
+    limit_req zone=one burst=10;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location = /404.html {
+        internal;
+    }
+}
+EOF
+$ cat > /etc/nginx/nginx.conf << 'EOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+	worker_connections 768;
+}
+
+http {
+	log_format benchmark '$time_local "$request_method" "$status" "$http_user_agent"';
+
+	##
+	# Basic Settings
+	##
+
+	sendfile on;
+	tcp_nopush on;
+	types_hash_max_size 2048;
+
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+
+	##
+	# Rate Limiting
+	##
+	limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;
+
+	##
+	# Logging Settings
+	##
+	access_log /var/log/nginx/access.log;
+	error_log /var/log/nginx/error.log;
+
+	##
+	# Gzip Settings
+	##
+	gzip on;
+
+	##
+	# Virtual Host Configs
+	##
+	include /etc/nginx/conf.d/*.conf;
+	include /etc/nginx/sites-enabled/*;
+}
+EOF
+$ rm -f /etc/nginx/sites-enabled/default && touch /var/log/nginx/benchmark-access.log /var/log/nginx/benchmark-error.log && chown -R www-data:www-data /var/log/nginx /var/www/html && nginx -t
+$ nginx && sleep 1 && curl -s http://localhost:8080 && echo && echo "--- Log Location ---" && ls -la /var/log/nginx/benchmark-*.log
+$ nginx && pgrep nginx && curl -s http://localhost:8080 && echo && echo "Log files:" && ls -la /var/log/nginx/benchmark-*.log && echo "Access log content:" && cat /var/log/nginx/benchmark-access.log 2>/dev/null || echo "Log is empty (expected - nginx may not have logged yet)"
+$ pkill nginx 2>/dev/null; sleep 1; nginx && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistent && echo "--- Logs ---" && ls -la /var/log/nginx/benchmark-*.log && cat /var/log/nginx/benchmark-access.log
+$ killall -9 nginx 2>/dev/null || true; sleep 2; nginx && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistent && echo "--- Logs ---" && ls -la /var/log/nginx/benchmark-*.log && cat /var/log/nginx/benchmark-access.log 2>/dev/null || echo "Access log currently empty"
+$ fuser -k 8080/tcp 2>/dev/null || true; sleep 2; nginx && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistent && echo "--- Logs ---" && ls -la /var/log/nginx/benchmark-*.log
+$ lsof -ti:8080 | xargs kill -9 2>/dev/null || true; sleep 2; nginx && sleep 1 && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistentpath && echo "--- Logs ---" && ls -la /var/log/nginx/benchmark-*.log && cat /var/log/nginx/benchmark-access.log
+$ ss -tlnp | grep 8080 && cat /proc/$(ss -tlnp | grep 8080 | grep -oP 'pid=\K[0-9]+')/comm 2>/dev/null; for pid in $(ss -tlnp | grep 8080 | grep -oP 'pid=\K[0-9]+'); do kill -9 $pid 2>/dev/null; done; sleep 2; nginx && sleep 1 && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistentpath && echo "--- Logs ---" && ls -la /var/log/nginx/benchmark-*.log
+$ kill -9 1583 2>/dev/null || true; sleep 2; nginx && sleep 1 && curl -s http://localhost:8080 && echo "--- 404 Test ---" && curl -s http://localhost:8080/nonexistentpath && echo "--- Logs Location ---" && ls -la /var/log/nginx/benchmark-*.log
+stopped: no command in 3 consecutive replies

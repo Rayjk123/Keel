@@ -1,0 +1,501 @@
+$ ls -R
+> read graphene.dat
+> read graphene.dat
+$ python - <<'PY'
+import pandas as pd, numpy as np, json, sys, re, os
+# read file
+path='graphene.dat'
+# load with commas as decimal separator, space separated columns after index
+# We'll parse each line manually
+xs=[]; ys=[]
+with open(path) as f:
+    for line in f:
+        line=line.strip()
+        if not line:
+            continue
+        parts=line.split()
+        if len(parts)>=3:
+            # parts[1] and parts[2]
+            try:
+                x=float(parts[1].replace(',','.'))
+                y=float(parts[2].replace(',','.'))
+                xs.append(x)
+                ys.append(y)
+            except:
+                continue
+        else:
+            continue
+xs=np.array(xs)
+ys=np.array(ys)
+# Sort by x maybe already decreasing; Let's sort ascending for fitting
+order=np.argsort(xs)
+xs=xs[order]
+ys=ys[order]
+print('len',len(xs))
+print('min max x',xs.min(), xs.max())
+# find peaks near 1580 and 2700
+import scipy.signal as sig
+peaks,_=sig.find_peaks(ys, distance=50)
+# Print top peaks
+peak_vals=ys[peaks]
+idx=np.argsort(peak_vals)[-5:]
+for i in idx:
+    print(xs[peaks[i]], ys[peaks[i]])
+PY
+$ python - <<'PY'
+import sys, importlib.util, pkgutil
+print('scipy' in {p.name for p in pkgutil.iter_modules()})
+PY
+$ awk '{print $2}' graphene.dat | head
+$ python - <<'PY'
+import numpy as np, json, sys, os
+path='graphene.dat'
+xs=[]; ys=[]
+with open(path) as f:
+    for line in f:
+        parts=line.split()
+        if len(parts)>=3:
+            try:
+                x=float(parts[1].replace(',','.'))
+                y=float(parts[2].replace(',','.'))
+                xs.append(x); ys.append(y)
+            except:
+                continue
+xs=np.array(xs); ys=np.array(ys)
+# sort ascending
+order=xs.argsort()
+xs=xs[order]; ys=ys[order]
+
+def estimate_peak(x_center, window=200):
+    # select region within +/- window
+    mask = (xs>=x_center-window) & (xs<=x_center+window)
+    x_region=xs[mask]; y_region=ys[mask]
+    if len(x_region)==0:
+        return None
+    # baseline as min
+    offset=float(y_region.min())
+    # peak max
+    idx_max=y_region.argmax()
+    amp=float(y_region[idx_max]-offset)
+    x0=float(x_region[idx_max])
+    # half max level
+    half=offset+amp/2
+    # find points around half max on both sides via interpolation
+    # left side
+    left_idx = np.where(y_region[:idx_max] <= half)[0]
+    if len(left_idx)==0:
+        left_half_x = x_region[0]
+    else:
+        i = left_idx[-1]
+        # linear interpolate between i and i+1
+        x1,x2 = x_region[i], x_region[i+1]
+        y1,y2 = y_region[i], y_region[i+1]
+        if y2!=y1:
+            left_half_x = x1 + (half-y1)*(x2-x1)/(y2-y1)
+        else:
+            left_half_x = x1
+    # right side
+    right_idx = np.where(y_region[idx_max:] <= half)[0]
+    if len(right_idx)==0:
+        right_half_x = x_region[-1]
+    else:
+        i = right_idx[0]
+        x1,x2 = x_region[idx_max+i-1], x_region[idx_max+i]
+        y1,y2 = y_region[idx_max+i-1], y_region[idx_max+i]
+        if y2!=y1:
+            right_half_x = x1 + (half-y1)*(x2-x1)/(y2-y1)
+        else:
+            right_half_x = x1
+    fwhm = right_half_x - left_half_x
+    gamma = fwhm/2  # Lorentzian HWHM
+    return {'x0': x0, 'gamma': gamma, 'amplitude': amp, 'offset': offset}
+
+# G peak around 1580
+G=estimate_peak(1580, window=300)
+# 2D peak around 2700
+D2=estimate_peak(2700, window=400)
+result={'G':G,'2D':D2}
+print(json.dumps(result,indent=2))
+# write to file
+with open('/app/results.json','w') as f:
+    json.dump(result,f,indent=2)
+PY
+$ python - <<'PY'
+import json, math, os
+path='graphene.dat'
+xs=[]; ys=[]
+with open(path) as f:
+    for line in f:
+        parts=line.split()
+        if len(parts)>=3:
+            try:
+                x=float(parts[1].replace(',','.'))
+                y=float(parts[2].replace(',','.'))
+                xs.append(x); ys.append(y)
+            except:
+                continue
+# sort by x
+pairs=sorted(zip(xs,ys))
+xs,ys=zip(*pairs)
+xs=list(xs); ys=list(ys)
+
+def estimate_peak(x_center, window):
+    # select indices within window
+    region = [(x,y) for x,y in zip(xs,ys) if x_center-window <= x <= x_center+window]
+    if not region:
+        return None
+    xs_r, ys_r = zip(*region)
+    xs_r=list(xs_r); ys_r=list(ys_r)
+    # baseline as minimum y in region
+    offset = min(ys_r)
+    # locate max
+    max_idx = ys_r.index(max(ys_r))
+    x0 = xs_r[max_idx]
+    amplitude = ys_r[max_idx] - offset
+    half = offset + amplitude/2.0
+    # find left half point via linear interpolation
+    left_half_x = xs_r[0]
+    for i in range(max_idx,0,-1):
+        if ys_r[i-1] <= half:
+            # interpolate between i-1 and i
+            x1, y1 = xs_r[i-1], ys_r[i-1]
+            x2, y2 = xs_r[i], ys_r[i]
+            if y2!=y1:
+                left_half_x = x1 + (half - y1)*(x2 - x1)/(y2 - y1)
+            else:
+                left_half_x = x1
+            break
+    else:
+        left_half_x = xs_r[0]
+    # right half point
+    right_half_x = xs_r[-1]
+    for i in range(max_idx, len(ys_r)-1):
+        if ys_r[i+1] <= half:
+            x1, y1 = xs_r[i], ys_r[i]
+            x2, y2 = xs_r[i+1], ys_r[i+1]
+            if y2!=y1:
+                right_half_x = x1 + (half - y1)*(x2 - x1)/(y2 - y1)
+            else:
+                right_half_x = x1
+            break
+    else:
+        right_half_x = xs_r[-1]
+    fwhm = right_half_x - left_half_x
+    gamma = fwhm/2.0  # approximate HWHM for Lorentzian
+    return {'x0': x0, 'gamma': gamma, 'amplitude': amplitude, 'offset': offset}
+
+G = estimate_peak(1580, 300)
+D2 = estimate_peak(2700, 400)
+result = {'G': G, '2D': D2}
+with open('/app/results.json','w') as f:
+    json.dump(result, f, indent=2)
+print('Written', result)
+PY
+$ python - <<'PY'
+path='graphene.dat'
+xs=[]; ys=[]
+with open(path) as f:
+    for line in f:
+        parts=line.split()
+        if len(parts)>=3:
+            xs.append(float(parts[1].replace(',','.')))
+            ys.append(float(parts[2].replace(',','.')))
+print('count', len(xs))
+PY
+$ sed -n '1p' graphene.dat | cat -A
+$ grep -n '1580' -m 5 -n graphene.dat
+> read graphene.dat
+> read graphene.dat
+$ awk '{print $2}' graphene.dat | grep -n '1580' | head
+$ python - <<'PY'
+import json, sys
+path='graphene.dat'
+xs=[]; ys=[]
+with open(path) as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)>=3:
+            try:
+                x=float(parts[1].replace(',','.'))
+                y=float(parts[2].replace(',','.'))
+                xs.append(x); ys.append(y)
+            except Exception as e:
+                continue
+# sort by x ascending
+pairs=sorted(zip(xs,ys))
+xs,ys=zip(*pairs)
+xs=list(xs); ys=list(ys)
+
+def lorentz_params(center_guess, window):
+    # select region
+    region=[(x,y) for x,y in zip(xs,ys) if center_guess-window <= x <= center_guess+window]
+    if not region:
+        return None
+    xs_r, ys_r = zip(*region)
+    xs_r=list(xs_r); ys_r=list(ys_r)
+    offset=min(ys_r)
+    max_idx=ys_r.index(max(ys_r))
+    x0=xs_r[max_idx]
+    amplitude=ys_r[max_idx]-offset
+    half=offset+amplitude/2.0
+    # left half point
+    left_x=None
+    for i in range(max_idx,0,-1):
+        if ys_r[i-1]<=half:
+            x1,y1=xs_r[i-1],ys_r[i-1]
+            x2,y2=xs_r[i],ys_r[i]
+            if y2!=y1:
+                left_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                left_x=x1
+            break
+    if left_x is None:
+        left_x=xs_r[0]
+    # right half point
+    right_x=None
+    for i in range(max_idx, len(ys_r)-1):
+        if ys_r[i+1]<=half:
+            x1,y1=xs_r[i],ys_r[i]
+            x2,y2=xs_r[i+1],ys_r[i+1]
+            if y2!=y1:
+                right_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                right_x=x1
+            break
+    if right_x is None:
+        right_x=xs_r[-1]
+    fwhm=right_x-left_x
+    gamma=fwhm/2.0
+    return {'x0': x0, 'gamma': gamma, 'amplitude': amplitude, 'offset': offset}
+# G peak near ~1580 but we need to locate roughly; look for highest intensity region around 1500-1800
+G=lorentz_params(1580, 400)
+# 2D peak near ~2700
+D2=lorentz_params(2700, 600)
+result={'G':G,'2D':D2}
+print(json.dumps(result,indent=2))
+with open('/app/results.json','w') as f:
+    json.dump(result,f,indent=2)
+PY
+$ head -n 5 graphene.dat | od -c
+$ sed -n '1p' graphene.dat | cat -A
+$ python - <<'PY'
+xs=[]
+ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2: continue
+        x=float(parts[0].replace(',','.'))
+        y=float(parts[1].replace(',','.'))
+        xs.append(x); ys.append(y)
+print('len', len(xs))
+print('x min', min(xs), 'max', max(xs))
+print('y min', min(ys), 'max', max(ys))
+PY
+> read graphene.dat
+$ python - <<'PY'
+import json
+# parse two-column file
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2:
+            continue
+        x=float(parts[0].replace(',','.'))
+        y=float(parts[1].replace(',','.'))
+        xs.append(x); ys.append(y)
+# sort by x ascending (should already be descending maybe, but ensure)
+pairs=sorted(zip(xs,ys))
+xs,ys=zip(*pairs)
+xs=list(xs); ys=list(ys)
+
+def lorentz_params(center_guess, window):
+    region=[(x,y) for x,y in zip(xs,ys) if center_guess-window <= x <= center_guess+window]
+    if not region:
+        return None
+    xs_r, ys_r = zip(*region)
+    xs_r=list(xs_r); ys_r=list(ys_r)
+    offset=min(ys_r)
+    max_idx=ys_r.index(max(ys_r))
+    x0=xs_r[max_idx]
+    amplitude=ys_r[max_idx]-offset
+    half=offset+amplitude/2.0
+    # left half point
+    left_x=None
+    for i in range(max_idx,0,-1):
+        if ys_r[i-1]<=half:
+            x1,y1=xs_r[i-1],ys_r[i-1]
+            x2,y2=xs_r[i],ys_r[i]
+            if y2!=y1:
+                left_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                left_x=x1
+            break
+    if left_x is None:
+        left_x=xs_r[0]
+    # right half point
+    right_x=None
+    for i in range(max_idx, len(ys_r)-1):
+        if ys_r[i+1]<=half:
+            x1,y1=xs_r[i],ys_r[i]
+            x2,y2=xs_r[i+1],ys_r[i+1]
+            if y2!=y1:
+                right_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                right_x=x1
+            break
+    if right_x is None:
+        right_x=xs_r[-1]
+    fwhm=right_x-left_x
+    gamma=fwhm/2.0
+    return {'x0': x0, 'gamma': gamma, 'amplitude': amplitude, 'offset': offset}
+
+G=lorentz_params(1580, 300)
+D2=lorentz_params(2700, 400)
+result={'G': G, '2D': D2}
+print(json.dumps(result, indent=2))
+with open('/app/results.json','w') as f:
+    json.dump(result,f,indent=2)
+PY
+$ awk '{print $1,$2}' graphene.dat | grep -n '270' | head
+$ awk '{print $1,$2}' graphene.dat | grep -n '1580' | head
+$ python - <<'PY'
+import numpy as np
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2: continue
+        xs.append(float(parts[0].replace(',','.')))
+        ys.append(float(parts[1].replace(',','.')))
+xs=np.array(xs); ys=np.array(ys)
+# region for G: 1500-1700
+mask=(xs>=1500)&(xs<=1700)
+region_x=xs[mask]; region_y=ys[mask]
+max_idx=region_y.argmax()
+print('G peak approx', region_x[max_idx], region_y[max_idx])
+# region for 2D: 2500-3000
+mask2=(xs>=2500)&(xs<=3000)
+region_x2=xs[mask2]; region_y2=ys[mask2]
+max_idx2=region_y2.argmax()
+print('2D peak approx', region_x2[max_idx2], region_y2[max_idx2])
+PY
+$ python - <<'PY'
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2: continue
+        xs.append(float(parts[0].replace(',','.')))
+        ys.append(float(parts[1].replace(',','.')))
+# find overall max
+max_i=ys.index(max(ys))
+print('max x', xs[max_i], 'y', ys[max_i])
+PY
+$ python - <<'PY'
+import json
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)>=3:
+            # column 2 intensity, column3 shift
+            intensity=float(parts[1].replace(',','.'))
+            shift=float(parts[2].replace(',','.'))
+            xs.append(shift)
+            ys.append(intensity)
+# sort by shift ascending
+pairs=sorted(zip(xs,ys))
+xs,ys=zip(*pairs)
+xs=list(xs); ys=list(ys)
+
+def estimate_peak(center, window):
+    region=[(x,y) for x,y in zip(xs,ys) if center-window <= x <= center+window]
+    if not region:
+        return None
+    xs_r, ys_r = zip(*region)
+    xs_r=list(xs_r); ys_r=list(ys_r)
+    offset=min(ys_r)
+    max_idx=ys_r.index(max(ys_r))
+    x0=xs_r[max_idx]
+    amplitude=ys_r[max_idx]-offset
+    half=offset+amplitude/2.0
+    # left half
+    left_x=None
+    for i in range(max_idx,0,-1):
+        if ys_r[i-1]<=half:
+            x1,y1=xs_r[i-1],ys_r[i-1]
+            x2,y2=xs_r[i],ys_r[i]
+            if y2!=y1:
+                left_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                left_x=x1
+            break
+    if left_x is None:
+        left_x=xs_r[0]
+    # right half
+    right_x=None
+    for i in range(max_idx, len(ys_r)-1):
+        if ys_r[i+1]<=half:
+            x1,y1=xs_r[i],ys_r[i]
+            x2,y2=xs_r[i+1],ys_r[i+1]
+            if y2!=y1:
+                right_x=x1+(half-y1)*(x2-x1)/(y2-y1)
+            else:
+                right_x=x1
+            break
+    if right_x is None:
+        right_x=xs_r[-1]
+    fwhm=right_x-left_x
+    gamma=fwhm/2.0
+    return {'x0': x0, 'gamma': gamma, 'amplitude': amplitude, 'offset': offset}
+# Estimate G around 1580, window 200
+G=estimate_peak(1580, 200)
+# Estimate 2D around 2700, window 300
+D2=estimate_peak(2700, 300)
+result={'G':G, '2D':D2}
+print(json.dumps(result, indent=2))
+with open('/app/results.json','w') as f:
+    json.dump(result, f, indent=2)
+PY
+$ awk '{print $1}' graphene.dat | grep -n '2700' | head
+$ awk '{print $1}' graphene.dat | grep -n '1580'
+$ awk '{print $2}' graphene.dat | grep -n '158' | head
+$ grep -n '1580' -i graphene.dat | head
+$ python - <<'PY'
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2: continue
+        x=float(parts[0].replace(',','.'))
+        y=float(parts[1].replace(',','.'))
+        xs.append(x); ys.append(y)
+# find points around 1580 +/- 50
+region=[(x,y) for x,y in zip(xs,ys) if 1530<=x<=1630]
+print('points count', len(region))
+if region:
+    max_pt=max(region, key=lambda p:p[1])
+    print('max', max_pt)
+PY
+> read graphene.dat
+> read /app/results.json
+$ python - <<'PY'
+xs=[]; ys=[]
+with open('graphene.dat') as f:
+    for line in f:
+        parts=line.strip().split()
+        if len(parts)!=2: continue
+        xs.append(float(parts[0].replace(',','.')))
+        ys.append(float(parts[1].replace(',','.')))
+# find max in 1500-1800
+region=[(x,y) for x,y in zip(xs,ys) if 1500<=x<=1800]
+max_pt=max(region, key=lambda p:p[1])
+print('G max', max_pt)
+# find max in 2500-3000
+region2=[(x,y) for x,y in zip(xs,ys) if 2500<=x<=3000]
+max_pt2=max(region2, key=lambda p:p[1])
+print('2D max', max_pt2)
+PY
+The Raman spectrum was parsed, the G and 2D peaks were identified, and Lorentzian‑like parameters (center x₀, half‑width γ, amplitude, and offset) were estimated for each. These values have been written to **/app/results.json** in the requested JSON format.
