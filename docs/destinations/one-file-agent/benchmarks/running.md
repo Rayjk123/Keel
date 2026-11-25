@@ -17,9 +17,9 @@ bench/baseline.sh
 
 Runs use native tool calling and are labelled `native-tools`. To rerun the original text mode for comparison, set `KEEL_ADAPTER=text`, and the run is labelled `baseline`. `KEEL_MAX_STEPS` changes the 50-reply limit.
 
-Each model gets its own folder, `runs/<model>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side. Set `EFFORT`, for example `EFFORT=max`, to run at a given reasoning effort: the manifest and the scoreboard record it, and the folder gets an `-<effort>` suffix unless you set `RUN`.
+Each model gets its own folder, `runs/<trial>/<run>/`, with a `manifest.json` that records the commit, the machine and the exact tasks, next to the results for every benchmark. That makes models easy to compare side by side. The trial is `native-tools` by default and `text-and-bash` with `KEEL_ADAPTER=text`; set `TRIAL` to start a new one. Set `EFFORT`, for example `EFFORT=max`, to run at a given reasoning effort: the manifest and the scoreboard record it, and the folder gets an `-<effort>` suffix unless you set `RUN`.
 
-After a run, `python bench/summarize.py` reads every folder under `runs/` and rewrites `runs/results.json` (every task's outcome), `runs/scoreboard.md` and the chart on the [Benchmarks](index.md) page. Commit them with the run, and the docs site picks them up on the next build.
+At the end of a run, `bench/baseline.sh` runs `bench/summarize.py`, which reads every folder under `runs/` and rewrites `runs/results.json` (every task's outcome and the reason it failed), `runs/scoreboard.md`, `runs/failures.md` and the chart on the [Benchmarks](index.md) page. Commit them with the run, and the docs site picks them up on the next build.
 
 The task lists live in `bench/subsets/`. Add a name to a list to grow a benchmark.
 

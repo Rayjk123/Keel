@@ -7,13 +7,13 @@ export PYTHONPATH="$PWD/bench"
 MODELS="${MODELS:?list one or more models, e.g. ollama/qwen3-coder:30b}"
 WORKERS="${WORKERS:-2}"
 KEEL_ADAPTER="${KEEL_ADAPTER:-native}"
-if [ "$KEEL_ADAPTER" = text ]; then HARNESS="${HARNESS:-baseline}"; else HARNESS="${HARNESS:-native-tools}"; fi
+if [ "$KEEL_ADAPTER" = text ]; then HARNESS="${HARNESS:-baseline}"; TRIAL="${TRIAL:-text-and-bash}"; else HARNESS="${HARNESS:-native-tools}"; TRIAL="${TRIAL:-native-tools}"; fi
 export KEEL_EFFORT="${EFFORT:-}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 if [ -z "${BENCH_PYTHON:-}" ]; then
   if [ -x bench/.venv/bin/python ]; then BENCH_PYTHON=bench/.venv/bin/python; else BENCH_PYTHON=python3; fi
 fi
-export WORKERS HARNESS KEEL_ADAPTER
+export WORKERS HARNESS KEEL_ADAPTER TRIAL
 
 DOCKER_ROOT="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)"
 [ -d "$DOCKER_ROOT" ] || DOCKER_ROOT=/
@@ -45,13 +45,14 @@ for MODEL in $MODELS; do
     [ "$HARNESS" != "baseline" ] && RUN="$RUN-$HARNESS"
     [ -n "$KEEL_EFFORT" ] && RUN="$RUN-$KEEL_EFFORT"
   fi
-  mkdir -p "runs/$RUN"
+  mkdir -p "runs/$TRIAL/$RUN"
   "$BENCH_PYTHON" bench/manifest.py "$RUN" "$MODEL"
   echo "=== $MODEL ($RUN)"
 
-  harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.0) -o "runs/$RUN/terminal-bench-4.0" --job-name "$RUN"
-  harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-2.0) -o "runs/$RUN/terminal-bench-2.0" --job-name "$RUN"
-  harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick aider-polyglot) -o "runs/$RUN/aider-polyglot" --job-name "$RUN"
-  "$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --out "runs/$RUN/swebench-lite" --workers "$WORKERS" --model "${MODEL#*/}" -i $(cat bench/subsets/swebench-lite.txt)
+  harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.0) -o "runs/$TRIAL/$RUN/terminal-bench-4.0" --job-name "$RUN"
+  harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-2.0) -o "runs/$TRIAL/$RUN/terminal-bench-2.0" --job-name "$RUN"
+  harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick aider-polyglot) -o "runs/$TRIAL/$RUN/aider-polyglot" --job-name "$RUN"
+  "$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --out "runs/$TRIAL/$RUN/swebench-lite" --workers "$WORKERS" --model "${MODEL#*/}" -i $(cat bench/subsets/swebench-lite.txt)
   unset RUN
 done
+"$BENCH_PYTHON" bench/summarize.py

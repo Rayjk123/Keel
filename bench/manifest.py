@@ -22,6 +22,7 @@ def main() -> None:
     run, model = sys.argv[1], sys.argv[2]
     manifest = {
         "run": run,
+        "trial": os.environ.get("TRIAL") or ("text-and-bash" if os.environ.get("KEEL_ADAPTER") == "text" else "native-tools"),
         "started": datetime.now().astimezone().isoformat(timespec="seconds"),
         "model": model,
         "model_name": model.split("/", 1)[-1],
@@ -43,7 +44,7 @@ def main() -> None:
             name: (ROOT / "bench" / "subsets" / f"{name}.txt").read_text().split() for name in SUBSETS
         },
     }
-    target = ROOT / "runs" / run
+    target = ROOT / "runs" / manifest["trial"] / run
     target.mkdir(parents=True, exist_ok=True)
     (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 

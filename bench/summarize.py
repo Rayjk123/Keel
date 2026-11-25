@@ -1,3 +1,4 @@
+import collections
 import glob
 import json
 from pathlib import Path
@@ -11,26 +12,79 @@ BENCHMARKS = [
     ("swebench-lite", "SWE-bench Lite"),
 ]
 BAR = "#0d9488"
+REASONS = [
+    "passed", "wrong-answer", "no-patch", "no-command", "malformed-tool-call", "step-limit",
+    "request-timeout", "task-time-limit", "refused", "model-error", "unsupported", "environment", "not-run",
+]
 
 
-def harbor_outcomes(folder: Path) -> dict[str, bool]:
-    latest: dict[str, tuple[str, bool]] = {}
+def agent_reason(log: Path) -> str | None:
+    try:
+        lines = [line for line in log.read_text(errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return None
+    last = lines[-1] if lines else ""
+    tail = "\n".join(lines[-60:])
+    if last.startswith("Node.js v") or last.startswith("stopped: the model request failed"):
+        if "cyber_policy" in tail or "content filtering" in tail:
+            return "refused"
+        if "TimeoutError" in tail:
+            return "request-timeout"
+        if "error parsing tool call" in tail or "XML syntax error" in tail:
+            return "malformed-tool-call"
+        return "model-error"
+    if last.startswith("stopped: no command in"):
+        return "no-command"
+    if last.startswith("stopped: step limit reached"):
+        return "step-limit"
+    return None
+
+
+def harbor_reason(result: dict, trial: Path) -> str:
+    if ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward") == 1.0:
+        return "passed"
+    exc = result.get("exception_info") or {}
+    kind = exc.get("exception_type")
+    if kind == "ValueError" and "skills" in str(exc.get("exception_message")):
+        return "unsupported"
+    if kind == "AgentSafetyRefusalError":
+        return "refused"
+    agent = agent_reason(trial / "agent" / "keel.txt")
+    if agent in ("refused", "request-timeout", "malformed-tool-call", "model-error"):
+        return agent
+    if kind == "AgentTimeoutError":
+        return "task-time-limit"
+    if agent:
+        return agent
+    if kind in (None, "RewardFileNotFoundError", "VerifierTimeoutError"):
+        return "wrong-answer"
+    return "environment"
+
+
+def harbor_outcomes(folder: Path) -> dict[str, tuple[bool, str]]:
+    latest: dict[str, tuple[str, str]] = {}
     for f in glob.glob(str(folder / "*" / "result.json")) + glob.glob(str(folder / "*" / "*" / "result.json")):
         try:
             d = json.loads(Path(f).read_text())
         except (OSError, ValueError):
             continue
         name = str(d.get("task_name", "")).split("/")[-1]
-        reward = ((d.get("verifier_result") or {}).get("rewards") or {}).get("reward")
         stamp = str(d.get("finished_at") or d.get("started_at") or "")
         if name and stamp and (name not in latest or stamp > latest[name][0]):
-            latest[name] = (stamp, reward == 1.0)
-    return {name: passed for name, (_, passed) in latest.items()}
+            latest[name] = (stamp, harbor_reason(d, Path(f).parent))
+    return {name: (reason == "passed", reason) for name, (_, reason) in latest.items()}
 
 
-def lite_outcomes(folder: Path, tasks: list[str]) -> dict[str, bool]:
+def lite_outcomes(folder: Path, tasks: list[str]) -> dict[str, tuple[bool, str]]:
     resolved: set[str] = set()
+    empty: set[str] = set()
+    unresolved: set[str] = set()
+    errored: set[str] = set()
     found = False
+    try:
+        timed_out = {d["instance_id"] for d in map(json.loads, (folder / "predictions.jsonl").read_text().splitlines()) if d.get("status") == "timeout"}
+    except OSError:
+        timed_out = set()
     for f in glob.glob(str(folder / "*.json")):
         try:
             d = json.loads(Path(f).read_text())
@@ -39,7 +93,22 @@ def lite_outcomes(folder: Path, tasks: list[str]) -> dict[str, bool]:
         if "resolved_ids" in d:
             found = True
             resolved |= set(d["resolved_ids"])
-    return {t: t in resolved for t in tasks} if found else {}
+            empty |= set(d.get("empty_patch_ids", []))
+            unresolved |= set(d.get("unresolved_ids", []))
+            errored |= set(d.get("error_ids", []))
+    if not found:
+        return {}
+    outcomes = {}
+    for t in tasks:
+        if t in resolved:
+            outcomes[t] = (True, "passed")
+        elif t in timed_out:
+            outcomes[t] = (False, "task-time-limit")
+        elif t in empty or t in unresolved:
+            outcomes[t] = (False, agent_reason(folder / t / "keel.txt") or ("no-patch" if t in empty else "wrong-answer"))
+        else:
+            outcomes[t] = (False, "environment" if t in errored else "not-run")
+    return outcomes
 
 
 def summarize_run(run_dir: Path) -> dict:
@@ -55,13 +124,15 @@ def summarize_run(run_dir: Path) -> dict:
         results = {t: outcomes[t] for t in tasks if t in outcomes}
         scores[key] = {
             "title": title,
-            "passed": sum(results.values()),
+            "passed": sum(passed for passed, _ in results.values()),
             "total": len(tasks),
             "finished": len(results),
-            "tasks": {t: results.get(t) for t in tasks},
+            "tasks": {t: results[t][0] if t in results else None for t in tasks},
+            "reasons": {t: results[t][1] if t in results else None for t in tasks},
         }
     return {
         "run": manifest["run"],
+        "trial": run_dir.parent.name,
         "model": manifest["model"],
         "model_name": manifest.get("model_name") or manifest["model"].split("/", 1)[-1],
         "harness": manifest.get("harness", "baseline"),
@@ -83,6 +154,15 @@ def table(runs: list[dict]) -> str:
             cells.append(f"{s['passed']}/{s['total']}" if s["finished"] == s["total"] else f"{s['passed']}/{s['total']} ({s['finished']} done)" if s["finished"] else "pending")
         lines.append(f"| {r['harness']} | {r['model_name']} | {r['effort']} | " + " | ".join(cells) + " |")
     return head + "\n".join(lines) + "\n"
+
+
+def failures(runs: list[dict]) -> str:
+    lines = ["| Run | Passed | Why the rest failed |", "|---|---|---|"]
+    for r in runs:
+        n = collections.Counter(reason for s in r["scores"].values() for reason in s["reasons"].values() if reason)
+        rest = sorted((c for c in n if c != "passed"), key=lambda c: (-n[c], REASONS.index(c)))
+        lines.append(f"| {r['run']} | {n['passed']} | " + " · ".join(f"`{c}` {n[c]}" for c in rest) + " |")
+    return "\n".join(lines) + "\n"
 
 
 def chart(runs: list[dict]) -> str:
@@ -119,12 +199,13 @@ def chart(runs: list[dict]) -> str:
 
 def main() -> None:
     runs = sorted(
-        (summarize_run(p.parent) for p in RUNS.glob("*/manifest.json")),
-        key=lambda r: r["started"],
+        (summarize_run(p.parent) for p in RUNS.glob("*/*/manifest.json")),
+        key=lambda r: (r["started"], r["run"]),
     )
     runs = [r for r in runs if any(s["finished"] for s in r["scores"].values())]
     (RUNS / "results.json").write_text(json.dumps(runs, indent=2) + "\n")
     (RUNS / "scoreboard.md").write_text(table(runs))
+    (RUNS / "failures.md").write_text(failures(runs))
     charts = ROOT / "docs" / "assets" / "charts"
     charts.mkdir(parents=True, exist_ok=True)
     (charts / "scoreboard.svg").write_text(chart(runs))
