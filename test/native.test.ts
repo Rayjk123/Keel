@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 type WireCall = { id: string; type: string; function: { name: string; arguments: string } };
 type WireMessage = { role: string; content: string | null; tool_calls?: WireCall[]; tool_call_id?: string };
 type Wire = { model: string; messages: WireMessage[]; tools: { type: string; function: { name: string } }[] };
-type Reply = { content?: string | null; tool_calls?: unknown[]; status?: number };
+type Reply = { content?: string | null; tool_calls?: unknown[]; status?: number; drop?: boolean };
 
 let script: Reply[] = [];
 let requests: Wire[] = [];
@@ -20,7 +20,11 @@ const server = http.createServer(async (req, res) => {
   for await (const chunk of req) raw += chunk;
   requests.push(JSON.parse(raw));
   auth.push(req.headers.authorization);
-  const { status, ...message } = script.shift() ?? { content: "script exhausted" };
+  const { status, drop, ...message } = script.shift() ?? { content: "script exhausted" };
+  if (drop) {
+    req.socket.destroy();
+    return;
+  }
   if (status) {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: { message: `failure ${status}` } }));
@@ -251,6 +255,11 @@ describe("model errors", () => {
     const result = await run([{ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }, ...end("never")]);
     assert.match(result, /^stopped: the model request failed: 500 .*failure 500/);
     assert.equal(requests.length, 4);
+  });
+
+  test("names the cause of a failed connection", async () => {
+    const result = await run([{ drop: true }, { drop: true }, { drop: true }, { drop: true }, ...end("never")]);
+    assert.match(result, /^stopped: the model request failed: TypeError: fetch failed \(\w+Error: .+\)$/);
   });
 
   test("does not retry a request the server rejects", async () => {

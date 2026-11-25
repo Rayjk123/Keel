@@ -46,6 +46,7 @@ class AgentReason(Case):
         self.assertEqual(self.reason(failed + '{"error":"error parsing tool call: raw=..."}\n'), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "XML syntax error on line 1\n"), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "TimeoutError: aborted\n"), "request-timeout")
+        self.assertEqual(self.reason(failed + "TypeError: fetch failed (HeadersTimeoutError: Headers Timeout Error)\n"), "request-timeout")
         self.assertEqual(self.reason(failed + "Value at 'messages.4.member.content.1.member.toolUse.name' failed\n"), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "This model's maximum context length is 131072 tokens\n"), "context-limit")
         self.assertEqual(self.reason(failed + "overloaded\n"), "model-error")

@@ -219,7 +219,8 @@ async function chat(adapter: Adapter, messages: Message[]): Promise<Message> {
         signal: AbortSignal.timeout(600_000),
       });
     } catch (e) {
-      last = (e as Error).message;
+      const err = e as Error;
+      last = `${err.name}: ${err.message}${err.cause instanceof Error ? ` (${err.cause.name}: ${err.cause.message})` : ""}`;
       console.error(`model request failed (${last}), attempt ${attempt + 1} of ${RETRIES + 1}`);
       continue;
     }
