@@ -1,0 +1,494 @@
+$ pwd && ls -la /app && ls -la /app/src && ls -la /app/data && command -v cobc && cobc -V
+> read /app/src/program.cbl
+$ find /app -maxdepth 3 -type f -printf '%p (%s bytes)\n' | sort && echo '--- INPUT.DAT ---' && (xxd -g1 /app/src/INPUT.DAT || true) && for f in /app/data/*.DAT; do echo "--- $f ---"; xxd -g1 "$f" | head -n 60; done
+$ python3 - <<'PY'
+from pathlib import Path
+for path in [Path('/app/src/INPUT.DAT'), *Path('/app/data').glob('*.DAT')]:
+ print(path, path.stat().st_size, repr(path.read_bytes()))
+PY
+cobc -x -o /tmp/bookforum-oracle /app/src/program.cbl && ls -l /tmp/bookforum-oracle
+$ git status --short && ls -la
+$ tmp=$(mktemp -d) && mkdir -p "$tmp"/src "$tmp"/data && cp /app/src/INPUT.DAT "$tmp"/src/ && cp /app/data/*.DAT "$tmp"/data/ && cd "$tmp" && /tmp/bookforum-oracle; echo "status=$?"; python3 - <<'PY'
+from pathlib import Path
+for p in Path('data').glob('*'):
+ print(p, p.stat().st_size, repr(p.read_bytes()))
+PY
+$ python3 - <<'PY'
+from pathlib import Path
+import tempfile, subprocess
+
+def acct(id, amt): return id.encode()+f'{id} name'.ljust(20).encode()+f'{amt:010d}'.encode()
+def book(id, owner): return id.encode()+f'{id} title'.ljust(20).encode()+owner.encode()
+files = {'ACCOUNTS.DAT':acct('U001',1000)+acct('U002',300), 'BOOKS.DAT':book('B001','U002'), 'TRANSACTIONS.DAT':b''}
+for i in [b'U001U002B0010000000200', b'U001U002B001200', b'U001U002B0012', b'U001U002B001', b'U001U002B0010000000200\n', b'', b'U001U001B0010000000200']:
+ with tempfile.TemporaryDirectory() as td:
+  td=Path(td);(td/'src').mkdir();(td/'data').mkdir()
+  (td/'src'/'INPUT.DAT').write_bytes(i)
+  for n,d in files.items(): (td/'data'/n).write_bytes(d)
+  r = subprocess.run(['/tmp/bookforum-oracle'], cwd=td, capture_output=True, timeout=4)
+  print('\nINPUT:',repr(i), 'OUTPUT:',repr(r.stdout), 'ERROR:',repr(r.stderr),'RETURN:',r.returncode)
+  for f in (td/'data').iterdir(): print(f.name,repr(f.read_bytes()))
+PY
+$ cat > /tmp/explore_bookforum.py <<'PY'
+from pathlib import Path
+import tempfile, subprocess
+
+def account(id, amount, name=None):
+ id=id.encode();return id+((name or id.decode()).ljust(20)[:20]).encode()+str(amount).zfill(10).encode()
+def book(id, owner): return id.encode()+id.ljust(20).encode()+owner.encode()
+basefiles = {'ACCOUNTS.DAT':account('U001',1000)+account('U002',300), 'BOOKS.DAT':book('B001','U002'), 'TRANSACTIONS.DAT':b'PREVIOUS'}
+def run(label, inp, files=None):
+ with tempfile.TemporaryDirectory() as t:
+  td=Path(t);(td/'src').mkdir();(td/'data').mkdir()
+  if inp is not None: (td/'src'/'INPUT.DAT').write_bytes(inp)
+  fs=basefiles.copy()
+  if files: fs.update(files)
+  for n,d in fs.items():
+   if d is not None: (td/'data'/n).write_bytes(d)
+  try:
+   r = subprocess.run(['/tmp/bookforum-oracle'], cwd=td, capture_output=True, timeout=1)
+   print('\n',label, 'in=',repr(inp), 'out=',repr(r.stdout), 'err=',repr(r.stderr),'status=',r.returncode)
+  except subprocess.TimeoutExpired:
+   print('\n',label,'TIMEOUT')
+  for f in (td/'data').iterdir(): print(' ',f.name,repr(f.read_bytes()))
+run('standard', b'U001U002B0010000000200')
+run('short1', b'U001U002B0012')
+run('short2', b'U001U002B00120')
+run('short3', b'U001U002B001200')
+run('short9', b'U001U002B001123456789')
+run('nonnumspace', b'U001U002B001       200')
+run('nonnumtrailspace', b'U001U002B001200       ')
+run('nonnummix', b'U001U002B001ab34$56789')
+run('nonnumsign', b'U001U002B001-000000200')
+run('nonnumnul', b'U001U002B001000\x00000200')
+run('negative', b'U001U002B0010000001001')
+run('negative_big', b'U001U002B0019999999999', {'ACCOUNTS.DAT':account('U001',0)+account('U002',9999999999)})
+run('overflow', b'U001U002B0019999999999', {'ACCOUNTS.DAT':account('U001',9999999999)+account('U002',9999999999)})
+run('buyer_equals_seller', b'U001U001B0010000000200', {'BOOKS.DAT':book('B001','U001')})
+run('duplicates', b'U001U002B0010000000200', {'ACCOUNTS.DAT':account('U001',1000)+account('U002',300)+account('U001',50)+account('U002',9999999999), 'BOOKS.DAT':book('B001','U001')+book('B001','U002')+book('B001','U003')})
+run('no_trans', b'U001U002B0010000000200', {'TRANSACTIONS.DAT':None})
+run('no_acct', b'U001U002B0010000000200', {'ACCOUNTS.DAT':None})
+run('no_books', b'U001U002B0010000000200', {'BOOKS.DAT':None})
+run('missing_input', None)
+run('empty_input', b'')
+run('trailing_partial_acct', b'U001U002B0010000000200', {'ACCOUNTS.DAT':basefiles['ACCOUNTS.DAT']+b'U001abc'})
+run('partial_book', b'U001U002B0010000000200', {'BOOKS.DAT':book('B001','U002')+b'B001abc'})
+PY
+python3 /tmp/explore_bookforum.py
+$ cd /tmp && cobc -C -o bookforum.c /app/src/program.cbl && ls -l bookforum* && sed -n '1,300p' bookforum.c
+$ ls -la /usr/share/doc/gnucobol* /usr/include/libcob*; dpkg -l | grep -i cobol; command -v python3; python3 --version
+$ sed -n '300,650p' /tmp/bookforum.c && cat /tmp/bookforum.c.h && cat /tmp/bookforum.c.l.h
+$ grep -A90 -B5 -n 'Line: 124 ' /tmp/bookforum.c; grep -A60 -n 'Initialize WORKING' /tmp/bookforum.c
+$ cat > /tmp/test_numeric.py <<'PY'
+from pathlib import Path
+import tempfile, subprocess
+
+def go(inp, buyer_balance=b'0000001000', seller_balance=b'0000000300'):
+ inp=inp.ljust(10,b' ')[:10]
+ with tempfile.TemporaryDirectory() as t:
+  d=Path(t);(d/'src').mkdir();(d/'data').mkdir()
+  (d/'src'/'INPUT.DAT').write_bytes(b'U001U002B001'+inp)
+  (d/'data'/'ACCOUNTS.DAT').write_bytes(b'U001'+b' '*20+buyer_balance+b'U002'+b' '*20+seller_balance)
+  (d/'data'/'BOOKS.DAT').write_bytes(b'B001'+b' '*20+b'U002')
+  (d/'data'/'TRANSACTIONS.DAT').write_bytes(b'')
+  r=subprocess.run(['/tmp/bookforum-oracle'], cwd=d, capture_output=True)
+  accounts=(d/'data'/'ACCOUNTS.DAT').read_bytes()
+  trans=(d/'data'/'TRANSACTIONS.DAT').read_bytes()
+  print(repr(inp),repr(buyer_balance),repr(seller_balance), '->', repr(trans[4:14]),repr(accounts[24:34]),repr(accounts[58:68]), 'status',r.returncode,repr(r.stderr))
+for v in [b'0000000 20', b'0 0 000200', b' 000000200', b'000000200 ', b'0000002 00', b'000000000A',b'A000000000',b'000000000P',b'000000000}',b'000000000J',b'000000000{',b'000000000p',b'000000000:',b'000000000-',b'000000000/',b'000000000a',b'000000000\x00',b'0000000\x0020',b'\x00000000200',b'000000020\x00',b'00000000\t2',b'00000000\n2',b'00000000+2',b'00000000-2',b'0000000\xff20']:
+ go(v)
+print('BALANCES')
+for v in [b'          ',b'       200',b'200       ', b'0 0 000200',b'000000000A',b'000000000P',b'000000000}', b'000000000J',b'000000000{',b'000000000p',b'000000000:',b'000000000-',b'000000000/',b'000000000a', b'000000000\x00',b'0000000\x0020',b'00000000\t2',b'00000000\n2',b'00000000-2',b'0000000\xff20']:
+ go(b'0000000001',v,v)
+PY
+python3 /tmp/test_numeric.py
+$ python3 - <<'PY'
+n=18446744073709551616
+print(n%10000000000)
+for x in [18446744073709551613,18446744073709551568,18446744073709551615]:print(x%10**10)
+PY
+apt-cache showsrc gnucobol3 2>&1 | head -n 10; find /usr -type f -iname '*numeric*' -path '*cob*' 2>/dev/null | head
+$ ls -la /etc/apt/sources*; cat /etc/apt/sources.list*/* 2>/dev/null | head -n 100; grep -n -E 'NUMERIC_DISPLAY|COB_TYPE_NUMERIC|cob_get_llint|cob_decimal' /usr/include/libcob/common.h | head -80; command -v curl; command -v wget
+$ curl -L --max-time 10 -s -w '\nhttpstatus=%{http_code}\n' https://raw.githubusercontent.com/OCamlPro/gnucobol/master/libcob/numeric.c | head -n 15
+$ cd /tmp && for f in numeric move fileio; do curl -L --max-time 20 -s "https://sources.debian.org/data/main/g/gnucobol3/3.1.2-5/libcob/$f.c" -o "cob_$f.c"; wc -c "cob_$f.c"; head -n 2 "cob_$f.c"; done
+$ grep -n -E 'display|DISPLAY|cob_move|mov_|numeric|NUMERIC' /tmp/cob_move.c | head -n 130 && grep -n -E 'display|DISPLAY|cob_add|cob_sub|numeric' /tmp/cob_numeric.c | head -n 130 && grep -n -E 'sequential_read|sequential_rewrite|sequential_write' /tmp/cob_fileio.c | head -n 50
+$ sed -n '60,250p' /tmp/cob_move.c; sed -n '334,347p' /tmp/cob_move.c; sed -n '1210,1375p' /tmp/cob_numeric.c; sed -n '1900,1930p' /tmp/cob_numeric.c; sed -n '1870,2038p' /tmp/cob_fileio.c
+$ grep -n -E '#define[[:space:]]+COB_D2I|typedef.*cob_uli_t|COB_LI_IS_LL|cob_decimal_get_field|flag_read_done|SUCCESS_INCOMPLETE|flag_read' /usr/include/libcob/* /tmp/cob_numeric.c /tmp/cob_fileio.c | head -n 100 && sed -n '1730,1835p' /tmp/cob_numeric.c && grep -n 'COB_D2I' /usr/include/libcob/*
+$ grep -R -n -E '#define[[:space:]]+COB_D2I|COB_LI_IS_LL|cob_uli_t' /usr/include/libcob /tmp/cob_numeric.c /tmp/cob_move.c | head -100; sed -n '5490,5665p' /tmp/cob_fileio.c && sed -n '5740,5805p' /tmp/cob_fileio.c; grep -n -E 'status.*04|SUCCESS_INCOMPLETE|COB_EC_I_O' /tmp/cob_fileio.c | head -100
+$ cd /tmp && curl -L --max-time 20 -s https://sources.debian.org/data/main/g/gnucobol3/3.1.2-5/libcob/common.h -o cob_common_internal.h; grep -n -E 'COB_D2I|COB_LI_IS_LL' cob_common_internal.h; grep -n -A50 -B10 '^save_status' cob_fileio.c; sed -n '5690,5765p' cob_fileio.c; grep -R -n 'COB_D2I' /tmp/cob* /usr/include/libcob 2>/dev/null | head -n 40
+$ head -n 80 /tmp/cob_numeric.c; head -n 15 /tmp/cob_common_internal.h; grep -n 'status_exception' -A15 /tmp/cob_fileio.c
+$ cd /tmp && curl -L --max-time 20 -s https://sources.debian.org/data/main/g/gnucobol3/3.1.2-5/libcob/coblocal.h -o cob_coblocal.h; grep -n -E 'COB_D2I|COB_LI_IS_LL' cob_coblocal.h
+$ sed -n '20,60p' /usr/include/libcob/common.h; sed -n '1217,1278p' /tmp/cob_numeric.c && grep -n -B2 -A2 COB_LI_IS_LL /usr/include/libcob/common.h /tmp/cob_coblocal.h; grep -n -A12 -B3 '^cob_decimal_set_field' /tmp/cob_numeric.c
+$ cat > /tmp/test_partial.py <<'PY'
+from pathlib import Path
+import tempfile,subprocess
+
+def acc(i,amt):return i.encode()+b'a'*20+f'{amt:010d}'.encode()
+def book(i,owner):return i.encode()+b'b'*20+owner.encode()
+def run(ac,bc,input=b'U001U002B0010000000001'):
+ with tempfile.TemporaryDirectory() as t:
+  d=Path(t);(d/'src').mkdir();(d/'data').mkdir();(d/'src'/'INPUT.DAT').write_bytes(input)
+  (d/'data'/'ACCOUNTS.DAT').write_bytes(ac);(d/'data'/'BOOKS.DAT').write_bytes(bc);(d/'data'/'TRANSACTIONS.DAT').write_bytes(b'')
+  p=subprocess.run(['/tmp/bookforum-oracle'],cwd=d,capture_output=True)
+  print('ac=',repr(ac),'book=',repr(bc),'inp=',repr(input))
+  print('OUT',repr(p.stdout),'ERR',repr(p.stderr),'STATUS',p.returncode)
+  for name in ('ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT'):print(name,repr((d/'data'/name).read_bytes()))
+ac=acc('U001',100)+acc('U002',200);bc=book('B001','U002')
+for tail in [b'U001abc',b'U002abc',b'U003abc',b'',b'U001',b'U002',b'U00',b'U',b'abc',b'UNRELATED'*5,b'\n',b'U001'+b'a'*20+b'123']:
+ run(ac+tail,bc)
+print('BOOK PARTIAL')
+for tail in [b'B001abc',b'B002abc',b'',b'B001',b'B00',b'B',b'abc',b'\n']:
+ run(ac,bc+tail)
+print('BUYER OR SELLER IN PARTIAL FIRST AND/OR ONLY')
+run(acc('U002',200)+b'U001',bc)
+run(b'U002'+b'a'*20+b'123',bc,input=b'U002U002B0010000000001')
+run(ac, b'B001', input=b'U001U002B0010000000001')
+print('SAME BUYER/SELLER AND PARTIAL:')
+run(acc('U002',200)+acc('U001',100),book('B001','U001'),input=b'U001U001B0010000000001')
+PY
+python3 /tmp/test_partial.py
+$ cat > /tmp/random_numeric.py <<'PY'
+from pathlib import Path
+import tempfile, subprocess, random
+U64=(1<<64)-1
+
+def parse(data, before):
+ size=len(data)
+ if data[0]==255:return 10**size
+ if data[0]==0:return -10**size
+ while len(data)>1 and data[0] & 0xf==0:
+  data=data[1:]
+ if len(data)<(20 if before else 10):
+  n=0
+  for x in data:n = (n*10 + x-48)&U64
+  return n
+ b=bytes((x & 15)+48 for x in data)
+ try:return int(b)
+ except ValueError:return None
+
+def fmt(x):return str(abs(x)%10**10).zfill(10).encode()
+
+def check(amount, balance):
+ with tempfile.TemporaryDirectory() as t:
+  p=Path(t);(p/'src').mkdir();(p/'data').mkdir();(p/'src'/'INPUT.DAT').write_bytes(b'U001U002B001'+amount)
+  (p/'data'/'ACCOUNTS.DAT').write_bytes(b'U001'+b' '*20+balance+b'U002'+b' '*20+balance)
+  (p/'data'/'BOOKS.DAT').write_bytes(b'B001'+b' '*20+b'U002');(p/'data'/'TRANSACTIONS.DAT').touch()
+  r=subprocess.run(['/tmp/bookforum-oracle'],cwd=p,capture_output=True)
+  a=(p/'data'/'ACCOUNTS.DAT').read_bytes();t=(p/'data'/'TRANSACTIONS.DAT').read_bytes()
+  raw=amount.translate(bytes.maketrans(b' \x00', b'00'))
+  for wide in (True,False):
+   a_ws=parse(raw+b'00',wide); a_b=parse(balance,wide)
+   if a_ws is None or a_b is None:continue
+   # in scale cents
+   pred=(fmt(int((a_b*100-a_ws)/100)) if False else fmt((abs(a_b*100-a_ws)//100)*(-1 if a_b*100-a_ws<0 else 1)), fmt((abs(a_b*100+a_ws)//100)*(-1 if a_b*100+a_ws<0 else 1)),raw)
+   if (a[24:34],a[58:68],t[4:14])==pred:return wide, None
+  return None, ((amount,balance),(a[24:34],a[58:68],t[4:14]),pred if 'pred' in locals() else None,r.returncode,r.stderr)
+
+rng=random.Random(1)
+chars=b' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()_-+=.\x00\xff\n\t'
+counts={True:0,False:0,None:0}
+for i in range(500):
+ if i<250:
+  amount=bytes(rng.choice(chars) for _ in range(10)); balance=b'0000001000'
+ else:
+  amount=b'0000000001';balance=bytes(rng.choice(chars) for _ in range(10))
+ mode,err=check(amount,balance);counts[mode]+=1
+ if mode is not True:print('MISMATCH',mode,err)
+print('COUNTS',counts)
+PY
+python3 /tmp/random_numeric.py | head -n 80
+$ cat > /tmp/test_moves.py <<'PY'
+from pathlib import Path
+import tempfile, subprocess
+for c in [0, 1, 9, 10, 31, 32, 47, 48, 49, 57, 58, 65, 80, 112, 123, 255]:
+ for pos in [0,1,9]:
+  amount=bytearray(b'0000000020'); amount[pos]=c; amount=bytes(amount)
+  with tempfile.TemporaryDirectory() as t:
+   d=Path(t);(d/'src').mkdir();(d/'data').mkdir();(d/'src'/'INPUT.DAT').write_bytes(b'U001U002B001'+amount)
+   (d/'data'/'ACCOUNTS.DAT').write_bytes(b'U001'+b' '*20+b'0000001000'+b'U002'+b' '*20+b'0000000300')
+   (d/'data'/'BOOKS.DAT').write_bytes(b'B001'+b' '*20+b'U002');(d/'data'/'TRANSACTIONS.DAT').touch()
+   p=subprocess.run(['/tmp/bookforum-oracle'],cwd=d,capture_output=True)
+   print(c,pos,repr((d/'data'/'TRANSACTIONS.DAT').read_bytes()[4:14]),repr((d/'data'/'ACCOUNTS.DAT').read_bytes()[24:34]))
+PY
+python3 /tmp/test_moves.py
+$ grep -n -A35 -B10 'cob_close (' /tmp/cob_fileio.c | head -n 80; grep -n -E 'flag_operation|memset.*record|record->data' /tmp/cob_fileio.c | tail -n 80
+$ grep -n -A85 -B10 'cob_rewrite' /tmp/cob_fileio.c | sed -n '1,130p'; cat /usr/include/libcob/exception-io.def | head -100; sed -n '1,240p' /tmp/cob_numeric.c | grep -n . | head
+$ python3 - <<'PY'
+import pathlib,tempfile,subprocess
+for suffix in (b'', b'B002',b'B001',b'B001blah'):
+ with tempfile.TemporaryDirectory() as root:
+  p=pathlib.Path(root); (p/'src').mkdir();(p/'data').mkdir()
+  (p/'src/INPUT.DAT').write_bytes(b'AAAABBBBAAAA0000000001')
+  # book title 20 bytes, final book owner AAAA, suffix may leave owner
+  ac=b'AAAA'+b' '*20+b'0000000100'+b'BBBB'+b' '*20+b'0000000100'
+  books=b'AAAA'+b' '*20+b'BBBB'+suffix
+  for n,b in [('ACCOUNTS.DAT',ac),('BOOKS.DAT',books),('TRANSACTIONS.DAT',b'')]: (p/'data'/n).write_bytes(b)
+  r=subprocess.run(['/tmp/bookforum-oracle'],cwd=p,capture_output=True)
+  print(suffix,'stdout',repr(r.stdout),'ret',r.returncode)
+  for n in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:print(n,repr((p/'data'/n).read_bytes()))
+PY
+$ python3 - <<'PY'
+import pathlib,tempfile,subprocess
+for n in range(1,16):
+ with tempfile.TemporaryDirectory() as root:
+  p=pathlib.Path(root); (p/'src').mkdir();(p/'data').mkdir()
+  inp=(b'AAAABBBBAAAA0000000001')[:n];(p/'src/INPUT.DAT').write_bytes(inp)
+  # input initial record defaults bytes 0. ensure accounts IDs for missing fields
+  i=(inp+b'\x00'*22)[:22]; buyer=i[:4]; seller=i[4:8]; bid=i[8:12]
+  ac=buyer+b' '*20+b'0000000100'+seller+b' '*20+b'0000000200'
+  bo=bid+b' '*20+seller
+  for file,b in [('ACCOUNTS.DAT',ac),('BOOKS.DAT',bo),('TRANSACTIONS.DAT',b'')]: (p/'data'/file).write_bytes(b)
+  r=subprocess.run(['/tmp/bookforum-oracle'],cwd=p,capture_output=True)
+  print(n,repr(i),repr(r.stdout),r.returncode,repr((p/'data/TRANSACTIONS.DAT').read_bytes()),repr((p/'data/ACCOUNTS.DAT').read_bytes()[24:34]))
+PY
+> write /app/program.py
+$ python3 /app/program.py; echo "status=$?"; python3 -m py_compile /app/program.py; ls -la /app
+$ ls -la /app/data && python3 - <<'PY'
+from pathlib import Path
+for p in Path('/app/data').glob('*.DAT'): print(p.name, repr(p.read_bytes()))
+PY
+$ cat > /tmp/differential_bookforum.py <<'PY'
+import os, random, subprocess, tempfile, shutil, sys
+from pathlib import Path
+
+rng = random.Random(97241)
+PYTHON = sys.executable
+PROG = Path('/app/program.py')
+ORACLE = '/tmp/bookforum-oracle'
+
+
+def setup(dir, inp, accts, books, trans):
+    (dir/'src').mkdir(exist_ok=True)
+    (dir/'data').mkdir(exist_ok=True)
+    for path, val in [('src/INPUT.DAT', inp),('data/ACCOUNTS.DAT',accts), ('data/BOOKS.DAT',books),('data/TRANSACTIONS.DAT',trans)]:
+        f=dir/path
+        try: f.unlink()
+        except FileNotFoundError: pass
+        if val is not None: f.write_bytes(val)
+
+def execute(dir, python):
+    cmd=[PYTHON,str(dir/'program.py')] if python else [ORACLE]
+    proc=subprocess.run(cmd,cwd=dir,capture_output=True,timeout=2)
+    data=[]
+    for name in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:
+        p=dir/'data'/name
+        data.append(p.read_bytes() if p.exists() else None)
+    return proc.returncode,proc.stdout,proc.stderr,data
+
+ids=[b'U001',b'U002',b'U003',b'    ',b'\0\0\0\0',b'a \0\n',b'0000']
+bids=[b'B001',b'B002',b'    ',b'\0\0\0\0',b'\nB\0?',b'0000']
+chars=b'0123456789  ABCxyz-+\x00\xff\n\t'
+namechars=b'0123456789 ABCxyz-+\x00\xff\n\t'
+def name():return bytes(rng.choice(namechars) for _ in range(20))
+def val():
+    if rng.random()<.7: return f'{rng.randrange(10000000000):010}'.encode()
+    return bytes(rng.choice(chars) for _ in range(10))
+def acc(id,balance=None):return id+name()+(val() if balance is None else balance)
+def book(id,owner):return id+name()+owner
+
+def generate(case):
+    buyer=rng.choice(ids);seller=rng.choice(ids);bid=rng.choice(bids)
+    price=val()
+    inp=buyer+seller+bid+price
+    if rng.random()<.13:
+        inp=inp[:rng.randrange(23)]
+        padded=inp.ljust(22,b'\0')
+        buyer=padded[:4];seller=padded[4:8];bid=padded[8:12]
+    if rng.random()<.1: inp+=bytes(rng.choice(chars) for _ in range(rng.randrange(1,40)))
+    if rng.random()<.01: inp=None
+    account_records=[acc(buyer),acc(seller)]
+    book_records=[book(bid,seller)]
+    for _ in range(rng.randrange(5)):
+        account_records.append(acc(rng.choice([buyer,seller,*ids])))
+    for _ in range(rng.randrange(5)):
+        book_records.append(book(rng.choice([bid,*bids]),rng.choice([buyer,seller,*ids])))
+    rng.shuffle(account_records);rng.shuffle(book_records)
+    if rng.random()<.18: account_records=[x for x in account_records if x[:4]!=buyer]
+    if rng.random()<.1: account_records=[x for x in account_records if x[:4]!=seller]
+    if rng.random()<.15: book_records=[x for x in book_records if x[:4]!=bid]
+    if rng.random()<.12: book_records=[x[:24]+buyer if x[:4]==bid else x for x in book_records]
+    ac=b''.join(account_records);bc=b''.join(book_records)
+    # Partial records may retain their unmatched suffix from the prior record.
+    if rng.random()<.3:
+        r=acc(rng.choice([buyer,seller,*ids])); ac+=r[:rng.randrange(1,34)]
+    if rng.random()<.3:
+        r=book(rng.choice([bid,*bids]),rng.choice(ids)); bc+=r[:rng.randrange(1,28)]
+    trans=bytes(rng.choice(chars) for _ in range(rng.randrange(60)))
+    if rng.random()<.01: ac=None
+    if rng.random()<.01: bc=None
+    if rng.random()<.05: trans=None
+    return inp,ac,bc,trans
+
+
+def cases():
+    yield (b'', b'', b'', b'')
+    yield (None, b'', b'', b'')
+    yield (b'U001U002B001200', b'U001'+b'A'*20+b'0000001000'+b'U002'+b'B'*20+b'0000000300', b'B001'+b'T'*20+b'U002', b'orig')
+    for amount in [0,1,2,99,100,999,1000,1001,9999999998,9999999999]:
+      for a in [0,1,999,1000,9999999999]:
+        for b in [0,1,9999999999]:
+         yield (b'U001U002B001'+f'{amount:010}'.encode(), b'U001'+b' '*20+f'{a:010}'.encode()+b'U002'+b' '*20+f'{b:010}'.encode(),b'B001'+b' '*20+b'U002',b'')
+    for c in range(256):
+        for pos in [0,1,9]:
+            amount=bytearray(b'0000000020');amount[pos]=c
+            yield (b'U001U002B001'+bytes(amount),b'U001'+b' '*20+b'0000001000'+b'U002'+b' '*20+b'0000000300', b'B001'+b' '*20+b'U002',b'')
+    for case in range(2000): yield generate(case)
+
+with tempfile.TemporaryDirectory(prefix='bookforum-differential-') as tmp:
+    tmp=Path(tmp);o=tmp/'oracle';p=tmp/'python';o.mkdir();p.mkdir();shutil.copy(PROG,p/'program.py')
+    count=0
+    for case in cases():
+        count+=1
+        setup(o,*case);setup(p,*case)
+        a=execute(o,False);b=execute(p,True)
+        if a!=b:
+            print('MISMATCH case',count)
+            for name,value in zip(['INPUT','ACCOUNTS','BOOKS','TRANSACTIONS'],case):print('BEFORE',name,repr(value))
+            for label,result in [('ORACLE',a),('PYTHON',b)]:
+                print(label,'STATUS',result[0],'STDOUT',repr(result[1]),'STDERR',repr(result[2]))
+                for name,value in zip(['ACCOUNTS','BOOKS','TRANSACTIONS'],result[3]):print(label,name,repr(value))
+            sys.exit(1)
+        if count%500==0:print('PASS',count,flush=True)
+    print('ALL PASSED',count)
+PY
+python3 /tmp/differential_bookforum.py
+$ cat > /tmp/differential_focus.py <<'PY'
+import random, tempfile, subprocess, sys, shutil
+from pathlib import Path
+rng=random.Random(683849)
+ids=[b'U001',b'U002',b'    ',b'\0\0\0\0',b'\xff\xff\xff\xff',b' A\x00?']
+bookids=[b'B001',b'B002',b'    ',b'\0\0\0\0',b'\xff\xff\xff\xff']
+
+def rbytes(n):return bytes(rng.randrange(256) for i in range(n))
+def val():
+ t=rng.randrange(4)
+ if t==0: return b'\x00'+rbytes(9)
+ if t==1: return b'\xff'+rbytes(9)
+ if t==2: return bytes(rng.choice(b'0123456789') for i in range(10))
+ return rbytes(10)
+def acc(i):return i+rbytes(20)+val()
+def book(i,o):return i+rbytes(20)+o
+def run(root,python):
+ r=subprocess.run([sys.executable,str(root/'program.py')] if python else ['/tmp/bookforum-oracle'],cwd=root,capture_output=True)
+ return r.returncode,r.stdout,r.stderr,[(root/'data'/f).read_bytes() for f in ('ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT')]
+def put(root,case):
+ for name,v in zip(['src/INPUT.DAT','data/ACCOUNTS.DAT','data/BOOKS.DAT','data/TRANSACTIONS.DAT'],case):(root/name).write_bytes(v)
+with tempfile.TemporaryDirectory() as d:
+ d=Path(d);a=d/'a';b=d/'b'
+ for x in (a,b):x.mkdir();(x/'src').mkdir();(x/'data').mkdir()
+ shutil.copy('/app/program.py',b/'program.py')
+ for i in range(4000):
+  buyer=rng.choice(ids);seller=rng.choice(ids);bid=rng.choice(bookids)
+  amount=val();inp=buyer+seller+bid+amount
+  if rng.random()<.1:
+   inp=inp[:rng.randrange(1,22)]; padded=inp.ljust(22,b'\x00');buyer=padded[:4];seller=padded[4:8];bid=padded[8:12]
+  ac=[acc(buyer),acc(seller)]
+  bc=[book(bid,seller)]
+  for j in range(rng.randrange(6)):ac.append(acc(rng.choice([buyer,seller,*ids])))
+  for j in range(rng.randrange(6)):bc.append(book(rng.choice([bid,*bookids]),rng.choice([buyer,seller,*ids])))
+  rng.shuffle(ac);rng.shuffle(bc)
+  ac=b''.join(ac);bc=b''.join(bc)
+  if rng.random()<.7:
+   tail=acc(rng.choice([buyer,seller,*ids])); ac+=tail[:rng.randrange(1,34)]
+  if rng.random()<.7:
+   tail=book(rng.choice([bid,*bookids]),rng.choice([buyer,seller,*ids]));bc+=tail[:rng.randrange(1,28)]
+  case=(inp,ac,bc,rbytes(rng.randrange(30)))
+  put(a,case);put(b,case);ref=run(a,False);actual=run(b,True)
+  if ref!=actual:
+   print('MISMATCH',i)
+   for k,v in zip(('inp','ac','bc','trans'),case):print(k,repr(v))
+   for k,v in [('ref',ref),('got',actual)]:print(k,repr(v))
+   sys.exit(1)
+  if i%1000==0:print('PASS',i,flush=True)
+ print('ALL PASSED',i+1)
+PY
+python3 /tmp/differential_focus.py
+$ ls -la /app && python3 - <<'PY'
+from pathlib import Path
+for p in Path('/app/data').glob('*.DAT'): print(p.name, repr(p.read_bytes()))
+PY
+python3 -m py_compile /app/program.py && rm -rf /app/__pycache__
+> read /app/program.py
+$ command -v strace || true; sed -n '1270,1380p' /tmp/cob_fileio.c | head -100; grep -n -A60 -B10 'COB_OPEN_EXTEND' /tmp/cob_fileio.c | head -200
+$ python3 - <<'PY'
+from pathlib import Path
+print('python script bytes:',Path('/app/program.py').stat().st_size)
+PY
+ls -la /app
+$ sed -n '1395,1478p' /tmp/cob_fileio.c; grep -n -B12 -A40 'nonexistent = ' /tmp/cob_fileio.c | head -150
+$ python3 - <<'PY'
+import pathlib,tempfile,subprocess,os
+for target in ['INPUT.DAT','ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:
+ with tempfile.TemporaryDirectory() as td:
+  p=pathlib.Path(td);(p/'src').mkdir();(p/'data').mkdir()
+  files={'src/INPUT.DAT':b'U001U002B0010000000001','data/ACCOUNTS.DAT':b'U001'+b' '*20+b'0000000100'+b'U002'+b' '*20+b'0000000200','data/BOOKS.DAT':b'B001'+b' '*20+b'U002','data/TRANSACTIONS.DAT':b''}
+  for name,val in files.items():
+   if target not in name:(p/name).write_bytes(val)
+   else: os.symlink('/nonexistent/foobar',p/name)
+  r=subprocess.run(['/tmp/bookforum-oracle'],cwd=p,capture_output=True)
+  print(target,repr(r.stderr),r.returncode)
+  for name in files:
+   if target not in name: print(name,repr((p/name).read_bytes()))
+PY
+$ set -eu
+TMP=$(mktemp -d)
+chmod 777 "$TMP"; mkdir "$TMP/src" "$TMP/data"; chmod 777 "$TMP/src" "$TMP/data"
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]); (p/'src/INPUT.DAT').write_bytes(b'U001U002B0010000000001'); (p/'data/ACCOUNTS.DAT').write_bytes(b'U001'+b' '*20+b'0000000100'+b'U002'+b' '*20+b'0000000200'); (p/'data/BOOKS.DAT').write_bytes(b'B001'+b' '*20+b'U002'); (p/'data/TRANSACTIONS.DAT').write_bytes(b'');
+PY
+chmod 666 "$TMP"/src/* "$TMP"/data/*; chmod 222 "$TMP/data/TRANSACTIONS.DAT"
+cd "$TMP"
+if command -v runuser >/dev/null; then runuser -u nobody -- /tmp/bookforum-oracle || true; fi
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]);
+for n in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:print(n,repr((p/'data'/n).read_bytes()))
+PY
+rm -rf "$TMP"
+> edit /app/program.py
+$ python3 /tmp/differential_bookforum.py
+$ python3 /tmp/differential_focus.py
+$ python3 /app/program.py; python3 -m py_compile /app/program.py && rm -rf /app/__pycache__
+$ python3 - <<'PY'
+import pathlib,tempfile,subprocess
+cases=[
+ (b'X001U002B0010000000001',b'X001'+b' '*20+b'0000000001'+b'U002'+b' '*20+b'0000000001',b'B001'+b' '*20+b'U002'),
+ (b'U001U002B0010000000001',b'U001'+b' '*20+b'0000000001'+b'U002'+b' '*20+b'0000000001',b'B001'+b' '*20+b'U002'),
+]
+for idx,(inp,ac,bo) in enumerate(cases):
+ with tempfile.TemporaryDirectory() as td:
+  p=pathlib.Path(td);(p/'src').mkdir();(p/'data').mkdir();(p/'src/INPUT.DAT').write_bytes(inp);(p/'data/ACCOUNTS.DAT').write_bytes(ac);(p/'data/BOOKS.DAT').write_bytes(bo)
+  for name in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:(p/'data'/name).chmod(0) if (p/'data'/name).exists() else None
+  r=subprocess.run(['/tmp/bookforum-oracle'],cwd=p,capture_output=True);print(idx,repr(r.stdout),repr(r.stderr))
+PY
+$ set -eu
+TMP=$(mktemp -d)
+chmod 777 "$TMP"; mkdir "$TMP/src" "$TMP/data"; chmod 777 "$TMP/src" "$TMP/data"
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]); (p/'src/INPUT.DAT').write_bytes(b'U001U002B0010000000001'); (p/'data/ACCOUNTS.DAT').write_bytes(b'U001'+b' '*20+b'0000000100'+b'U002'+b' '*20+b'0000000200'); (p/'data/BOOKS.DAT').write_bytes(b'B001'+b' '*20+b'U002'); (p/'data/TRANSACTIONS.DAT').write_bytes(b'');
+PY
+chmod 666 "$TMP"/src/* "$TMP"/data/*; chmod 222 "$TMP/data/TRANSACTIONS.DAT"
+cp /app/program.py "$TMP/program.py"
+cd "$TMP"
+runuser -u nobody -- python3 "$TMP/program.py" > /tmp/py_perm_stdout 2> /tmp/py_perm_stderr || true
+printf 'python stdout: '; cat /tmp/py_perm_stdout; printf 'python stderr: '; cat /tmp/py_perm_stderr
+python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]);
+for n in ['ACCOUNTS.DAT','BOOKS.DAT','TRANSACTIONS.DAT']:print(n,repr((p/'data'/n).read_bytes()))
+PY
+rm -rf "$TMP"
+$ chmod +x /app/program.py && cd /tmp && /app/program.py && ls -l /app/program.py
+$ python3 - <<'PY'
+from pathlib import Path
+for p in sorted(Path('/app/data').glob('*.DAT')):
+    print(f'{p.name}: {p.stat().st_size} bytes')
+print('Input:',repr(Path('/app/src/INPUT.DAT').read_bytes()))
+PY
+Implemented `/app/program.py` and verified it against GnuCOBOL across 6,921 test cases.

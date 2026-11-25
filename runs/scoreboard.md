@@ -29,7 +29,7 @@
 | native-tools | us.anthropic.claude-opus-5-5 | default | 1/10 | 8/10 | 9/10 | 9/10 |
 | native-tools | us.openai.gpt-6.2-astra | default | 6/10 | 8/10 | 6/10 | 8/10 |
 | native-tools | us.openai.gpt-6.2-sol | default | 3/10 | 7/10 | 8/10 | 9/10 |
-| native-tools | us.openai.gpt-6.1-terra | default | 2/10 | 8/10 | 5/10 | pending |
+| native-tools | us.openai.gpt-6.1-terra | default | 2/10 | 8/10 | 5/10 | 8/10 |
 | native-tools | openai.gpt-oss-20b-1:0 | default | 0/10 | 1/10 | 2/10 | 2/10 |
 | native-tools | openai.gpt-oss-120b-1:0 | default | 0/10 | 4/10 | 4/10 | 5/10 |
 | native-tools | qwen.qwen3-coder-30b-a3b-v1:0 | default | 0/10 | 2/10 | 1/10 | 4/10 |
@@ -40,4 +40,18 @@
 | native-tools | zai.glm-4.7-flash | default | 0/10 | 3/10 | 2/10 | 2/10 |
 | baseline | openai.gpt-oss-120b-1:0 | high | 0/10 | 3/10 | 3/10 | 1/10 |
 | baseline | moonshotai.kimi-k2.5 | high | 0/10 | 6/10 | 6/10 | 6/10 |
+| baseline | us.xai.grok-4.7 | xhigh | 1/10 | 8/10 | 9/10 | 7/10 |
+| baseline | zai.glm-5 | high | 0/10 | 8/10 | 5/10 | 5/10 |
 | baseline | zai.glm-4.7-flash | high | 0/10 | 2/10 | 3/10 | 3/10 |
+| native-tools | us.anthropic.claude-haiku-5-5 | max | 0/10 | 6/10 | 5/10 | 6/10 |
+| native-tools | us.anthropic.claude-sonnet-5-5 | max | 0/10 | 2/10 | 8/10 | 2/10 |
+| native-tools | us.anthropic.claude-opus-5-5 | max | 0/10 | 2/10 | 9/10 | 5/10 |
+| native-tools | us.openai.gpt-6.2-astra | max | 6/10 | 8/10 | 8/10 | 9/10 |
+| native-tools | us.openai.gpt-6.2-sol | max | 6/10 | 8/10 | 7/10 | 8/10 |
+| native-tools | us.openai.gpt-6.1-terra | max | 3/10 | 8/10 | 9/10 | 9/10 |
+| native-tools | openai.gpt-oss-20b-1:0 | high | 0/10 | 2/10 | 1/10 | 1/10 |
+| native-tools | openai.gpt-oss-120b-1:0 | high | 0/10 | 4/10 | 5/10 | 4/10 |
+| native-tools | moonshotai.kimi-k2.5 | high | 0/10 | 4/10 | 5/10 | 6/10 |
+| native-tools | us.xai.grok-4.7 | xhigh | 2/10 | 6/10 | 8/10 | 7/10 |
+| native-tools | zai.glm-5 | high | 0/10 | 8/10 | 4/10 | 6/10 |
+| native-tools | zai.glm-4.7-flash | high | 0/10 | 2/10 | 2/10 | 3/10 |

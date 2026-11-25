@@ -1,0 +1,237 @@
+2026-11-25 08:50:54,736 - INFO - Creating container for astropy__astropy-12907...
+2026-11-25 08:50:54,792 - INFO - Container for astropy__astropy-12907 created: 5eabd05109ef2146c27c68bfbe1611cdd7fe0f9dda8145e1b035c431ebae5ff1
+2026-11-25 08:50:55,850 - INFO - Container for astropy__astropy-12907 started: 5eabd05109ef2146c27c68bfbe1611cdd7fe0f9dda8145e1b035c431ebae5ff1
+2026-11-25 08:50:55,851 - INFO - Intermediate patch for astropy__astropy-12907 written to logs/run_evaluation/claude-opus-5.5-native-tools-max/keel/astropy__astropy-12907/patch.diff, now applying to container...
+2026-11-25 08:50:55,979 - INFO - >>>>> Applied Patch:
+Checking patch astropy/modeling/separable.py...
+Checking patch astropy/modeling/tests/test_separable.py...
+Applied patch astropy/modeling/separable.py cleanly.
+Applied patch astropy/modeling/tests/test_separable.py cleanly.
+
+2026-11-25 08:50:56,387 - INFO - Git diff before:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..2a5bab543 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -212,7 +212,9 @@ def _coord_matrix(model, pos, noutp):
+         for i in range(model.n_inputs):
+             mat[i, i] = 1
+         if pos == 'right':
+-            mat = np.roll(mat, (noutp - model.n_outputs))
++            # Shift the rows (not the flattened array) so that the model
++            # occupies the last ``model.n_outputs`` rows.
++            mat = np.roll(mat, (noutp - model.n_outputs), axis=0)
+     return mat
+ 
+ 
+@@ -242,7 +244,7 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+ 
+diff --git a/astropy/modeling/tests/test_separable.py b/astropy/modeling/tests/test_separable.py
+index 8dfe5c862..9dba4f9a0 100755
+--- a/astropy/modeling/tests/test_separable.py
++++ b/astropy/modeling/tests/test_separable.py
+@@ -26,6 +26,15 @@ rot = models.Rotation2D(2, name='rotation')
+ p2 = models.Polynomial2D(1, name='p2')
+ p22 = models.Polynomial2D(2, name='p22')
+ p1 = models.Polynomial1D(1, name='p1')
++# A separable model with more than one input (phi = x, theta = y)
++car = models.Pix2Sky_CAR(name='car')
++
++
++cm_4d_expected = (np.array([False, False, True, True]),
++                  np.array([[True,  True,  False, False],
++                            [True,  True,  False, False],
++                            [False, False, True,  False],
++                            [False, False, False, True]]))
+ 
+ 
+ compound_models = {
+@@ -52,7 +61,48 @@ compound_models = {
+     'cm7': (map2 | p2 & sh1,
+             (np.array([False, True]),
+              np.array([[True, False], [False, True]]))
+-            )
++            ),
++    # Nested compound models: the result must not depend on how the
++    # '&' operations are grouped.
++    'cm8': (rot & (sh1 & sh2), cm_4d_expected),
++    'cm9': (rot & sh1 & sh2, cm_4d_expected),
++    'cm10': ((rot & sh1) & sh2, cm_4d_expected),
++    'cm11': (rot & sh1 & (scl1 & scl2),
++             (np.array([False, False, True, True, True]),
++              np.array([[True,  True,  False, False, False],
++                        [True,  True,  False, False, False],
++                        [False, False, True,  False, False],
++                        [False, False, False, True,  False],
++                        [False, False, False, False, True]]))
++             ),
++    'cm12': (sh1 & (map2 | rot & scl1),
++             (np.array([True, False, False, True]),
++              np.array([[True,  False, False],
++                        [False, True,  False],
++                        [False, True,  False],
++                        [False, False, True]]))
++             ),
++    'cm13': ((map2 | rot & scl1) & sh1,
++             (np.array([False, False, True, True]),
++              np.array([[True,  False, False],
++                        [True,  False, False],
++                        [False, True,  False],
++                        [False, False, True]]))
++             ),
++    # Simple models whose outputs do not all depend on all of their inputs,
++    # on the right hand side of '&'.
++    'cm14': (sh1 & Mapping((1, 0)),
++             (np.array([True, True, True]),
++              np.array([[True,  False, False],
++                        [False, False, True],
++                        [False, True,  False]]))
++             ),
++    'cm15': (sh1 & car,
++             (np.array([True, True, True]),
++              np.array([[True,  False, False],
++                        [False, True,  False],
++                        [False, False, True]]))
++             ),
+ }
+ 
+ 
+@@ -75,6 +125,11 @@ def test_coord_matrix():
+     assert_allclose(np.array([[1], [1]]), c)
+     c = _coord_matrix(map3, 'left', 3)
+     assert_allclose(np.array([[1], [1], [0]]), c)
++    # separable models with several inputs are shifted along the outputs only
++    c = _coord_matrix(car, 'left', 3)
++    assert_allclose(np.array([[1, 0], [0, 1], [0, 0]]), c)
++    c = _coord_matrix(car, 'right', 3)
++    assert_allclose(np.array([[0, 0], [1, 0], [0, 1]]), c)
+ 
+ 
+ def test_cdot():
+@@ -111,6 +166,32 @@ def test_cstack():
+                               [1, 1, 0],
+                               [0, 0, 1]])
+                     )
++    result = _cstack(sh1, car)
++    assert_allclose(result, np.eye(3))
++
++    # coord_matrix arrays (e.g. from nested compound models) must keep their
++    # structure on either side of the operator.
++    result = _cstack(rot, np.eye(2))
++    assert_allclose(result,
++                    np.array([[1, 1, 0, 0],
++                              [1, 1, 0, 0],
++                              [0, 0, 1, 0],
++                              [0, 0, 0, 1]])
++                    )
++    result = _cstack(np.eye(2), rot)
++    assert_allclose(result,
++                    np.array([[1, 0, 0, 0],
++                              [0, 1, 0, 0],
++                              [0, 0, 1, 1],
++                              [0, 0, 1, 1]])
++                    )
++    result = _cstack(np.array([[0, 1], [1, 0]]), np.array([[1, 0], [1, 0]]))
++    assert_allclose(result,
++                    np.array([[0, 1, 0, 0],
++                              [1, 0, 0, 0],
++                              [0, 0, 1, 0],
++                              [0, 0, 1, 0]])
++                    )
+ 
+ 
+ def test_arith_oper():
+@@ -135,6 +216,51 @@ def test_separable(compound_model, result):
+     assert_allclose(separability_matrix(compound_model), result[1])
+ 
+ 
++def test_separability_matrix_nested_compound_model():
++    """
++    The separability matrix should not depend on how the compound model
++    is nested.
++    """
++    cm = models.Linear1D(10) & models.Linear1D(5)
++    assert_allclose(separability_matrix(cm), np.eye(2, dtype=bool))
++
++    expected = np.array([[True,  True,  False, False],
++                         [True,  True,  False, False],
++                         [False, False, True,  False],
++                         [False, False, False, True]])
++
++    flat = models.Pix2Sky_TAN() & models.Linear1D(10) & models.Linear1D(5)
++    assert_allclose(separability_matrix(flat), expected)
++
++    nested = models.Pix2Sky_TAN() & cm
++    assert_allclose(separability_matrix(nested), expected)
++    assert_allclose(is_separable(nested), [False, False, True, True])
++
++    # Deeper nesting on the right hand side
++    nested = models.Pix2Sky_TAN() & (models.Linear1D(10) & cm)
++    expected = np.array([[True,  True,  False, False, False],
++                         [True,  True,  False, False, False],
++                         [False, False, True,  False, False],
++                         [False, False, False, True,  False],
++                         [False, False, False, False, True]])
++    assert_allclose(separability_matrix(nested), expected)
++
++
++def test_separability_matrix_custom_on_right():
++    """
++    A separability matrix provided by ``_calculate_separability_matrix``
++    must be preserved when the model is the right operand of '&'.
++    """
++    class ModelCustom(models.Shift):
++        def _calculate_separability_matrix(self):
++            return np.array([[0]])
++
++    result = separability_matrix(ModelCustom(1) & sh1)
++    assert_allclose(result, np.array([[False, False], [False, True]]))
++    result = separability_matrix(sh1 & ModelCustom(1))
++    assert_allclose(result, np.array([[True, False], [False, False]]))
++
++
+ def test_custom_model_separable():
+     @custom_model
+     def model_a(x):
+2026-11-25 08:50:56,387 - INFO - Eval script for astropy__astropy-12907 written to logs/run_evaluation/claude-opus-5.5-native-tools-max/keel/astropy__astropy-12907/eval.sh; copying to container...
+2026-11-25 08:51:51,607 - INFO - Test runtime: 55.18 seconds
+2026-11-25 08:51:51,608 - INFO - Test output for astropy__astropy-12907 written to logs/run_evaluation/claude-opus-5.5-native-tools-max/keel/astropy__astropy-12907/test_output.txt
+2026-11-25 08:51:51,645 - INFO - Git diff after:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..2a5bab543 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -212,7 +212,9 @@ def _coord_matrix(model, pos, noutp):
+         for i in range(model.n_inputs):
+             mat[i, i] = 1
+         if pos == 'right':
+-            mat = np.roll(mat, (noutp - model.n_outputs))
++            # Shift the rows (not the flattened array) so that the model
++            # occupies the last ``model.n_outputs`` rows.
++            mat = np.roll(mat, (noutp - model.n_outputs), axis=0)
+     return mat
+ 
+ 
+@@ -242,7 +244,7 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+2026-11-25 08:51:51,645 - INFO - Git diff changed after running eval script
+2026-11-25 08:51:51,645 - INFO - Grading answer for astropy__astropy-12907...
+2026-11-25 08:51:51,649 - INFO - report: {'astropy__astropy-12907': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model9-result9]'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_coord_matrix', 'astropy/modeling/tests/test_separable.py::test_cdot', 'astropy/modeling/tests/test_separable.py::test_cstack', 'astropy/modeling/tests/test_separable.py::test_arith_oper', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model0-result0]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model1-result1]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model2-result2]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model3-result3]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model4-result4]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model5-result5]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model7-result7]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model8-result8]', 'astropy/modeling/tests/test_separable.py::test_custom_model_separable'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-12907: resolved: True
+2026-11-25 08:51:51,649 - INFO - Attempting to stop container sweb.eval.astropy__astropy-12907.claude-opus-5.5-native-tools-max...
+2026-11-25 08:52:07,123 - INFO - Container sweb.eval.astropy__astropy-12907.claude-opus-5.5-native-tools-max stopped successfully.
+2026-11-25 08:52:07,123 - INFO - Attempting to remove container sweb.eval.astropy__astropy-12907.claude-opus-5.5-native-tools-max...
+2026-11-25 08:52:07,159 - INFO - Container sweb.eval.astropy__astropy-12907.claude-opus-5.5-native-tools-max removed successfully.

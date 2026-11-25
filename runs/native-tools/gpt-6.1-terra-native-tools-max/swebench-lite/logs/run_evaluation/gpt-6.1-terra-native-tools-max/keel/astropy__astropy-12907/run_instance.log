@@ -1,0 +1,264 @@
+2026-11-25 07:36:47,549 - INFO - Creating container for astropy__astropy-12907...
+2026-11-25 07:36:47,585 - INFO - Container for astropy__astropy-12907 created: 0acf3f936c53068c9914b646b9dec6376560f04fb48976d742eb88cb591751ee
+2026-11-25 07:36:48,291 - INFO - Container for astropy__astropy-12907 started: 0acf3f936c53068c9914b646b9dec6376560f04fb48976d742eb88cb591751ee
+2026-11-25 07:36:48,291 - INFO - Intermediate patch for astropy__astropy-12907 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/astropy__astropy-12907/patch.diff, now applying to container...
+2026-11-25 07:36:48,357 - INFO - >>>>> Applied Patch:
+Checking patch astropy/modeling/separable.py...
+Checking patch astropy/modeling/tests/test_separable.py...
+Checking patch docs/changes/modeling/0.bugfix.rst...
+Applied patch astropy/modeling/separable.py cleanly.
+Applied patch astropy/modeling/tests/test_separable.py cleanly.
+Applied patch docs/changes/modeling/0.bugfix.rst cleanly.
+
+2026-11-25 07:36:48,706 - INFO - Git diff before:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..895578cd3 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -242,7 +242,8 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        # Preserve the dependencies already computed for the right subtree.
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+ 
+diff --git a/astropy/modeling/tests/test_separable.py b/astropy/modeling/tests/test_separable.py
+index 8dfe5c862..6882f772c 100755
+--- a/astropy/modeling/tests/test_separable.py
++++ b/astropy/modeling/tests/test_separable.py
+@@ -6,13 +6,13 @@ Test separability of models.
+ # pylint: disable=invalid-name
+ import pytest
+ import numpy as np
+-from numpy.testing import assert_allclose
++from numpy.testing import assert_allclose, assert_array_equal
+ 
+ from astropy.modeling import custom_model, models
+ from astropy.modeling.models import Mapping
+ from astropy.modeling.separable import (_coord_matrix, is_separable, _cdot,
+                                         _cstack, _arith_oper, separability_matrix)
+-from astropy.modeling.core import ModelDefinitionError
++from astropy.modeling.core import Model, ModelDefinitionError
+ 
+ 
+ sh1 = models.Shift(1, name='shift1')
+@@ -113,6 +113,23 @@ def test_cstack():
+                     )
+ 
+ 
++def test_cstack_preserves_array_dependencies():
++    left = np.array([[1, 0], [1, 1], [0, 1]])
++    right = np.array([[0, 2, 0], [1, 0, 3], [0, 0, 0]])
++    expected = np.array([[1, 0, 0, 0, 0],
++                         [1, 1, 0, 0, 0],
++                         [0, 1, 0, 0, 0],
++                         [0, 0, 0, 2, 0],
++                         [0, 0, 1, 0, 3],
++                         [0, 0, 0, 0, 0]])
++    assert_array_equal(_cstack(left, right), expected)
++
++    # A right operand with no inputs contributes output rows, but no columns.
++    without_inputs = np.empty((1, 0))
++    assert_array_equal(_cstack(left, without_inputs),
++                       [[1, 0], [1, 1], [0, 1], [0, 0]])
++
++
+ def test_arith_oper():
+     # Models as inputs
+     result = _arith_oper(sh1, scl1)
+@@ -135,6 +152,167 @@ def test_separable(compound_model, result):
+     assert_allclose(separability_matrix(compound_model), result[1])
+ 
+ 
++@pytest.mark.parametrize('right_nested', [False, True], ids=['left-grouped', 'right-grouped'])
++@pytest.mark.parametrize('projection_first', [True, False],
++                         ids=['projection-first', 'projection-last'])
++def test_nested_compound_separability(right_nested, projection_first):
++    projection = models.Pix2Sky_TAN()
++    linear1 = models.Linear1D(10)
++    linear2 = models.Linear1D(5)
++
++    assert_array_equal(separability_matrix(linear1 & linear2),
++                       [[True, False], [False, True]])
++
++    if projection_first:
++        first, second, third = projection, linear1, linear2
++        expected_matrix = [[True, True, False, False],
++                           [True, True, False, False],
++                           [False, False, True, False],
++                           [False, False, False, True]]
++        expected_separable = [False, False, True, True]
++    else:
++        first, second, third = linear1, linear2, projection
++        expected_matrix = [[True, False, False, False],
++                           [False, True, False, False],
++                           [False, False, True, True],
++                           [False, False, True, True]]
++        expected_separable = [True, True, False, False]
++
++    if right_nested:
++        model = first & (second & third)
++    else:
++        model = (first & second) & third
++    matrix = separability_matrix(model)
++    assert matrix.dtype == np.bool_
++    assert_array_equal(matrix, expected_matrix)
++    assert_array_equal(is_separable(model), expected_separable)
++
++
++def test_nested_compounds_on_both_sides():
++    model = ((models.Pix2Sky_TAN() & models.Linear1D(10)) &
++             (models.Linear1D(5) & models.Shift(1)))
++    expected = np.eye(5, dtype=bool)
++    expected[:2, :2] = True
++    assert_array_equal(separability_matrix(model), expected)
++    assert_array_equal(is_separable(model), [False, False, True, True, True])
++
++
++def test_nested_compound_without_inputs():
++    class NoInput(Model):
++        n_inputs = 0
++        n_outputs = 1
++        _separable = False
++
++        @staticmethod
++        def evaluate():
++            return 1
++
++    model = models.Shift(1) & (NoInput() & models.Linear1D(5))
++    assert_array_equal(separability_matrix(model), [[True, False],
++                                                    [False, False],
++                                                    [False, True]])
++    assert_array_equal(is_separable(model), [True, False, True])
++
++
++@pytest.mark.parametrize('right_nested', [False, True], ids=['left-grouped', 'right-grouped'])
++@pytest.mark.parametrize(('mapping', 'n_inputs', 'expected_mapping'), [
++    pytest.param((2, 0, 2), 4, [[False, False, True, False],
++                                [True, False, False, False],
++                                [False, False, True, False]], id='dropped-input'),
++    pytest.param((1, 0, 1, 0), 2, [[False, True], [True, False],
++                                   [False, True], [True, False]], id='duplicated-input'),
++])
++def test_nested_mapping_separability(right_nested, mapping, n_inputs, expected_mapping):
++    projection = models.Pix2Sky_TAN()
++    mapper = models.Mapping(mapping, n_inputs=n_inputs)
++    linear = models.Linear1D(5)
++    if right_nested:
++        model = projection & (mapper & linear)
++    else:
++        model = (projection & mapper) & linear
++
++    # The mapping may have more outputs than inputs or leave inputs unused.
++    expected = np.zeros((mapper.n_outputs + 3, n_inputs + 3), dtype=bool)
++    expected[:2, :2] = True
++    expected[2:-1, 2:-1] = expected_mapping
++    expected[-1, -1] = True
++    assert_array_equal(separability_matrix(model), expected)
++    assert_array_equal(is_separable(model), [False, False] + [True] * (mapper.n_outputs + 1))
++
++
++def test_nested_composition_preserves_dependency_counts():
++    # Both inputs of the rotation are derived from the same input, so each
++    # rotation output has two dependency paths and is not separable.
++    inner = models.Mapping((0, 0)) | models.Rotation2D(2)
++    model = models.Shift(1) & inner
++    assert_array_equal(separability_matrix(model), [[True, False],
++                                                    [False, True],
++                                                    [False, True]])
++    assert_array_equal(is_separable(model), [True, False, False])
++
++
++def test_deeply_nested_compound():
++    first = models.Shift(1)
++    second = models.Mapping((0, 0)) | models.Rotation2D(2)
++    third = models.Polynomial2D(1) & models.Linear1D(5)
++    model = first & (second & third)
++    expected = [[True, False, False, False, False],
++                [False, True, False, False, False],
++                [False, True, False, False, False],
++                [False, False, True, True, False],
++                [False, False, False, False, True]]
++    expected_separable = [True, False, False, False, True]
++    assert_array_equal(separability_matrix(model), expected)
++    assert_array_equal(is_separable(model), expected_separable)
++    regrouped = (first & second) & third
++    assert_array_equal(separability_matrix(regrouped), expected)
++    assert_array_equal(is_separable(regrouped), expected_separable)
++
++
++def test_nested_compound_followed_by_composition():
++    inner = models.Linear1D(10) & models.Linear1D(5)
++    model = (models.Pix2Sky_TAN() & inner) | models.Mapping((3, 2, 0, 1))
++    assert_array_equal(separability_matrix(model), [[False, False, False, True],
++                                                    [False, False, True, False],
++                                                    [True, True, False, False],
++                                                    [True, True, False, False]])
++    assert_array_equal(is_separable(model), [True, True, False, False])
++
++
++@pytest.mark.parametrize('custom_on_right', [False, True], ids=['left', 'right'])
++def test_nested_custom_separability_matrix(custom_on_right):
++    class PartiallySeparable(Model):
++        n_inputs = 2
++        n_outputs = 2
++
++        @staticmethod
++        def evaluate(x, y):
++            return y, x + y
++
++        def _calculate_separability_matrix(self):
++            return np.array([[False, True], [True, True]])
++
++    custom = PartiallySeparable()
++    linear1 = models.Linear1D(10)
++    linear2 = models.Linear1D(5)
++    if custom_on_right:
++        model = linear1 & (linear2 & custom)
++        expected_matrix = [[True, False, False, False],
++                           [False, True, False, False],
++                           [False, False, False, True],
++                           [False, False, True, True]]
++        expected_separable = [True, True, True, False]
++    else:
++        model = (custom & linear1) & linear2
++        expected_matrix = [[False, True, False, False],
++                           [True, True, False, False],
++                           [False, False, True, False],
++                           [False, False, False, True]]
++        expected_separable = [True, False, True, True]
++    assert_array_equal(separability_matrix(model), expected_matrix)
++    assert_array_equal(is_separable(model), expected_separable)
++
++
+ def test_custom_model_separable():
+     @custom_model
+     def model_a(x):
+2026-11-25 07:36:48,707 - INFO - Eval script for astropy__astropy-12907 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/astropy__astropy-12907/eval.sh; copying to container...
+2026-11-25 07:37:44,430 - INFO - Test runtime: 55.69 seconds
+2026-11-25 07:37:44,432 - INFO - Test output for astropy__astropy-12907 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/astropy__astropy-12907/test_output.txt
+2026-11-25 07:37:44,467 - INFO - Git diff after:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..895578cd3 100755
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -242,7 +242,8 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        # Preserve the dependencies already computed for the right subtree.
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+2026-11-25 07:37:44,468 - INFO - Git diff changed after running eval script
+2026-11-25 07:37:44,468 - INFO - Grading answer for astropy__astropy-12907...
+2026-11-25 07:37:44,472 - INFO - report: {'astropy__astropy-12907': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model9-result9]'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_coord_matrix', 'astropy/modeling/tests/test_separable.py::test_cdot', 'astropy/modeling/tests/test_separable.py::test_cstack', 'astropy/modeling/tests/test_separable.py::test_arith_oper', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model0-result0]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model1-result1]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model2-result2]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model3-result3]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model4-result4]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model5-result5]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model7-result7]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model8-result8]', 'astropy/modeling/tests/test_separable.py::test_custom_model_separable'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-12907: resolved: True
+2026-11-25 07:37:44,473 - INFO - Attempting to stop container sweb.eval.astropy__astropy-12907.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:59,936 - INFO - Container sweb.eval.astropy__astropy-12907.gpt-6.1-terra-native-tools-max stopped successfully.
+2026-11-25 07:37:59,936 - INFO - Attempting to remove container sweb.eval.astropy__astropy-12907.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:59,966 - INFO - Container sweb.eval.astropy__astropy-12907.gpt-6.1-terra-native-tools-max removed successfully.

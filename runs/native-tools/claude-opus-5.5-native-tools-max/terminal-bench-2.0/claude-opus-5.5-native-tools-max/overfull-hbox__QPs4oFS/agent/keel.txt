@@ -1,0 +1,243 @@
+$ pwd && ls -la && echo "---" && cat main.tex && echo "---INPUT---" && cat input.tex && echo "---SYNONYMS---" && cat synonyms.txt
+> read input.tex
+$ cd /app && which pdflatex && pdflatex --version | head -5 && wc -l input.tex synonyms.txt && file input.tex synonyms.txt main.tex && git status 2>&1 | head -5
+$ mkdir -p /tmp/work && cp /app/input.tex /tmp/work/input.orig.tex && cp /app/main.tex /tmp/work/main.orig.tex && cp /app/synonyms.txt /tmp/work/synonyms.orig.txt && cd /tmp/work && md5sum /app/*.tex /app/synonyms.txt
+$ cd /tmp/work && rm -rf build && mkdir build && cp /app/main.tex /app/input.tex build/ && cd build && pdflatex -interaction=nonstopmode -halt-on-error main.tex > out.txt 2>&1; echo "exit=$?"; grep -n -A3 -i "overfull" main.log; echo; grep -c -i "overfull" main.log
+$ cd /tmp/work && cat > analyze.py << 'EOF'
+import re, collections
+syn_lines = [l.strip() for l in open('/app/synonyms.txt') if l.strip()]
+fams = [[w.strip() for w in l.split(',')] for l in syn_lines]
+# sanity: any multi-word synonyms / odd chars?
+for f in fams:
+    for w in f:
+        if not re.fullmatch(r"[A-Za-z]+", w):
+            print("ODD synonym:", repr(w))
+heads = {f[0]: f[1:] for f in fams}
+print("families:", len(fams), "unique heads:", len(heads))
+# duplicates across families?
+cnt = collections.Counter(w.lower() for f in fams for w in f)
+print("words in >1 family:", [w for w,c in cnt.items() if c>1])
+
+text = open('/app/input.tex').read()
+paras = text.split('\n\n')
+print("paragraphs:", len(paras), [len(p) for p in paras])
+print("ends with newline:", text.endswith('\n'), repr(text[-30:]))
+missing = []
+for h in heads:
+    n = len(re.findall(r"(?<![A-Za-z'\-])" + h + r"(?![A-Za-z'\-])", text))
+    n_ci = len(re.findall(r"(?<![A-Za-z])" + h + r"(?![A-Za-z])", text, re.I))
+    if n == 0: missing.append(h)
+    if n != n_ci: print("case/compound mismatch for", h, n, n_ci)
+print("heads NOT found in text:", missing)
+# non-head family members appearing in the text
+allw = set(re.findall(r"[A-Za-z]+", text))
+for f in fams:
+    for w in f[1:]:
+        if w in allw: print("non-head synonym present in text:", w, "(family of", f[0] + ")")
+EOF
+python3 analyze.py
+$ which perl awk gawk sed lua luatex texlua ruby node bash 2>/dev/null; perl -v | head -2
+$ cd /tmp/work && cat > analyze.pl << 'EOF'
+use strict; use warnings;
+open my $sf, '<', '/app/synonyms.txt' or die; my @fams;
+while (<$sf>) { chomp; s/\r//; next unless /\S/; my @w = map { s/^\s+|\s+$//gr } split /,/; push @fams, \@w; }
+close $sf;
+for my $f (@fams) { for my $w (@$f) { print "ODD synonym: '$w'\n" unless $w =~ /^[A-Za-z]+$/; } }
+my %cnt; for my $f (@fams) { $cnt{lc $_}++ for @$f; }
+print "families: ", scalar(@fams), "\n";
+print "words in >1 family: ", join(", ", grep { $cnt{$_} > 1 } sort keys %cnt), "\n";
+open my $tf, '<', '/app/input.tex' or die; local $/; my $text = <$tf>; close $tf;
+my @paras = split /\n\n/, $text;
+print "paragraphs: ", scalar(@paras), "\n";
+my @missing;
+for my $f (@fams) {
+  my $h = $f->[0];
+  my @m = ($text =~ /(?<![A-Za-z'\-])\Q$h\E(?![A-Za-z'\-])/g);
+  my @mci = ($text =~ /(?<![A-Za-z])\Q$h\E(?![A-Za-z])/gi);
+  push @missing, $h unless @m;
+  print "count mismatch for $h: exact=", scalar(@m), " ci=", scalar(@mci), "\n" if @m != @mci;
+  print "multiple occurrences of $h: ", scalar(@m), "\n" if @m > 1;
+}
+print "heads NOT found: @missing\n";
+my %allw = map { $_ => 1 } ($text =~ /[A-Za-z]+/g);
+for my $f (@fams) { for my $w (@{$f}[1..$#$f]) { print "non-head synonym already in text: $w (family $f->[0])\n" if $allw{$w}; } }
+EOF
+perl analyze.pl
+$ cd /app && od -c input.tex | tail -3 && grep -c $'\r' input.tex synonyms.txt main.tex; echo; cd /tmp/work/build && grep -n -i -E "underfull|overfull|warning|error" main.log | head -30; tail -5 main.log
+$ cd /tmp/work && cat > occ.pl << 'EOF'
+use strict; use warnings;
+open my $sf, '<', '/app/synonyms.txt' or die; my %alts; my @heads;
+while (<$sf>) { chomp; next unless /\S/; my @w = map { s/^\s+|\s+$//gr } split /,/; my $h = shift @w; push @heads, $h; $alts{$h} = \@w; }
+open my $tf, '<', '/app/input.tex' or die; my @lines = <$tf>; close $tf;
+for my $ln (0..$#lines) {
+  my $l = $lines[$ln];
+  for my $h (@heads) {
+    while ($l =~ /(?<![A-Za-z])(\Q$h\E)(?![A-Za-z])/g) {
+      my $s = $-[1]; my $e = $+[1];
+      my $pre = substr($l, $s-1 < 0 ? 0 : $s-1, 1); my $post = substr($l, $e, 1);
+      printf "L%-2d col%-5d %-18s [%s|%s]  ...%s...\n", $ln+1, $s, $h, $pre, $post, substr($l, ($s-25<0?0:$s-25), ($s-25<0?$s:25)+length($h)+25) =~ s/\n//r;
+    }
+  }
+}
+EOF
+perl occ.pl | sort -t' ' -k1,1 -k2,2 | sort -V
+$ cd /tmp/work && perl occ.pl | sort -V | awk 'NR>=20 && NR<=50'
+$ mkdir -p /tmp/work/lib && cd /tmp/work && cat > lib/Syn.pm << 'EOF'
+package Syn;
+use strict; use warnings;
+use Exporter 'import';
+our @EXPORT_OK = qw(load_syn load_paras find_slots apply_repl evaluate);
+
+# Families: first word on each line is the word that appears in input.tex,
+# the rest are its allowed replacements.
+sub load_syn {
+  my ($file) = @_;
+  open my $fh, '<', $file or die "$file: $!";
+  my (%alts, @heads);
+  while (<$fh>) {
+    chomp; next unless /\S/;
+    my @w = map { s/^\s+|\s+$//gr } split /,/;
+    my $h = shift @w; push @heads, $h; $alts{$h} = \@w;
+  }
+  return (\@heads, \%alts);
+}
+
+sub load_paras {
+  my ($file) = @_;
+  open my $fh, '<', $file or die; local $/; my $t = <$fh>; close $fh;
+  return split /\n\n/, $t, -1;
+}
+
+# Slots = occurrences of head words (whole words, case-sensitive) in a paragraph.
+sub find_slots {
+  my ($p, $heads) = @_;
+  my @s;
+  for my $h (@$heads) {
+    while ($p =~ /(?<![A-Za-z])\Q$h\E(?![A-Za-z])/g) { push @s, [$-[0], $+[0], $h]; }
+  }
+  return sort { $a->[0] <=> $b->[0] } @s;
+}
+
+# $repl: hashref slot-index => replacement word
+sub apply_repl {
+  my ($p, $slots, $repl) = @_;
+  for my $i (sort { $b <=> $a } keys %$repl) {
+    my ($s, $e) = @{$slots->[$i]};
+    substr($p, $s, $e - $s) = $repl->{$i};
+  }
+  return $p;
+}
+
+# Typeset each paragraph text in @$texts using main.tex's exact preamble;
+# returns arrayref of {over => n, overpt => total, under => n, maxover => pt}.
+my $run = 0;
+sub evaluate {
+  my ($texts, %opt) = @_;
+  my $dir = "/tmp/work/eval"; mkdir $dir unless -d $dir;
+  $run++;
+  my $base = "t$run";
+  open my $mf, '<', '/app/main.tex' or die; local $/; my $main = <$mf>; close $mf;
+  $main =~ s/\\input\{input\.tex\}/\\hfuzz=0pt \\input{$base-body.tex}/ or die "no input line";
+  open my $o, '>', "$dir/$base.tex" or die; print $o $main; close $o;
+  open my $b, '>', "$dir/$base-body.tex" or die;
+  my %line2idx; my $ln = 1;
+  for my $i (0..$#$texts) {
+    die "newline in paragraph" if $texts->[$i] =~ /\n/;
+    print $b $texts->[$i], "\n\n"; $line2idx{$ln} = $i; $ln += 2;
+  }
+  close $b;
+  system("cd $dir && pdflatex -draftmode -interaction=nonstopmode -halt-on-error $base.tex > $base.out 2>&1");
+  die "pdflatex failed (see $dir/$base.out)" if $? != 0;
+  my @res = map { { over => 0, overpt => 0, maxover => 0, under => 0 } } @$texts;
+  open my $lg, '<', "$dir/$base.log" or die; my @log = <$lg>; close $lg;
+  for (@log) {
+    if (/^Overfull \\hbox \(([\d.]+)pt too wide\) in paragraph at lines (\d+)--/) {
+      my $r = $res[$line2idx{$2} // die "unmapped line $2"];
+      $r->{over}++; $r->{overpt} += $1; $r->{maxover} = $1 if $1 > $r->{maxover};
+    } elsif (/^Underfull \\hbox \(badness (\d+)\) in paragraph at lines (\d+)--/) {
+      $res[$line2idx{$2} // die "unmapped line $2"]{under}++;
+    } elsif (/^(Over|Under)full/) { die "unexpected box message: $_"; }
+  }
+  unlink glob("$dir/$base*") unless $opt{keep};
+  return \@res;
+}
+1;
+EOF
+cat > baseline.pl << 'EOF'
+use strict; use warnings; use lib '/tmp/work/lib'; use Syn qw(load_syn load_paras find_slots evaluate);
+my ($heads, $alts) = load_syn('/app/synonyms.txt');
+my @p = load_paras('/app/input.tex');
+my $r = evaluate(\@p);
+for my $i (0..$#p) {
+  my @s = find_slots($p[$i], $heads);
+  printf "para %d (line %d): slots=%d over=%d overpt=%.3f under=%d  | %s...\n", $i, 2*$i+1, scalar(@s), @{$r->[$i]}{qw(over overpt under)}, substr($p[$i],0,40);
+}
+EOF
+perl baseline.pl
+$ cd /tmp/work && perl -0pi -e 's/  return split \/\\n\\n\/, \$t, -1;/  die "unexpected file ending" unless \$t =~ s\/\\n\\z\/\/;\n  die "CR or triple newline" if \$t =~ \/\\r|\\n\\n\\n\/;\n  return split \/\\n\\n\/, \$t, -1;/' lib/Syn.pm && sed -n '20,27p' lib/Syn.pm && perl baseline.pl
+$ cd /tmp/work && perl -e 'use lib "/tmp/work/lib"; use Syn qw(load_syn load_paras evaluate); my @p = load_paras("/app/input.tex"); my $r = evaluate(\@p, keep=>1);' ; ls eval/ && cat eval/t1.tex && grep -n -i "full" eval/t1.log | head; head -c 300 eval/t1-body.tex
+> edit /tmp/work/lib/Syn.pm
+> edit /tmp/work/lib/Syn.pm
+> read /tmp/work/lib/Syn.pm
+> patch /tmp/work/lib/Syn.pm
+$ cd /tmp/work && rm -rf eval && perl baseline.pl
+$ cd /tmp/work && cat > search.pl << 'EOF'
+# Usage: perl search.pl PARA_INDEX MAXDEPTH [MAXSHOW]
+# Breadth-first search over sets of synonym replacements (depth = number of
+# replaced words) for one paragraph; prints every set that removes all overfull boxes.
+use strict; use warnings; use lib '/tmp/work/lib';
+use Syn qw(load_syn load_paras find_slots apply_repl evaluate);
+my ($pi, $maxd, $maxshow) = @ARGV; $maxshow //= 40;
+my ($heads, $alts) = load_syn('/app/synonyms.txt');
+my @p = load_paras('/app/input.tex');
+my $para = $p[$pi];
+my @slots = find_slots($para, $heads);
+my $n = @slots;
+print "paragraph $pi: $n slots\n";
+
+sub run_batch {
+  my ($cands) = @_;        # list of hashrefs slot=>word
+  my @res;
+  my $B = 3000;
+  for (my $i = 0; $i < @$cands; $i += $B) {
+    my $j = $i + $B - 1; $j = $#$cands if $j > $#$cands;
+    my @texts = map { apply_repl($para, \@slots, $_) } @{$cands}[$i..$j];
+    push @res, @{ evaluate(\@texts) };
+  }
+  return \@res;
+}
+sub desc { my ($r) = @_; join(", ", map { "$slots[$_][2]->$r->{$_}" } sort { $a <=> $b } keys %$r) }
+
+my $base = run_batch([{}])->[0];
+printf "baseline: over=%d overpt=%.3f\n", $base->{over}, $base->{overpt};
+for my $d (1..$maxd) {
+  # enumerate all combinations of $d distinct slots, each with any alternative
+  my @cands;
+  my @idx = (0..$d-1);
+  my $gen; $gen = sub {
+    my ($k, $start, $cur) = @_;
+    if ($k == $d) { push @cands, {%$cur}; return; }
+    for my $s ($start..$n-1) {
+      for my $w (@{ $alts->{ $slots[$s][2] } }) {
+        $cur->{$s} = $w; $gen->($k+1, $s+1, $cur); delete $cur->{$s};
+      }
+    }
+  };
+  $gen->(0, 0, {});
+  print "depth $d: ", scalar(@cands), " candidates\n";
+  my $res = run_batch(\@cands);
+  my @ok = grep { $res->[$_]{over} == 0 } 0..$#cands;
+  printf "depth %d: %d solutions\n", $d, scalar(@ok);
+  my $shown = 0;
+  for my $i (@ok) { last if $shown++ >= $maxshow; printf "  OK  under=%d  %s\n", $res->[$i]{under}, desc($cands[$i]); }
+  if (!@ok) {
+    # show the best partial improvements
+    my @best = sort { $res->[$a]{over} <=> $res->[$b]{over} || $res->[$a]{overpt} <=> $res->[$b]{overpt} } 0..$#cands;
+    for my $i (@best[0..($#best < 9 ? $#best : 9)]) { printf "  partial over=%d overpt=%.3f  %s\n", $res->[$i]{over}, $res->[$i]{overpt}, desc($cands[$i]); }
+  }
+  last if @ok;
+}
+EOF
+for i in 2 3 6 9; do perl search.pl $i 1 60; echo; done
+$ cd /tmp/work && perl -0pi -e 's/sub desc \{ my \(\$r\) = \@_; join\(", ", map \{ "\$slots\[\$_\]\[2\]->\$r->\{\$_\}" \}/sub desc { my (\$r) = \@_; join(", ", map { "\$slots[\$_][2]\\\@\$slots[\$_][0]->\$r->{\$_}" }/' search.pl && grep -n "sub desc" search.pl && time perl search.pl 3 2 400 > p3_d2.txt; head -5 p3_d2.txt; grep -c "OK" p3_d2.txt
+$ cd /tmp/work && cat p3_d2.txt | tail -15; ls eval | head

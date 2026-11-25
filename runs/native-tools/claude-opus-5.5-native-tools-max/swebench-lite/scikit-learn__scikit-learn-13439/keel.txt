@@ -1,0 +1,122 @@
+$ cd . && git log --oneline -3 && git status && ls
+$ grep -n "__getitem__\|def _iter\|def __len__\|_final_estimator\|def named_steps\|def _estimator_type" sklearn/pipeline.py
+> read sklearn/pipeline.py
+$ cd . && cat > /tmp/repro.py << 'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+# generate some data to play with
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+print("len(pipe) =", len(pipe))
+print("pipe[:len(pipe)] =", pipe[:len(pipe)])
+EOF
+python /tmp/repro.py
+$ cd . && grep -n "def test_pipeline_slice\|def test_pipeline_index\|def test_make_pipeline_memory\|pipe\[" sklearn/tests/test_pipeline.py | head -50
+$ cd . && grep -rn -i "slic\|index" doc/modules/compose.rst | head -30; echo ----; grep -n -i "pipeline" doc/whats_new/v0.21.rst
+> read sklearn/tests/test_pipeline.py
+> read doc/whats_new/v0.21.rst
+> read doc/modules/compose.rst
+$ cd . && grep -rn "def __len__" sklearn --include=*.py | grep -v "/tests/"; echo ----; grep -n -B2 -A12 "def _num_samples" sklearn/utils/validation.py
+$ cd . && sed -n 140,175p sklearn/ensemble/base.py
+$ cd . && sed -n 128,148p sklearn/ensemble/base.py; echo ----; sed -n 131,160p sklearn/utils/validation.py; echo ----; grep -n -A6 "def _is_arraylike" sklearn/utils/validation.py
+$ cd . && python -c "import numpy, scipy, sys; print(sys.version); print('numpy', numpy.__version__, 'scipy', scipy.__version__)"; grep -rn "_is_arraylike(" sklearn --include=*.py | grep -v "/tests/\|def _is_arraylike"
+$ cd . && sed -n 910,930p sklearn/model_selection/_validation.py
+$ cd . && grep -rn "__len__" sklearn --include=*.py | grep -v "externals\|def __len__" ; echo ----; grep -rn "_is_arraylike\b" sklearn --include=*.py | grep -v "def _is_arraylike"
+$ cd . && grep -rn "np\.\(as\)\?array(\(self\.\)\?\(estimators\|estimators_\|transformers\|steps\|transformer_list\|fitted_estimators\|base_estimators\)" sklearn --include=*.py | grep -v "/tests/"; echo "(end of estimator->array search)"; grep -n "len(\|np\.\|array" sklearn/utils/_pprint.py | head -30
+$ cd . && sed -n 330,420p sklearn/utils/_pprint.py
+$ cd . && grep -n "len(self.steps)\|len(.*steps\|class \|^def " sklearn/pipeline.py
+> edit sklearn/pipeline.py
+$ cd . && python /tmp/repro.py && cat > /tmp/check2.py << 'EOF'
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+
+pipe = make_pipeline(StandardScaler(), 'passthrough', PCA(), None, SVC())
+n = len(pipe)
+print("len:", n, "== len(steps):", n == len(pipe.steps))
+assert pipe[:len(pipe)].steps == pipe.steps
+assert pipe[len(pipe) - 1] is pipe[-1]
+assert [pipe[i] for i in range(len(pipe))] == [s for _, s in pipe.steps]
+for i in range(1, n + 1):
+    assert len(pipe[:i]) == i
+print("bool(pipe):", bool(pipe))
+try:
+    pipe[len(pipe)]
+except IndexError as e:
+    print("IndexError as expected:", e)
+EOF
+python /tmp/check2.py
+$ cd . && cat > /tmp/check3.py << 'EOF'
+import warnings
+warnings.simplefilter('ignore')
+import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_validate
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+
+X, y = load_iris(return_X_y=True)
+outer = Pipeline([('prep', StandardScaler()), ('clf', SVC(gamma='scale'))])
+cand = [make_pipeline(PCA(2), SVC(gamma='scale')),
+        make_pipeline(StandardScaler(), LogisticRegression(solver='lbfgs', multi_class='auto'))]
+gs = GridSearchCV(outer, {'clf': cand}, cv=3).fit(X, y)
+col = gs.cv_results_['param_clf']
+print(type(col).__name__, col.shape, col.dtype, [type(c).__name__ for c in col])
+assert col.shape == (2,) and all(c is p for c, p in zip(col, cand))
+
+rs = RandomizedSearchCV(outer, {'clf': cand}, n_iter=2, cv=3, random_state=0).fit(X, y)
+print([type(c).__name__ for c in rs.cv_results_['param_clf']])
+
+res = cross_validate(outer, X, y, cv=3, return_estimator=True)
+print("cross_validate estimators:", [type(e).__name__ for e in res['estimator']])
+print("list(pipe):", list(outer))
+EOF
+python /tmp/check3.py
+$ cd . && grep -rnE "if (not )?(self\.)?(base_)?(estimator|transformer|pipeline|pipe|clf|est|final_estimator|regressor|classifier)_?( and| or|:)|(estimator|transformer|regressor|classifier|base_estimator) or " sklearn --include=*.py | grep -v "/tests/\|externals" | head -30
+$ cd . && sed -n 660,680p sklearn/utils/tests/test_validation.py; echo ----; grep -n "__len__\|hasattr(.*len" sklearn/utils/estimator_checks.py
+$ cd . && grep -rnE "\bif (not )?(self\.)?_?(est|estimator|estimators|clf|trans|transformer|transf|step|pipe|pipeline|base_estimator|init|init_|regressor|classifier|final_estimator|func_transformer|selector|scorer)\b *(:|and\b|or\b)|\b(est|estimator|clf|trans|transformer|step|base_estimator|regressor|classifier) or \b|filter\(None|\b(all|any)\((self\.)?(estimators|transformers|steps)" sklearn --include=*.py | grep -v "/tests/\|externals"
+$ cd . && grep -rnE "\bif (not )?[a-z_.]*(est|estimator|clf|trans|transformer|step|pipe|model|regressor|classifier)[a-z_]*\s*(:|and\b|or\b|$)" sklearn --include=*.py | grep -v "/tests/\|externals" | grep -vE "is (not )?None|==|!=|isinstance|hasattr|callable|\(" | head -40
+$ cd . && sed -n 1,60p sklearn/tests/test_pipeline.py; echo ----; sed -n 1055,1080p sklearn/tests/test_pipeline.py
+$ cd . && grep -n "def test_make_pipeline\b\|def test_make_pipeline(" -A 22 sklearn/tests/test_pipeline.py
+$ cd . && grep -n "^class \|^def test_pipeline_slice\|^def test_pipeline_index" sklearn/tests/test_pipeline.py | head -20
+$ cd . && sed -n 1,80p sklearn/utils/metaestimators.py
+> edit sklearn/pipeline.py
+> edit sklearn/tests/test_pipeline.py
+$ cd . && python -m pytest sklearn/tests/test_pipeline.py -q -p no:cacheprovider 2>&1 | tail -8
+$ cd . && cp sklearn/pipeline.py /tmp/pipeline_fixed.py && git stash push sklearn/pipeline.py -q && python -m pytest sklearn/tests/test_pipeline.py -q -p no:cacheprovider -k "test_pipeline_len" 2>&1 | grep -E "TypeError|passed|failed" | head -3; git stash pop -q && diff -q sklearn/pipeline.py /tmp/pipeline_fixed.py && echo "fix restored OK"
+$ cd . && python -m pytest sklearn/utils/tests/test_validation.py sklearn/model_selection sklearn/compose sklearn/tests/test_base.py sklearn/tests/test_metaestimators.py sklearn/utils/tests/test_pprint.py sklearn/utils/tests/test_estimator_checks.py sklearn/feature_selection sklearn/ensemble/tests/test_voting_classifier.py -q -p no:cacheprovider -x 2>&1 | tail -4
+$ cd . && python -m pytest --doctest-modules sklearn/pipeline.py doc/modules/compose.rst -q -p no:cacheprovider 2>&1 | tail -3; python -m pytest sklearn/tests/test_common.py -q -p no:cacheprovider -k "Pipeline or pipeline or FeatureUnion" 2>&1 | tail -2; flake8 sklearn/pipeline.py sklearn/tests/test_pipeline.py && echo "flake8 clean"
+$ cd . && (python -m flake8 --version >/dev/null 2>&1 && python -m flake8 sklearn/pipeline.py sklearn/tests/test_pipeline.py && echo "flake8 clean") || (python -m pycodestyle --version >/dev/null 2>&1 && python -m pycodestyle sklearn/pipeline.py sklearn/tests/test_pipeline.py && echo "pycodestyle clean") || (echo "no linter; checking line lengths/trailing ws manually"; git diff -U0 | grep '^+' | grep -v '^+++' | awk '{ if (length($0)-1 > 79) print "TOO LONG: " $0 } /[ \t]$/ { print "TRAILING WS: " $0 }'; echo "manual check done")
+> edit doc/whats_new/v0.21.rst
+$ cd . && git diff && python /tmp/repro.py 2>&1 | head -2 && python -m pytest sklearn/tests/test_pipeline.py -q -p no:cacheprovider 2>&1 | tail -1
+The work is finished. `len(pipe)` and `pipe[:len(pipe)]` now work.
+
+**Fix:** I added `Pipeline.__len__` in `sklearn/pipeline.py`. It returns `len(self.steps)`. Steps set to `'passthrough'` or `None` are counted, so the length matches what indexing and slicing see.
+
+**Tests:** I added `test_pipeline_len` to `sklearn/tests/test_pipeline.py`. It fails without the fix and passes with it. It covers:
+- `pipe[:len(pipe)]` returning the full pipeline
+- the lengths of sub-pipelines
+- `pipe[len(pipe) - 1]`, and the `IndexError` for `pipe[len(pipe)]`
+- pipelines with `'passthrough'`/`None` steps
+- `make_pipeline`
+
+All 42 tests in that file pass, along with the doctests in `pipeline.py` and `compose.rst` and about 650 related tests in other modules. `flake8` isn't installed, so I only checked the changed lines by hand for length and trailing whitespace.
+
+**Side effects checked:**
+- **Pipelines aren't mistaken for data.** Some code treats anything with a length as array data, but the helper that counts samples already rejects any object with a `fit` method. Grid searches with pipelines as parameter values and `cross_validate` with `return_estimator=True` still work.
+- **Truthiness:** `bool(pipe)` now follows the length. A valid pipeline always has at least one step, so it stays `True`. It only becomes `False` if someone sets `pipe.steps = []` by hand.
+
+**Docs:** I extended the existing v0.21 changelog entry for pipeline indexing to mention `len()`, rather than adding a separate entry.

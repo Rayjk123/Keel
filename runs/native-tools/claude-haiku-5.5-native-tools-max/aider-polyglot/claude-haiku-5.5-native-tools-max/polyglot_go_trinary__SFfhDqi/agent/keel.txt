@@ -1,0 +1,283 @@
+$ pwd && ls -la && echo "---" && cat trinary.go 2>/dev/null; echo "--- exit: $?"
+$ find . -maxdepth 3 -not -path '*/.git/*' -not -path '*/.git' | head -100; echo "---"; git -C . status 2>&1 | head -20; echo "---"; git -C . log --oneline -5 2>&1 | head -10
+$ cd /app && echo "--- go.mod:" && cat go.mod && echo "--- go version:" && (go version 2>&1; echo "exit: $?") && echo "--- gofmt:" && (command -v gofmt && gofmt -l . 2>&1; echo "exit: $?")
+> read /app/trinary.go
+$ cd / && (find / -xdev \( -iname '*trinary*' -o -iname 'ParseTrinary*' \) -not -path '*/proc/*' 2>/dev/null | head -50); echo "--- module cache / GOPATH:"; go env GOPATH GOMODCACHE GOFLAGS GO111MODULE 2>&1; ls -la "$(go env GOPATH)" 2>/dev/null | head; echo "--- grep for ParseTrinary in plausible locations:"; grep -rIl "ParseTrinary" /app /root /home /tmp /opt /srv /usr/local/src 2>/dev/null | grep -v '^/app/.oracle' | head -20; echo "(done)"
+> write /app/trinary.go
+$ cd /app && echo "--- trinary.go (tabs shown as ^I):" && cat -A trinary.go && echo "--- gofmt -l (empty = formatted):" && gofmt -l . ; echo "gofmt exit: $?" && echo "--- go vet:" && go vet ./... ; echo "vet exit: $?" && echo "--- go build:" && go build ./... ; echo "build exit: $?"
+echo "=== scratch test (outside /app) ==="
+rm -rf /tmp/trinary-check && mkdir -p /tmp/trinary-check && cp /app/go.mod /app/trinary.go /tmp/trinary-check/
+cat > /tmp/trinary-check/trinary_check_test.go <<'EOF'
+package trinary
+
+import (
+	"math"
+	"math/big"
+	"math/rand"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// expected is an independent reference built on math/big. Invalid input and
+// values that do not fit in an int64 both map to 0.
+func expected(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	v := new(big.Int)
+	three := big.NewInt(3)
+	for _, r := range s {
+		if r < '0' || r > '2' {
+			return 0
+		}
+		v.Mul(v, three)
+		v.Add(v, big.NewInt(int64(r-'0')))
+	}
+	if !v.IsInt64() {
+		return 0
+	}
+	return v.Int64()
+}
+
+func TestCanonicalExamples(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"1", 1}, {"2", 2}, {"10", 3}, {"11", 4}, {"12", 5},
+		{"20", 6}, {"21", 7}, {"22", 8}, {"100", 9}, {"112", 14},
+		{"222", 26}, {"1122000120", 32091}, {"102012", 302},
+		{"0", 0}, {"00", 0}, {"00112", 14},
+		{"", 0}, {"carrot", 0}, {"0a1", 0}, {"3", 0}, {"12 ", 0},
+		{" 12", 0}, {"-12", 0}, {"+12", 0}, {"1-2", 0},
+		{"\u0662", 0}, {"\uFF12", 0},
+	}
+	for _, c := range cases {
+		if got := ParseTrinary(c.in); got != c.want {
+			t.Errorf("ParseTrinary(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestInt64Boundary(t *testing.T) {
+	maxStr := strconv.FormatInt(math.MaxInt64, 3)
+	if got := ParseTrinary(maxStr); got != math.MaxInt64 {
+		t.Errorf("max int64 (%s): got %d", maxStr, got)
+	}
+	// max ends in digit 1, so swapping that digit for 2 gives max+1, which does not fit.
+	next := maxStr[:len(maxStr)-1] + "2"
+	if got := ParseTrinary(next); got != 0 {
+		t.Errorf("max+1 (%s): got %d, want 0", next, got)
+	}
+	cases := map[string]int64{
+		strings.Repeat("2", 39): 4052555153018976266, // 3^39 - 1, fits
+		strings.Repeat("2", 40): 0,                   // 3^40 - 1, overflows
+		strings.Repeat("1", 40): 6078832729528464400, // (3^40 - 1) / 2, fits
+	}
+	for in, want := range cases {
+		if got := ParseTrinary(in); got != want {
+			t.Errorf("ParseTrinary(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestRandomAgainstReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	const digits = "012"
+	for i := 0; i < 100000; i++ {
+		n := rng.Intn(45)
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = digits[rng.Intn(3)]
+		}
+		s := string(b)
+		if got, want := ParseTrinary(s), expected(s); got != want {
+			t.Fatalf("ParseTrinary(%q) = %d, want %d", s, got, want)
+		}
+		if v, err := strconv.ParseInt(s, 3, 64); err == nil && s != "" && ParseTrinary(s) != v {
+			t.Fatalf("ParseTrinary(%q) disagrees with strconv: %d vs %d", s, ParseTrinary(s), v)
+		}
+	}
+}
+
+func TestRandomInvalidIsZero(t *testing.T) {
+	rng := rand.New(rand.NewSource(2))
+	const bad = "3-+ a\x00\xff"
+	for i := 0; i < 50000; i++ {
+		n := 1 + rng.Intn(30)
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = "012"[rng.Intn(3)]
+		}
+		pos := rng.Intn(n + 1)
+		s := string(b[:pos]) + string(bad[rng.Intn(len(bad))]) + string(b[pos:])
+		if got := ParseTrinary(s); got != 0 {
+			t.Fatalf("ParseTrinary(%q) = %d, want 0", s, got)
+		}
+	}
+}
+EOF
+cd /tmp/trinary-check && go vet ./... ; echo "scratch vet exit: $?"; go test -count=1 -v ./... 2>&1 | tail -30; echo "test exit: ${PIPESTATUS[0]}"
+$ cd /app && echo "--- /app contents:" && ls -la && echo "--- .oracle (listing only, not read):" && ls -la .oracle && echo "--- final trinary.go:" && cat trinary.go && echo "--- re-check:" && gofmt -l . && go vet ./... && go build ./... && echo "fmt/vet/build OK" && rm -rf /tmp/trinary-check && echo "scratch test dir removed"
+> read /app/trinary.go
+> write /app/trinary.go
+$ cd /app && echo "--- gofmt -l (empty = formatted):" && gofmt -l . ; echo "gofmt exit: $?" && echo "--- go vet:" && go vet ./... ; echo "vet exit: $?" && echo "--- go build:" && go build ./... ; echo "build exit: $?"
+$ rm -rf /tmp/trinary-check && mkdir -p /tmp/trinary-check && cp /app/go.mod /app/trinary.go /tmp/trinary-check/ && cd /tmp/trinary-check && cat > trinary_check_test.go <<'EOF'
+package trinary
+
+import (
+	"math"
+	"math/big"
+	"math/rand"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// reference is an independent implementation built on math/big. It returns
+// the value and whether s is a valid trinary that fits in an int64.
+func reference(s string) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	v := new(big.Int)
+	three := big.NewInt(3)
+	for _, r := range s {
+		if r < '0' || r > '2' {
+			return 0, false
+		}
+		v.Mul(v, three)
+		v.Add(v, big.NewInt(int64(r-'0')))
+	}
+	if !v.IsInt64() {
+		return 0, false
+	}
+	return v.Int64(), true
+}
+
+// check compares ParseTrinary against the reference for one input.
+func check(t *testing.T, s string) {
+	t.Helper()
+	got, ok := ParseTrinary(s)
+	want, wantOK := reference(s)
+	if got != want || ok != wantOK {
+		t.Fatalf("ParseTrinary(%q) = (%d, %v), want (%d, %v)", s, got, ok, want, wantOK)
+	}
+}
+
+type testCase struct {
+	in   string
+	want int64
+	ok   bool
+}
+
+func runCases(t *testing.T, cases []testCase) {
+	t.Helper()
+	for _, c := range cases {
+		got, ok := ParseTrinary(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ParseTrinary(%q) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.ok)
+		}
+		check(t, c.in)
+	}
+}
+
+func TestCanonicalExamples(t *testing.T) {
+	runCases(t, []testCase{
+		{"1", 1, true}, {"2", 2, true}, {"10", 3, true}, {"11", 4, true}, {"12", 5, true},
+		{"20", 6, true}, {"21", 7, true}, {"22", 8, true}, {"100", 9, true}, {"112", 14, true},
+		{"222", 26, true}, {"1122000120", 32091, true}, {"102012", 302, true},
+		{"0", 0, true}, {"00", 0, true}, {"00112", 14, true},
+		{"", 0, false}, {"carrot", 0, false}, {"0a1", 0, false}, {"3", 0, false},
+		{"12 ", 0, false}, {" 12", 0, false}, {"-12", 0, false}, {"+12", 0, false},
+		{"1-2", 0, false}, {"\u0662", 0, false}, {"\uFF12", 0, false},
+	})
+}
+
+func TestInt64Boundary(t *testing.T) {
+	maxInt := big.NewInt(math.MaxInt64)
+	runCases(t, []testCase{
+		{maxInt.Text(3), math.MaxInt64, true},
+		{new(big.Int).Sub(maxInt, big.NewInt(1)).Text(3), math.MaxInt64 - 1, true},
+		{new(big.Int).Add(maxInt, big.NewInt(1)).Text(3), 0, false},
+		{"1" + strings.Repeat("0", 39), 4052555153018976267, true}, // 3^39
+		{"1" + strings.Repeat("0", 40), 0, false},                  // 3^40 overflows
+		{strings.Repeat("2", 39), 4052555153018976266, true},       // 3^39 - 1
+		{strings.Repeat("2", 40), 0, false},
+		{strings.Repeat("1", 40), 6078832729528464400, true},
+		{strings.Repeat("0", 100) + "12", 5, true},
+	})
+}
+
+func TestRandomAgainstReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	const digits = "012"
+	for i := 0; i < 200000; i++ {
+		b := make([]byte, rng.Intn(45))
+		for j := range b {
+			b[j] = digits[rng.Intn(3)]
+		}
+		s := string(b)
+		check(t, s)
+		v, err := strconv.ParseInt(s, 3, 64)
+		got, ok := ParseTrinary(s)
+		if (err == nil) != ok || (err == nil && v != got) {
+			t.Fatalf("ParseTrinary(%q) = (%d, %v), strconv.ParseInt gives (%d, %v)", s, got, ok, v, err)
+		}
+	}
+}
+
+func TestRandomInvalidIsZero(t *testing.T) {
+	rng := rand.New(rand.NewSource(2))
+	bad := []byte("3-+ a\x00\xff\n")
+	for i := 0; i < 50000; i++ {
+		n := 1 + rng.Intn(30)
+		b := make([]byte, n)
+		for j := range b {
+			b[j] = "012"[rng.Intn(3)]
+		}
+		pos := rng.Intn(n + 1)
+		s := string(b[:pos]) + string(bad[rng.Intn(len(bad))]) + string(b[pos:])
+		if got, ok := ParseTrinary(s); got != 0 || ok {
+			t.Fatalf("ParseTrinary(%q) = (%d, %v), want (0, false)", s, got, ok)
+		}
+	}
+}
+
+func TestRandomArbitraryBytes(t *testing.T) {
+	rng := rand.New(rand.NewSource(3))
+	for i := 0; i < 200000; i++ {
+		b := make([]byte, rng.Intn(40))
+		for j := range b {
+			b[j] = byte(rng.Intn(256))
+		}
+		check(t, string(b))
+	}
+}
+
+func FuzzParseTrinary(f *testing.F) {
+	f.Add("102012")
+	f.Add("")
+	f.Add("3")
+	f.Add(strings.Repeat("2", 40))
+	f.Fuzz(func(t *testing.T, s string) {
+		check(t, s)
+	})
+}
+EOF
+echo "--- vet (scratch):"; go vet ./... ; echo "vet exit: $?"
+echo "--- unit tests (scratch):"; go test -count=1 -v ./... > unit.txt 2>&1; echo "unit exit: $?"; tail -25 unit.txt
+echo "--- fuzz 15s (scratch):"; go test -run='^$' -fuzz=FuzzParseTrinary -fuzztime=15s ./... > fuzz.txt 2>&1; echo "fuzz exit: $?"; tail -6 fuzz.txt
+cd / && rm -rf /tmp/trinary-check && echo "scratch removed"
+echo "--- /app:"; ls -la /app; cd /app && echo "gofmt: [$(gofmt -l .)]" && go vet ./... && go build ./... && echo "app vet/build OK"
+The task is complete. I changed one file, `/app/trinary.go`.
+
+- **Implementation:** `ParseTrinary` converts the string with Horner's rule (`value = value*3 + digit`) and doesn't use a standard-library conversion.
+- **Signature (my inference):** The stub had no return value, and its `want int64, ok bool` parameters looked like named results. I changed it to `ParseTrinary(arg string) (int64, bool)` and kept the name. If other code expects a plain `int64` or `(int64, error)`, this is the first thing to change.
+- **Behaviour:**
+  - `"102012"` gives `(302, true)`.
+  - Any character other than `0`, `1` or `2` gives `(0, false)`.
+  - An empty string gives `(0, false)`, and so does a value too large for int64. The spec doesn't cover these two cases, so these are my choices. The overflow check runs before each multiply, so the value never wraps.
+- **Verification:** `gofmt`, `go vet` and `go build` are clean with Go 1.21.5. In a scratch directory outside `/app` (since deleted), I tested against a `math/big` reference. The tests covered the canonical examples, int64 boundaries, about 450k random and invalid inputs, and a 15-second fuzz run. All passed.
+- **Untouched:** `go.mod` and `.oracle/` are unchanged, and I didn't read the contents of `.oracle/`.

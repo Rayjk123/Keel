@@ -1,0 +1,207 @@
+$ find . -type f -name "*.py" | grep -E "separab|model" | head -30
+$ cat ./astropy/modeling/separable.py
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+# Simple case - works correctly
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Simple case cm:')
+print(separability_matrix(cm))
+
+# Non-nested compound - works correctly
+print('\\nNon-nested compound:')
+print(separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+
+# Nested compound - BUG
+print('\\nNested compound (BUG):')
+result = separability_matrix(m.Pix2Sky_TAN() & cm)
+print(result)
+
+print('\\nExpected for nested:')
+print('[[ True,  True, False, False],')
+print(' [ True,  True, False, False],')
+print(' [False, False,  True, False],')
+print(' [False, False, False,  True]]')
+"
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import _coord_matrix, _cstack, _compute_n_outputs, _separable
+from astropy.modeling.core import Model, CompoundModel
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+full_model = m.Pix2Sky_TAN() & cm
+
+print('full_model type:', type(full_model))
+print('full_model.left:', type(full_model.left))
+print('full_model.right:', type(full_model.right))
+print('full_model.right.n_inputs:', full_model.right.n_inputs)
+print('full_model.right.n_outputs:', full_model.right.n_outputs)
+
+# Check if compound model has 'separable' attribute
+print('\\ncm.separable:', cm.separable)
+print('full_model.right.separable:', full_model.right.separable)
+
+# Let's trace through manually
+noutp = _compute_n_outputs(full_model.left, full_model.right)
+print('\\nnoutp:', noutp)
+
+# _coord_matrix for right (the cm compound model)
+print('\\nCalling _coord_matrix for cm:')
+cright = _coord_matrix(full_model.right, 'right', noutp)
+print('cright shape:', cright.shape)
+print('cright:\\n', cright)
+"
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import _coord_matrix, _cstack, _compute_n_outputs, _separable
+from astropy.modeling.core import Model, CompoundModel
+import numpy as np
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+full_model = m.Pix2Sky_TAN() & cm
+
+print('=== Debugging _cstack function ===')
+print()
+
+noutp = _compute_n_outputs(full_model.left, full_model.right)
+print('noutp:', noutp)
+
+# The left side
+cleft = _coord_matrix(full_model.left, 'left', noutp)
+print('cleft shape:', cleft.shape)
+print('cleft:\\n', cleft)
+
+# When right is a CompoundModel, _separable is called recursively
+# It returns a matrix for the CompoundModel
+sepright = _separable(full_model.right)
+print('\\nsepright (from _separable):')
+print('shape:', sepright.shape)
+print(sepright)
+
+# In _cstack, when right is NOT a Model (it's an array), this happens:
+print('\\nWhat _cstack does with array right:')
+cright = np.zeros((noutp, sepright.shape[1]))
+print('cright zeros shape:', cright.shape)
+cright[-sepright.shape[0]:, -sepright.shape[1]:] = 1  # BUG HERE!
+print('cright after assignment (BUG):')
+print(cright)
+
+print('\\nWhat it SHOULD be:')
+cright_correct = np.zeros((noutp, sepright.shape[1]))
+cright_correct[-sepright.shape[0]:, -sepright.shape[1]:] = sepright
+print(cright_correct)
+"
+$ sed -n '180,195p' /testbed/astropy/modeling/separable.py
+$ sed -n '213,240p' /testbed/astropy/modeling/separable.py
+$ sed -n '240,260p' /testbed/astropy/modeling/separable.py
+$ sed -i 's/cright\[-right.shape\[0\]:, -right.shape\[1\]:\] = 1/cright[-right.shape[0]:, -right.shape[1]:] = right/' /testbed/astropy/modeling/separable.py
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+# Simple case - works correctly
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('Simple case cm:')
+print(separability_matrix(cm))
+
+# Non-nested compound - works correctly
+print('\\nNon-nested compound:')
+print(separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+
+# Nested compound - should now work correctly
+print('\\nNested compound (FIXED):')
+result = separability_matrix(m.Pix2Sky_TAN() & cm)
+print(result)
+
+print('\\nExpected:')
+print('[[ True,  True, False, False],')
+print(' [ True,  True, False, False],')
+print(' [False, False,  True, False],')
+print(' [False, False, False,  True]]')
+
+# Test that the result is correct
+expected = [[ True,  True, False, False],
+            [ True,  True, False, False],
+            [False, False,  True, False],
+            [False, False, False,  True]]
+            
+import numpy as np
+print('\\nTest passed:', np.array_equal(result, expected))
+"
+$ cd /testbed && python -m pytest astropy/modeling/tests/test_separable.py -v
+$ cd /tmp && python3 -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+import numpy as np
+
+# Test 1: Original bug case
+print('=== Test 1: Original bug case ===')
+cm = m.Linear1D(10) & m.Linear1D(5)
+result = separability_matrix(m.Pix2Sky_TAN() & cm)
+expected = [[ True,  True, False, False],
+            [ True,  True, False, False],
+            [False, False,  True, False],
+            [False, False, False,  True]]
+print('Passed:', np.array_equal(result, expected))
+
+# Test 2: Deeply nested compound models
+print('\\n=== Test 2: Deeply nested compound models ===')
+inner = m.Linear1D(1) & m.Linear1D(2)
+middle = m.Linear1D(3) & inner
+result = separability_matrix(middle)
+expected2 = [[ True, False, False],
+             [False,  True, False],
+             [False, False,  True]]
+print('Result:\\n', result)
+print('Passed:', np.array_equal(result, expected2))
+
+# Test 3: Nested on left side
+print('\\n=== Test 3: Nested on left side ===')
+result = separability_matrix(cm & m.Linear1D(3))
+expected3 = [[ True, False, False],
+             [False,  True, False],
+             [False, False,  True]]
+print('Result:\\n', result)
+print('Passed:', np.array_equal(result, expected3))
+
+# Test 4: Both sides nested
+print('\\n=== Test 4: Both sides nested ===')
+cm1 = m.Linear1D(1) & m.Linear1D(2)
+cm2 = m.Linear1D(3) & m.Linear1D(4)
+result = separability_matrix(cm1 & cm2)
+expected4 = [[ True, False, False, False],
+             [False,  True, False, False],
+             [False, False,  True, False],
+             [False, False, False,  True]]
+print('Result:\\n', result)
+print('Passed:', np.array_equal(result, expected4))
+
+print('\\nAll tests passed!')
+"
+$ sed -n '240,250p' /testbed/astropy/modeling/separable.py
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The fix is complete. Let me provide a summary of what was done:
+
+## Summary
+
+**Problem:** The `separability_matrix` function was incorrectly computing separability for nested `CompoundModel` instances. When a `CompoundModel` (like `cm = Linear1D & Linear1D`) was nested inside another compound model (like `Pix2Sky_TAN & cm`), the separability matrix showed `True` for entries that should have been `False`.
+
+**Root Cause:** In the `_cstack` function in `/testbed/astropy/modeling/separable.py`, when the `right` parameter was an ndarray (the result of recursively computing separability for a nested CompoundModel), the code was incorrectly setting all values to `1` instead of using the actual matrix values.
+
+**Fix:** Changed line 246 in `_cstack` from:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = 1
+```
+to:
+```python
+cright[-right.shape[0]:, -right.shape[1]:] = right
+```
+
+This ensures that the separability matrix values from nested compound models are preserved instead of being overwritten with all `1`s.
+
+**Testing:** All existing tests pass, and the fix correctly handles:
+- The original bug case (`Pix2Sky_TAN() & cm` where `cm = Linear1D & Linear1D`)
+- Deeply nested compound models
+- Nested models on both left and right sides
+- Both sides being nested compound models

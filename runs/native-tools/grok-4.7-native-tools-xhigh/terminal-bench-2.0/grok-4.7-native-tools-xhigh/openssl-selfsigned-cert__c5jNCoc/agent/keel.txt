@@ -1,0 +1,121 @@
+$ mkdir -p /app/ssl && openssl genrsa -out /app/ssl/server.key 2048 && chmod 600 /app/ssl/server.key && openssl req -new -x509 -key /app/ssl/server.key -out /app/ssl/server.crt -days 365 -subj "/O=DevOps Team/CN=dev-internal.company.local" && cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem && chmod 600 /app/ssl/server.pem && openssl x509 -in /app/ssl/server.crt -noout -subject -startdate -enddate -fingerprint -sha256 && ls -la /app/ssl/ && openssl x509 -in /app/ssl/server.crt -noout -text | head -40
+$ python3 - << 'PY'
+from datetime import datetime
+import subprocess
+
+def parse_date(s):
+    # e.g. Nov 25 07:05:18 2026 GMT
+    s = s.strip()
+    if s.endswith(" GMT"):
+        dt = datetime.strptime(s, "%b %d %H:%M:%S %Y GMT")
+        return dt.strftime("%Y-%m-%d")
+    return s
+
+out = subprocess.check_output(
+    ["openssl", "x509", "-in", "/app/ssl/server.crt", "-noout", "-subject", "-startdate", "-enddate", "-fingerprint", "-sha256"],
+    text=True,
+)
+info = {}
+for line in out.splitlines():
+    k, v = line.split("=", 1)
+    info[k.strip()] = v.strip()
+
+subject = info["subject"]
+nb = parse_date(info["notBefore"])
+na = parse_date(info["notAfter"])
+fp = info["sha256 Fingerprint"]
+
+text = (
+    f"subject: {subject}\n"
+    f"notBefore: {nb}\n"
+    f"notAfter: {na}\n"
+    f"sha256 Fingerprint: {fp}\n"
+)
+open("/app/ssl/verification.txt", "w").write(text)
+print(text)
+PY
+cat > /app/check_cert.py << 'EOF'
+#!/usr/bin/env python3
+"""Verify the internal development server TLS certificate."""
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+CERT_PATH = Path("/app/ssl/server.crt")
+
+
+def main() -> int:
+    if not CERT_PATH.is_file():
+        print(f"Certificate not found: {CERT_PATH}", file=sys.stderr)
+        return 1
+
+    data = CERT_PATH.read_bytes()
+    if not data:
+        print("Certificate file is empty", file=sys.stderr)
+        return 1
+
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.backends import default_backend
+
+        cert = x509.load_pem_x509_certificate(data, default_backend())
+        cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+        if not cn_attrs:
+            print("Certificate has no Common Name", file=sys.stderr)
+            return 1
+        common_name = cn_attrs[0].value
+        expires = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        expiry_date = expires.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        # Fallback to OpenSSL CLI if cryptography is unavailable or fails.
+        import subprocess
+
+        subject = subprocess.check_output(
+            ["openssl", "x509", "-in", str(CERT_PATH), "-noout", "-subject"],
+            text=True,
+        ).strip()
+        end = subprocess.check_output(
+            ["openssl", "x509", "-in", str(CERT_PATH), "-noout", "-enddate"],
+            text=True,
+        ).strip()
+        # subject=O = DevOps Team, CN = dev-internal.company.local
+        common_name = None
+        subj_val = subject.split("=", 1)[-1]
+        for part in subj_val.split(","):
+            part = part.strip()
+            if part.startswith("CN = ") or part.startswith("CN="):
+                common_name = part.split("=", 1)[1].strip()
+        if not common_name:
+            print("Certificate has no Common Name", file=sys.stderr)
+            return 1
+        end_val = end.split("=", 1)[1].strip()
+        dt = datetime.strptime(end_val.replace(" GMT", ""), "%b %d %H:%M:%S %Y")
+        expiry_date = dt.strftime("%Y-%m-%d")
+
+    print(f"Common Name: {common_name}")
+    print(f"Expiration Date: {expiry_date}")
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
+chmod 755 /app/check_cert.py
+python3 /app/check_cert.py
+echo "---- verification.txt ----"
+cat /app/ssl/verification.txt
+echo "---- pem check ----"
+openssl x509 -in /app/ssl/server.pem -noout -subject
+openssl rsa -in /app/ssl/server.pem -check -noout
+stat -c '%a %n' /app/ssl/*
+The self-signed TLS certificate and supporting files are in `/app/ssl/`, and `/app/check_cert.py` confirms the certificate.
+
+- **Private key:** `/app/ssl/server.key` (2048-bit RSA, mode `600`)
+- **Certificate:** `/app/ssl/server.crt` (365 days, O=`DevOps Team`, CN=`dev-internal.company.local`)
+- **Combined PEM:** `/app/ssl/server.pem` (key + certificate)
+- **Verification:** `/app/ssl/verification.txt` (subject, `YYYY-MM-DD` validity, SHA-256 fingerprint)
+- **Checker:** `/app/check_cert.py` loads the cert and prints CN, expiration, and `Certificate verification successful`

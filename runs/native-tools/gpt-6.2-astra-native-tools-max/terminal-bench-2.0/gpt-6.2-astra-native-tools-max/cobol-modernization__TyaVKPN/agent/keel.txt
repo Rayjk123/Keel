@@ -1,0 +1,122 @@
+$ pwd && ls -la && ls -la /app/src /app/data && which cobc || true && python3 --version
+> read /app/src/program.cbl
+$ for f in /app/src/INPUT.DAT /app/data/*.DAT; do echo "$f"; od -Ax -tc -w22 -v "$f"; od -An -tx1 -w22 -v "$f"; done
+$ cobc -info && find /app -type f -maxdepth 5 | sort && git status --short 2>/dev/null || true
+$ work=$(mktemp -d /tmp/bookforum.XXXXXX); echo "$work" > /tmp/bookforum-workpath; cd "$work" && cp -r /app/src /app/data . && cobc -x -o bookforum src/program.cbl && cobc -C -o generated.c src/program.cbl && ./bookforum; rc=$?; echo "ref: $work, rc=$rc"; diff -r /app/data "$work/data" || :; cat "$work/generated.c"
+$ cd "$(cat /tmp/bookforum-workpath)" && sed -n '80,490p' generated.c && cat generated.c.l.h
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess, shutil
+src=Path('/app')
+ain=Path('src/INPUT.DAT')
+tx=Path('data/TRANSACTIONS.DAT'); ac=Path('data/ACCOUNTS.DAT'); bk=Path('data/BOOKS.DAT')
+for buyer,seller,amount in [*( (b'U001',b'U002',a) for a in (b'0000000200', b'200', b'00000001', b'2', b'', b'0000000000', b'1000000000', b'9999999999', b'       200',b'200       ', b'ABCDEFGHIJ',b'12345.6789', b'0123456789', b'-000000017', b'0000200\n', b'200\x00\x00\x00\x00\x00\x00\x00', b'0000000200\nU00', b'  42') ), (b'U002',b'U002',b'0000000200'), (b'U002',b'U002',b'0000002000')]:
+    for p in [ac, bk, tx]: shutil.copy(src / p,p)
+    ain.write_bytes(buyer+seller+b'B001'+amount)
+    p=subprocess.run(['./bookforum'],capture_output=True)
+    print(amount, buyer,seller, 'rc',p.returncode, p.stdout,p.stderr,'=>', ac.read_bytes()[24:34], ac.read_bytes()[58:68],bk.read_bytes()[24:28], tx.read_bytes()[66:])
+PY
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess, shutil
+base=Path('/app'); ac=Path('data/ACCOUNTS.DAT'); bk=Path('data/BOOKS.DAT'); tx=Path('data/TRANSACTIONS.DAT'); ain=Path('src/INPUT.DAT')
+def trial(records=None,books=None,buyer=b'U001',seller=b'U002',book=b'B001',amount=b'0000000002',txs=b'-'):
+    for p in [ac,bk]: shutil.copy(base/p,p)
+    a,b=ac.read_bytes(),bk.read_bytes()
+    ac.write_bytes(b''.join(records) if records is not None else a); bk.write_bytes(b''.join(books) if books is not None else b)
+    if txs is None: tx.unlink(missing_ok=True)
+    else: tx.write_bytes(txs)
+    ain.write_bytes(buyer+seller+book+amount)
+    orig_ac=ac.read_bytes(); orig_bk=bk.read_bytes()
+    p=subprocess.run(['./bookforum'],capture_output=True)
+    print(p.returncode, p.stderr or p.stdout, '\n ac', repr(orig_ac), '=>', repr(ac.read_bytes()) if ac.read_bytes()!=orig_ac else '--', '\n bk', repr(orig_bk), '=>', repr(bk.read_bytes()) if bk.read_bytes()!=orig_bk else '--','\n tx', tx.read_bytes() if tx.exists() else '<missing>')
+
+a=(base/ac).read_bytes(); b=(base/bk).read_bytes()
+a1,a2,a3=(a[i:i+34] for i in range(0,len(a),34)); b1,b2,b3=(b[i:i+28] for i in range(0,len(b),28))
+print('missing trans, malformed trans:');trial(txs=None); trial(txs=b'abc')
+print('partial acct');trial(records=[a1,a2,a1[:4]]); trial(records=[a1,a2,a1[:3]]);trial(records=[a1,a2[:4]]);trial(records=[a1,a2[:32]]);trial(records=[a1,a2,b'U00']);trial(records=[a2,a1[:4]]);trial(records=[a1[:4]],buyer=b'U001',seller=b'U001',books=[b1[:24]+b'U001']); trial(records=[b'U'],buyer=b'U\x00\x00\x00', seller=b'U\x00\x00\x00',books=[b1[:24]+b'U\x00\x00\x00']);trial(records=[b'U'],buyer=b'U   ', seller=b'U   ',books=[b1[:24]+b'U   ']);
+print('partial books');trial(books=[b2,b1[:4]]);trial(books=[b1[:4]]);trial(books=[b1[:27]]);trial(books=[b1, b'B']); trial(books=[b2,b1,b2[:26]]);trial(books=[b1[:4]+b1[4:26]]);trial(books=[b1, b'B', b''],records=[a1,a2[:33]])
+PY
+$ ls /usr/share/doc/gnucobol* /usr/share/doc/libcob* /usr/src && ls -la /tmp | head -100 && nm -D /usr/lib/x86_64-linux-gnu/libcob.so | grep -e cob_decimal -e cob_move -e cob_[gs][eu]t | head -160
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess
+src=Path('/app')
+ain=Path('src/INPUT.DAT');tx=Path('data/TRANSACTIONS.DAT'); ac=Path('data/ACCOUNTS.DAT'); bk=Path('data/BOOKS.DAT');a=(src/ac).read_bytes();b=(src/bk).read_bytes()
+def trial(amount, balance,show=True):
+    tx.write_bytes(b'')
+    ac.write_bytes(a[:24]+balance+a[34:58]+balance)
+    bk.write_bytes(b)
+    ain.write_bytes(b'U001U002B001'+amount)
+    p=subprocess.run(['./bookforum'],capture_output=True)
+    if p.returncode:print('ERR',amount,balance, p);return
+    acb=ac.read_bytes(); txb=tx.read_bytes()
+    ret= (acb[24:34],acb[58:68],txb[4:14])
+    if show:print('amt',amount,'bal',balance,'=>',*ret)
+    return ret
+for char in [b'\x00',b'\xff', b' ', b'\t', b'\x01', b'\r', b':',b'+',b'-', b'\x7f', b'\x80',b'a',b'z',b'{',b'}',b'p',b'y',b'/',b'\x0f',b'@']:
+    for n in [0,4,9]:
+        amount=b'0'*n+char+b'0'*(9-n)
+        trial(amount,b'0000001000')
+        trial(b'0000001000',amount)
+    trial(char*10,b'0000001000');trial(b'0000001000',char*10)
+PY
+$ objdump -d --start-address=0x22110 --stop-address=0x22940 /usr/lib/x86_64-linux-gnu/libcob.so > /tmp/bookforum-num.asm && sed -n '1,360p' /tmp/bookforum-num.asm
+$ sed -n '50,168p' /tmp/bookforum-num.asm && cd "$(cat /tmp/bookforum-workpath)" && cat generated.c.h && python - <<'PY'
+print((2**64)%10**10, (2**64//100)%10**10, (2**64/100)%10**10)
+PY
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess
+src=Path('/app');ain=Path('src/INPUT.DAT');tx=Path('data/TRANSACTIONS.DAT'); ac=Path('data/ACCOUNTS.DAT'); bk=Path('data/BOOKS.DAT');a=(src/ac).read_bytes();b=(src/bk).read_bytes()
+def trial(amount):
+    tx.write_bytes(b'')
+    ac.write_bytes(a)
+    bk.write_bytes(b)
+    ain.write_bytes(b'U001U002B001'+amount)
+    p=subprocess.run(['./bookforum'],capture_output=True)
+    if p.returncode:print('ERR',amount, p);return
+    acb=ac.read_bytes();txb=tx.read_bytes();return acb[24:34],acb[58:68],txb[4:14]
+for amt in [b'12\x00345 678', b'\x00abc 12 34', b'     \x001234', b'\xff 3\x001\x00\x013\xaa\xbb', b'0\x00100\x00x\x0035', b' \x01\x00      1', b'00 00\x00\t2\n1',b'000345678p',b'8888888888',b'123456789\x00',b'1\x0023456789',b'12\x003456789']:
+    print(amt, trial(amt))
+t=bytes.maketrans(b'\x00 ',b'00')
+for i in range(256):
+    amount=bytes([i])*10
+    got=trial(amount)
+    if got and got[2]!=amount.translate(t): print('unexpected', i,got)
+PY
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess
+src=Path('/app'); fs=[Path('src/INPUT.DAT'), Path('data/ACCOUNTS.DAT'), Path('data/BOOKS.DAT'), Path('data/TRANSACTIONS.DAT')]
+for f in [*fs, 'empty input']:
+    for file in fs:
+        file.write_bytes((src/file).read_bytes())
+    fs[0].write_bytes(b'U001U002B001'+b'0000000200')
+    if f=='empty input':fs[0].write_bytes(b'')
+    else:f.unlink()
+    p=subprocess.run(['./bookforum'],capture_output=True)
+    print(f, p.returncode, p.stdout,p.stderr, [file.exists() for file in fs])
+PY
+$ command -v strace || true; command -v mypy || true; umask && ls -l /usr/lib/x86_64-linux-gnu/libcob* && ls /tmp/bookforum.*/src
+$ t=$(mktemp -d /tmp/bookforum-perm.XXXXXX); cd "$t" && cp "$(cat /tmp/bookforum-workpath)/bookforum" . && mkdir src data && chmod 755 . && chown -R nobody data src && printf 'U001U002B0010000000200' > src/INPUT.DAT && for p in 200 400 600; do cp /app/data/*.DAT data/; chown nobody data/*.DAT; chmod "$p" data/TRANSACTIONS.DAT; echo "mode $p"; runuser -u nobody -- ./bookforum; wc -c data/*.DAT; done
+$ cd "$(cat /tmp/bookforum-workpath)" && python - <<'PY'
+from pathlib import Path
+import subprocess, shutil
+fs = list(map(Path, ['src/INPUT.DAT','data/ACCOUNTS.DAT','data/BOOKS.DAT','data/TRANSACTIONS.DAT']))
+for f in fs:
+    for file in fs:shutil.copy(Path('/app')/file,file)
+    fs[0].write_bytes(b'U001U002B0010000000200')
+    f.unlink(); f.mkdir()
+    p=subprocess.run(['./bookforum'],capture_output=True,timeout=1); print(f, p.returncode, p.stdout,p.stderr);f.rmdir()
+PY
+> write /app/program.py
+$ cd /app && chmod +x program.py && sha256sum data/*.DAT src/INPUT.DAT > /tmp/bookforum-before.sha256 && ./program.py && sha256sum -c /tmp/bookforum-before.sha256 && python - <<'PY'
+from pathlib import Path
+compile(Path('program.py').read_bytes(), 'program.py', 'exec')
+PY
+$ echo "Test workspace $(cat /tmp/bookforum-workpath)" && ls -la "$(cat /tmp/bookforum-workpath)" && ls -la /app
+> write /tmp/check_bookforum.py
+$ python /tmp/check_bookforum.py
+> read /app/program.py
+Implemented `/app/program.py` and verified that all three `.DAT` files matched the GnuCOBOL outputs byte-for-byte across 621 test cases. The original input and data files remain unchanged.

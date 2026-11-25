@@ -1,0 +1,64 @@
+$ find . -type d -name '*requests*' -o -name '*.py' | head -100; ls -la
+$ rg -n "hooks|register_hook" --type py -g '!build/**' -g '!requests/packages/**' -g '!requests.egg-info/**'
+$ grep -n -R --include='*.py' -E 'hooks|register_hook' requests tests --exclude-dir=packages
+$ sed -n '1,200p' requests/models.py; echo '======= HOOKS ======='; sed -n '430,500p' requests/models.py; echo '======= DISPATCH ======='; cat requests/hooks.py; echo '======= SESSIONS ======='; sed -n '50,220p' requests/sessions.py; echo '======= TESTS ======='; sed -n '680,780p' tests/test_requests.py
+$ sed -n '40,180p' requests/models.py; echo '======= REGISTER ======='; sed -n '450,490p' requests/models.py
+$ sed -n '1,80p' requests/__init__.py; echo '======= HISTORY HEAD ======='; head -80 HISTORY.rst; echo '======= GIT LOG ======='; git log --oneline -20; echo '======= COMPAT CALLABLE ======='; grep -n -E 'Callable|callable' requests/compat.py requests/models.py | head -40
+$ grep -n -n "register_hook\|hooks" docs/*.rst | head -50; echo '======= MODELS DOC ======='; sed -n '1,40p' requests/models.py; echo '======= UTILS from_key_val ======='; grep -n -A 30 "def from_key_val_list" requests/utils.py
+$ sed -n '220,320p' requests/sessions.py; echo '======= COMPAT ======='; wc -l requests/compat.py; grep -n "def \|Callable\|callable" requests/compat.py | head -80
+$ sed -n '1,50p' requests/sessions.py; echo '======= COMPAT FULL ======='; cat requests/compat.py
+$ python - << 'PY'
+from pathlib import Path
+p = Path('requests/models.py')
+text = p.read_text()
+old = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        self.hooks[event].append(hook)
+'''
+new = '''    def register_hook(self, event, hook):
+        """Properly register a hook."""
+
+        if isinstance(hook, (list, tuple)):
+            for h in hook:
+                self.register_hook(event, h)
+            return
+
+        self.hooks[event].append(hook)
+'''
+if old not in text:
+    raise SystemExit('pattern not found')
+p.write_text(text.replace(old, new, 1))
+print('updated')
+PY
+$ python - << 'PY'
+from requests.models import Request
+from requests.hooks import dispatch_hook
+
+calls = []
+def h1(data):
+    calls.append(('h1', data))
+    return data + 1
+def h2(data):
+    calls.append(('h2', data))
+    return data + 10
+
+r = Request(url='http://example.com', hooks={'response': [h1, h2], 'args': h1})
+print('response hooks', r.hooks['response'])
+print('args hooks', r.hooks['args'])
+assert r.hooks['response'] == [h1, h2]
+assert r.hooks['args'] == [h1]
+out = dispatch_hook('response', r.hooks, 1)
+print('dispatch', out, calls)
+assert out == 12
+assert calls == [('h1', 1), ('h2', 2)]
+
+# session-style: register_hook called once per event with a list
+r2 = Request(url='http://example.com')
+r2.register_hook('response', [h1, h2])
+assert r2.hooks['response'] == [h1, h2]
+print('ok')
+PY
+$ python -m pytest tests/test_requests.py -k "hook" -q --tb=line -p no:cacheprovider 2>&1 | tail -40
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+`Request.register_hook()` now accepts a list or tuple of callables for a hook event and registers each one, instead of wrapping the whole list as a single non-callable hook. A single callable still works as before, so `Request(..., hooks={'response': [hook_a, hook_b]})` and session hooks can register multiple functions per event.

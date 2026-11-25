@@ -1,0 +1,243 @@
+$ cd . && pwd && ls && git log --oneline | head -5 && git status
+$ grep -n "__getitem__\|__len__\|def _iter\|def named_steps\|class Pipeline\|class FeatureUnion\|def _validate_steps" sklearn/pipeline.py
+> read /testbed/sklearn/pipeline.py
+> read /testbed/sklearn/pipeline.py
+$ cd /testbed && grep -n "len(self.steps)\|len(pipe\|len(pipeline\|__len__" sklearn/pipeline.py sklearn/tests/test_pipeline.py sklearn/utils/metaestimators.py
+$ cd /testbed && python - <<'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+try:
+    print(len(pipe))
+except Exception as e:
+    print("len(pipe) ->", type(e).__name__, e)
+
+try:
+    print(pipe[:len(pipe)])
+except Exception as e:
+    print("pipe[:len(pipe)] ->", type(e).__name__, e)
+
+# What happens when iterating (the old sequence protocol using __getitem__ + IndexError)?
+try:
+    print(list(iter(pipe)))
+except Exception as e:
+    print("iter ->", type(e).__name__, e)
+EOF
+python -c "import sklearn; print(sklearn.__version__, sklearn.__file__)"
+$ cd /testbed && grep -n "indexing\|__getitem__\|pipe\[" sklearn/tests/test_pipeline.py | head -40
+$ cd /testbed && grep -rn "Pipeline.*index\|index.*Pipeline\|pipe\[\|\[:1\]\|\[-1\]" doc/modules/compose.rst | head -20; echo ---; grep -n -i "pipeline" doc/whats_new/v0.21.rst | head -30
+> read /testbed/sklearn/tests/test_pipeline.py
+> read /testbed/doc/whats_new/v0.21.rst
+> read /testbed/doc/modules/compose.rst
+$ cd /testbed && grep -rn "def __len__" sklearn --include=*.py | grep -v "/tests/"; echo "--- BaseEnsemble ---"; sed -n '/def __len__/,/return iter/p' sklearn/ensemble/base.py
+$ cd /testbed && python -c "import numpy, scipy, sys; print(sys.version); print('numpy', numpy.__version__, 'scipy', scipy.__version__)"; python -c "import pytest; print('pytest', pytest.__version__)"; python -c "import flake8; print('flake8', flake8.__version__)" 2>&1 | tail -1; sed -n 1,40p setup.cfg
+> read /testbed/doc/modules/compose.rst
+$ cd /testbed && git log --oneline -5 -- sklearn/pipeline.py; echo "--- places that special-case __len__ / sized objects ---"; grep -rn "__len__" sklearn --include=*.py | grep -v "/tests/\|externals/\|def __len__"
+$ cd /testbed && sed -n '/^def _num_samples/,/^def check_memory/p' sklearn/utils/validation.py | head -60
+$ cd /testbed && sed -n 1,80p sklearn/tests/test_pipeline.py
+$ cd /testbed && sed -n 118,145p sklearn/utils/validation.py; echo ----; sed -n 660,680p sklearn/compose/_column_transformer.py; echo ----; grep -rn "_is_arraylike" sklearn --include=*.py | grep -v "/tests/"
+$ cd /testbed && grep -n "doc\|PYTEST" Makefile | head -20; echo ---; ls doc/modules/compose.rst && timeout 300 python -m pytest doc/modules/compose.rst -q -x 2>&1 | tail -8
+$ cd /testbed && grep -n "Don't get num_samples\|ensemble\|estimator" sklearn/utils/tests/test_validation.py | head -20
+$ cd /testbed && sed -n 905,935p sklearn/model_selection/_validation.py
+$ cd /testbed && grep -rn "_index_param_value" sklearn --include=*.py
+$ cd /testbed && echo "=== Sized/Sequence/iterable checks ===" && grep -rn "Sized\|abc.Sequence\|import Sequence\|np.iterable\|_is_iterable\|isinstance([a-z_.]*, *Sequence" sklearn --include=*.py | grep -v "/tests/\|externals/" 
+echo; echo "=== truthiness checks on estimator-like names ===" && grep -rnE "(if|elif|and|or|not) +(self\.)?(base_)?(estimator|transformer|clf|regressor|classifier|final_estimator|init)\b *(:|\)| and| or|$)" sklearn --include=*.py | grep -v "/tests/\|externals/\| is \| == \| != " | head -30
+$ cd /testbed && sed -n 1,80p sklearn/utils/metaestimators.py
+$ cd /testbed && sed -n 520,545p sklearn/utils/__init__.py; echo "-----"; sed -n 1,60p sklearn/tests/test_docstring_parameters.py | head -80
+$ cd /testbed && python - <<'EOF'
+# Baseline behaviours (BEFORE the change) that could be affected by Pipeline becoming "sized".
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.utils.validation import _is_arraylike, _num_samples
+
+pipe = Pipeline([('s', StandardScaler()), ('c', SVC())])
+print("bool(pipe)          :", bool(pipe))
+print("_is_arraylike(pipe) :", _is_arraylike(pipe))
+print("np.asarray(pipe)    :", repr(np.asarray(pipe)).replace("\n", " ")[:90])
+try:
+    _num_samples(pipe)
+except TypeError as e:
+    print("_num_samples(pipe)  : TypeError:", str(e)[:50])
+print("list(pipe)          :", [type(e).__name__ for e in pipe])
+print("reversed(pipe)      :", end=" ")
+try:
+    print(list(reversed(pipe)))
+except TypeError as e:
+    print("TypeError:", e)
+EOF
+> read /testbed/sklearn/pipeline.py
+$ cd /testbed && cat > /tmp/probe_pipeline_len.py <<'EOF'
+"""Probe behaviours that could be affected by Pipeline gaining __len__."""
+import warnings
+import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score
+from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.ensemble import VotingClassifier, BaggingClassifier
+
+warnings.simplefilter("ignore")
+X, y = load_iris(return_X_y=True)
+
+def show(label, fn):
+    try:
+        print("%-46s %s" % (label, fn()))
+    except Exception as e:
+        print("%-46s %s: %s" % (label, type(e).__name__, str(e)[:60]))
+
+pipe = Pipeline([('s', StandardScaler()), ('c', SVC(gamma='scale'))])
+
+# 1. GridSearchCV where a *step* is searched over a list of Pipelines
+inner_a = make_pipeline(StandardScaler(), LogisticRegression(solver='lbfgs', multi_class='auto'))
+inner_b = make_pipeline(PCA(n_components=2), LogisticRegression(solver='lbfgs', multi_class='auto'))
+outer = Pipeline([('model', inner_a)])
+gs = GridSearchCV(outer, {'model': [inner_a, inner_b]}, cv=3, iid=False)
+show("GridSearchCV over Pipeline-valued step", lambda: (gs.fit(X, y).best_score_ > 0.5, len(gs.cv_results_['params'])))
+show("  cv_results_['param_model'] dtype/shape", lambda: (gs.cv_results_['param_model'].dtype, gs.cv_results_['param_model'].shape))
+show("  type of param_model[0]", lambda: type(gs.cv_results_['param_model'][0]).__name__)
+
+# 2. RandomizedSearchCV with Pipeline-valued step
+rs = RandomizedSearchCV(outer, {'model': [inner_a, inner_b]}, n_iter=2, cv=3, iid=False, random_state=0)
+show("RandomizedSearchCV over Pipeline-valued step", lambda: (rs.fit(X, y).best_score_ > 0.5))
+
+# 3. Pipeline as sub-estimator of other meta-estimators
+vc = VotingClassifier([('p1', inner_a), ('p2', inner_b)])
+show("VotingClassifier of Pipelines", lambda: round(vc.fit(X, y).score(X, y), 3))
+bc = BaggingClassifier(inner_a, n_estimators=3, random_state=0)
+show("BaggingClassifier(Pipeline)", lambda: round(bc.fit(X, y).score(X, y), 3))
+show("cross_val_score(Pipeline)", lambda: cross_val_score(pipe, X, y, cv=3).shape)
+
+# 4. numpy coercion of a Pipeline (potential behaviour change)
+def conv(p):
+    a = np.asarray(p)
+    return "shape=%s dtype=%s" % (a.shape, a.dtype)
+show("np.asarray(pipe)", lambda: conv(pipe))
+def conv_list(ps):
+    a = np.empty(len(ps), dtype=object)
+    for i, p in enumerate(ps):
+        a[i] = p
+    return "ok shape=%s first=%s" % (a.shape, type(a[0]).__name__)
+show("object array filled element-wise", lambda: conv_list([inner_a, inner_b]))
+EOF
+python /tmp/probe_pipeline_len.py 2>&1 | tee /tmp/probe_before.txt
+$ cd /testbed && echo "=== 'x or y' / ternary / not-x patterns around estimator-like names (library code only) ===" 
+grep -rnE "(estimator|transformer|regressor|classifier|clf|model|pipe|pipeline|init)\b *(or|and) |(= *|return |\(|, *)(self\.)?(base_)?(estimator|transformer|regressor|classifier|clf|pipe|pipeline) +or |if +(not +)?(self\.)?(base_)?(estimator|transformer|regressor|classifier|clf|pipe|pipeline|final_estimator|_final_estimator)( *:| +else)" sklearn --include=*.py | grep -v "/tests/\|externals/\|^sklearn/utils/_joblib" | head -20
+echo; echo "=== changelog entries in v0.21 without an :issue: reference (precedent check) ==="
+awk '/^- \|/{if(entry!="" && entry !~ /:issue:|:pr:/) print "---\n" entry; entry=""} {entry=entry $0 "\n"} END{if(entry !~ /:issue:|:pr:/) print "---\n" entry}' doc/whats_new/v0.21.rst | head -20
+echo "=== Enhancement tag usage in 0.21 ==="; grep -c "|Enhancement|" doc/whats_new/v0.21.rst
+$ cd /testbed && cat PULL_REQUEST_TEMPLATE.md | head -40; echo; echo "=== CONTRIBUTING: whats_new / changelog guidance ==="; grep -n -i "what's new\|whats_new\|changelog\|what.s new" CONTRIBUTING.md doc/developers/contributing.rst | head -10
+$ cd /testbed && python - <<'EOF'
+# How do existing "sized" estimators (BaseEnsemble has __len__/__getitem__/__iter__) behave in the places
+# that Pipeline will now also reach?  This tells me which side effects are pre-existing vs. new.
+import numpy as np, warnings
+warnings.simplefilter("ignore")
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import load_iris
+from sklearn.model_selection import cross_val_score
+from sklearn.utils.validation import _is_arraylike, _num_samples, check_consistent_length
+from sklearn.linear_model import LogisticRegression
+
+X, y = load_iris(return_X_y=True)
+rf = RandomForestClassifier(n_estimators=3, random_state=0).fit(X, y)
+
+print("bool(rf)                 :", bool(rf))
+print("_is_arraylike(rf)        :", _is_arraylike(rf))
+print("np.asarray(rf).shape     :", np.asarray(rf).shape, "(sequence protocol kicks in)")
+try:
+    _num_samples(rf)
+except TypeError as e:
+    print("_num_samples(rf)         : TypeError ->", str(e)[:45])
+try:
+    check_consistent_length([1, 2], rf)
+except TypeError as e:
+    print("check_consistent_length  : TypeError ->", str(e)[:45])
+
+# An estimator object passed as a *fit param* value goes through _index_param_value in cross_val_score
+class NeedsExtra(LogisticRegression):
+    def fit(self, X, y, extra=None):
+        return super().fit(X, y)
+try:
+    cross_val_score(NeedsExtra(solver='lbfgs', multi_class='auto'), X, y, cv=3, fit_params={'extra': rf})
+    print("cross_val_score w/ ensemble as fit_param: OK")
+except TypeError as e:
+    print("cross_val_score w/ ensemble as fit_param: TypeError ->", str(e)[:50])
+EOF
+> edit /testbed/sklearn/pipeline.py
+$ cd /testbed && python - <<'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+# --- exact reproduction from the issue ---
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+print("len(pipe)           =", len(pipe))
+sub = pipe[:len(pipe)]
+print("pipe[:len(pipe)]    ->", type(sub).__name__, [n for n, _ in sub.steps])
+assert sub.steps == pipe.steps
+assert sub is not pipe
+
+# --- consistency with indexing ---
+n = len(pipe)
+assert pipe[n - 1] is pipe[-1]
+assert pipe[-n] is pipe[0]
+for bad in (n, -n - 1):
+    try:
+        pipe[bad]
+    except IndexError:
+        pass
+    else:
+        raise AssertionError("expected IndexError for %r" % bad)
+
+# --- steps that are None / 'passthrough' are still steps ---
+p2 = Pipeline([('a', 'passthrough'), ('b', None), ('c', clf)])
+print("len(passthrough/None pipeline) =", len(p2))
+assert len(p2) == 3
+
+# --- len tracks later modifications of steps (set_params / direct assignment) ---
+p3 = Pipeline([('anova', anova_filter), ('svc', clf)])
+p3.steps = p3.steps + [('svc2', svm.SVC())]
+assert len(p3) == 3
+p3.set_params(steps=[('only', clf)])
+assert len(p3) == 1
+
+# --- slices / reversed / iter ---
+print("len(pipe[:1])       =", len(pipe[:1]), " len(pipe[1:])=", len(pipe[1:]), " len(pipe[2:])=", len(pipe[2:]))
+print("list(reversed(pipe)) ->", [type(e).__name__ for e in reversed(pipe)])
+print("list(pipe)           ->", [type(e).__name__ for e in pipe])
+print("bool(pipe)           =", bool(pipe))
+EOF
+$ cd /testbed && git stash -q && echo "[stashed: original code]" && python - <<'EOF'
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+pipe = Pipeline([('a', SVC()), ('b', SVC())])
+for label, fn in [("Pipeline([])", lambda: Pipeline([])),
+                  ("pipe[2:]  (empty slice)", lambda: pipe[2:])]:
+    try:
+        fn()
+    except Exception as e:
+        print("%-26s -> %s: %s" % (label, type(e).__name__, e))
+EOF
+git stash pop -q && echo "[restored my change]" && git diff --stat

@@ -1,0 +1,62 @@
+$ printf '%s\n' '--- workspace and identity ---'; pwd; id; ls -la; printf '\n%s\n' '--- system ---'; cat /etc/os-release; ps -p 1 -o comm=; command -v nginx || true; command -v curl || true; printf '\n%s\n' '--- nginx paths ---'; ls -ld /etc/nginx /etc/nginx/nginx.conf /etc/nginx/conf.d /etc/nginx/sites-enabled /var/www/html /var/log/nginx 2>/dev/null || true; printf '\n%s\n' '--- listeners ---'; if command -v ss >/dev/null; then ss -ltn; else awk '$4 == "0A" {print $2}' /proc/net/tcp /proc/net/tcp6; fi; printf '\n%s\n' '--- git ---'; git status --short --branch 2>/dev/null || true
+> read /proc/1/comm
+> read /usr/sbin/policy-rc.d
+$ command -v apt-get; ls -la /var/lib/apt/lists; command -v systemctl || true; command -v service || true; command -v python3 || true; command -v python || true; command -v node || true; command -v perl || true; cat /etc/resolv.conf
+$ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx
+> read /etc/nginx/nginx.conf
+$ ls -la /etc/nginx/conf.d /etc/nginx/sites-enabled /var/www/html /var/log/nginx; ip -brief address show lo; getent hosts localhost; ss -ltn
+> edit /etc/nginx/nginx.conf
+> write /etc/nginx/conf.d/benchmark-site.conf
+> write /var/www/html/index.html
+> write /var/www/html/404.html
+$ set -eu
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+nginx
+python3 - <<'PY'
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+opener = build_opener(ProxyHandler({}))
+base_url = 'http://localhost:8080'
+
+def get(path, agent):
+    try:
+        response = opener.open(Request(base_url + path, headers={'User-Agent': agent}), timeout=5)
+    except HTTPError as exc:
+        response = exc
+    with response:
+        return response.code, response.read().decode().rstrip('\n')
+
+assert get('/', 'benchmark-index-check') == (200, 'Welcome to the benchmark webserver')
+assert get('/__benchmark_missing__', 'benchmark-404-check') == (404, 'Page not found - Please check your URL')
+print('localhost:8080 returned the expected homepage (200) and custom 404 page.')
+
+barrier = Barrier(24)
+def concurrent_get(_):
+    barrier.wait(timeout=5)
+    return get('/', 'benchmark-rate-check')[0]
+
+with ThreadPoolExecutor(max_workers=barrier.parties) as pool:
+    statuses = Counter(pool.map(concurrent_get, range(barrier.parties)))
+assert statuses[200] and statuses[429] and set(statuses) == {200, 429}, statuses
+print(f'Burst test: {statuses[200]} requests served; {statuses[429]} rate limited (429).')
+
+access_log = Path('/var/log/nginx/benchmark-access.log')
+entries = access_log.read_text().splitlines()
+for suffix in (' GET 200 "benchmark-index-check"', ' GET 404 "benchmark-404-check"'):
+    entry = next(line for line in entries if line.startswith('[') and line.endswith(suffix))
+    print(entry)
+error_log = Path('/var/log/nginx/benchmark-error.log')
+assert 'limiting requests' in error_log.read_text(), 'Expected rate limiting in the error log'
+print(f'Access log: {access_log}\nError log:  {error_log}')
+PY
+ss -ltnp 'sport = :8080'
+Nginx is running at `http://localhost:8080`, serving `/var/www/html` with the default site disabled. The configuration passed `nginx -t`, and local tests verified the homepage, custom 404 page, and per-IP limit of 10 requests per second with a burst of 10.
+
+Access logs: `/var/log/nginx/benchmark-access.log`  
+Error logs: `/var/log/nginx/benchmark-error.log`

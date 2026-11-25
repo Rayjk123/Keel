@@ -1,0 +1,103 @@
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..9527c5fa 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,13 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* Fixed a false negative for ``ignore-paths`` when running with ``--recursive=y``.
++  Patterns that match a file path but not its parent directory (for example
++  ``^src/gen/.*$``) were not applied to files discovered in directories without
++  an ``__init__.py``.
++
++  Closes #6964
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..bd1df113 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -610,11 +610,23 @@ class PyLinter(
+                         skip_subtrees.append(root)
+                         yield root
+                     else:
+-                        yield from (
+-                            os.path.join(root, file)
+-                            for file in files
+-                            if file.endswith(".py")
+-                        )
++                        # Discover individual files, but still honor ignore-paths
++                        # (and other ignore options) on those files. A pattern such
++                        # as ``^src/gen/.*$`` matches ``src/gen/about.py`` but not
++                        # the directory ``src/gen``, so checking only the directory
++                        # would let the files through.
++                        for file in files:
++                            if not file.endswith(".py"):
++                                continue
++                            filepath = os.path.join(root, file)
++                            if _is_ignored_file(
++                                filepath,
++                                self.config.ignore,
++                                self.config.ignore_patterns,
++                                self.config.ignore_paths,
++                            ):
++                                continue
++                            yield filepath
+             else:
+                 yield something
+ 
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..41accd64 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -912,6 +912,47 @@ def test_recursive_ignore(ignore_parameter, ignore_parameter_value) -> None:
+     assert module in linted_file_paths
+ 
+ 
++def test_recursive_ignore_path_does_not_match_directory(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """``ignore-paths`` should ignore files even when the pattern does not match
++    the parent directory itself.
++
++    ``--recursive=y`` walks directories that are not packages and yields each
++    ``.py`` file. A pattern such as ``^src/gen/.*$`` matches ``src/gen/about.py``
++    but not the directory ``src/gen``, so the files must be filtered individually.
++    See https://github.com/PyCQA/pylint/issues/6964.
++    """
++    src = tmp_path / "src"
++    gen = src / "gen"
++    gen.mkdir(parents=True)
++    (src / "ok.py").write_text("X = 1\n", encoding="utf-8")
++    (gen / "about.py").write_text("def badName():\n    pass\n", encoding="utf-8")
++    monkeypatch.chdir(tmp_path)
++
++    run = Run(
++        [
++            "--recursive",
++            "y",
++            "--ignore-paths",
++            "^src/gen/.*$",
++            "src",
++            "--disable=all",
++            "--enable=invalid-name",
++            "--score=n",
++        ],
++        exit=False,
++    )
++    linted_files = list(
++        run.linter._iterate_file_descrs(tuple(run.linter._discover_files(["src"])))
++    )
++    linted_file_paths = [file_item.filepath for file_item in linted_files]
++    assert any(
++        path.endswith(os.path.join("src", "ok.py")) for path in linted_file_paths
++    )
++    assert all("about.py" not in path for path in linted_file_paths)
++
++
+ def test_import_sibling_module_from_namespace(initialized_linter: PyLinter) -> None:
+     """If the parent directory above `namespace` is on sys.path, ensure that
+     modules under `namespace` can import each other without raising `import-error`."""

@@ -1,0 +1,117 @@
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..60a620f0 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,10 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* ``--recursive=y`` now respects ``ignore-paths`` when discovered paths contain
++  mixed separators on Windows or start with ``./``. Path patterns also apply to
++  a discovered package's ``__init__.py``.
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..a7c90de1 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -52,6 +52,8 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
++    # Paths from os.walk can contain mixed separators on Windows.
++    element = os.path.normpath(element)
+     basename = os.path.basename(element)
+     return (
+         basename in ignore_list
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..0ba5725d 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -34,7 +34,11 @@ from pylint.constants import (
+ from pylint.interfaces import HIGH
+ from pylint.lint.base_options import _make_linter_options
+ from pylint.lint.caching import load_results, save_results
+-from pylint.lint.expand_modules import _is_ignored_file, expand_modules
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+ from pylint.lint.message_state_handler import _MessageStateHandler
+ from pylint.lint.parallel import check_parallel
+ from pylint.lint.report_functions import (
+@@ -591,23 +595,19 @@ class PyLinter(
+             if os.path.isdir(something) and not os.path.isfile(
+                 os.path.join(something, "__init__.py")
+             ):
+-                skip_subtrees: list[str] = []
+-                for root, _, files in os.walk(something):
+-                    if any(root.startswith(s) for s in skip_subtrees):
+-                        # Skip subtree of already discovered package.
+-                        continue
+-
++                for root, dirs, files in os.walk(something):
+                     if _is_ignored_file(
+                         root,
+                         self.config.ignore,
+                         self.config.ignore_patterns,
+                         self.config.ignore_paths,
+                     ):
+-                        skip_subtrees.append(root)
++                        dirs.clear()
+                         continue
+ 
+                     if "__init__.py" in files:
+-                        skip_subtrees.append(root)
++                        # expand_modules will handle this package's contents.
++                        dirs.clear()
+                         yield root
+                     else:
+                         yield from (
+@@ -766,6 +766,13 @@ class PyLinter(
+         """
+         for descr in self._expand_files(files_or_modules):
+             name, filepath, is_arg = descr["name"], descr["path"], descr["isarg"]
++            # A discovered package's __init__.py may match even if its directory didn't.
++            if (
++                self.config.recursive
++                and is_arg
++                and _is_in_ignore_list_re(filepath, self._ignore_paths)
++            ):
++                continue
+             if self.should_analyze_file(name, filepath, is_argument=is_arg):
+                 yield FileItem(name, filepath, descr["basename"])
+ 
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..bcfb4fc6 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -912,6 +912,25 @@ def test_recursive_ignore(ignore_parameter, ignore_parameter_value) -> None:
+     assert module in linted_file_paths
+ 
+ 
++@pytest.mark.parametrize("source_dir", ["src/", "."])
++@pytest.mark.parametrize("is_package", [False, True])
++def test_recursive_ignore_relative_paths(source_dir: str, is_package: bool) -> None:
++    with tempdir():
++        create_files(
++            ["src/gen/about.py", "src/gen/nested/__init__.py", "src/general/main.py"]
++        )
++        if is_package:
++            Path("src/gen/__init__.py").touch()
++        Path("pyproject.toml").write_text(
++            '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n', encoding="utf-8"
++        )
++        run = Run(
++            ["--rcfile=pyproject.toml", "--recursive=y", "--persistent=n", source_dir],
++            exit=False,
++        )
++        assert set(run.linter.stats.by_module) == {"main"}
++
++
+ def test_import_sibling_module_from_namespace(initialized_linter: PyLinter) -> None:
+     """If the parent directory above `namespace` is on sys.path, ensure that
+     modules under `namespace` can import each other without raising `import-error`."""

@@ -1,0 +1,194 @@
+$ cd . && git status 2>/dev/null | head -20; echo "---"; git log --oneline -3 2>/dev/null; echo "---"; ls -la; echo "---"; grep -rn "class BoundWidget" --include=*.py . | head
+> read django/forms/boundfield.py
+$ cd . && grep -n "id_for_label\|add_id_index\|option_inherits_attrs\|def create_option\|def subwidgets\|def options\|def optgroups" django/forms/widgets.py; echo "--- version:"; grep -n "VERSION" django/__init__.py | head -3; echo "--- tests referencing id_for_label:"; grep -rn "id_for_label" tests/ | head -60
+> read django/forms/widgets.py
+$ cd . && echo "--- id_for_label usages in django/ and docs/:"; grep -rn "id_for_label" django/ docs/ | grep -v "\.pyc" ; echo "--- test_forms.py 680-730:"; sed -n 680,730p tests/forms_tests/tests/test_forms.py; echo "--- test_forms.py 3180-3205:"; sed -n 3180,3205p tests/forms_tests/tests/test_forms.py; echo "--- python:"; python --version; python -c "import django,sys; print(django.__file__)"
+$ cd . && pwd && cat > /tmp/repro.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+
+class F(forms.Form):
+    beatles = forms.MultipleChoiceField(
+        choices=[('john', 'John'), ('paul', 'Paul')],
+        widget=forms.CheckboxSelectMultiple,
+    )
+
+class G(F):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+
+for label, form in [
+    ("default auto_id", F()),
+    ("auto_id='id-%s'", F(auto_id='id-%s')),
+]:
+    print("==", label)
+    for sw in form['beatles']:
+        rendered = sw.tag()
+        print("  id_for_label:", repr(sw.id_for_label), "| rendered:", rendered)
+EOF
+python /tmp/repro.py
+$ cd . && echo "--- widgets.py id_for_label overrides:"; for n in 265 760 845 1055; do sed -n "$n,$((n+12))p" django/forms/widgets.py; echo ...; done; echo "--- subwidgets base:"; sed -n 214,224p django/forms/widgets.py; echo "--- option templates:"; for f in django/forms/templates/django/forms/widgets/input_option.html django/forms/templates/django/forms/widgets/multiple_input.html django/forms/templates/django/forms/widgets/select_option.html; do echo "[$f]"; cat "$f"; echo; done; echo "--- templates using id_for_label:"; grep -rn "id_for_label" django/forms/templates django/contrib/*/templates 2>/dev/null; echo "(none above = none)"
+$ cd . && (timeout 900 python tests/runtests.py forms_tests --parallel 1 -v 1 > /tmp/baseline_forms.txt 2>&1; echo "exit=$?" >> /tmp/baseline_forms.txt) ; tail -5 /tmp/baseline_forms.txt; grep -E "^(FAIL|ERROR):" /tmp/baseline_forms.txt | head -20; echo "--- docs widgets.txt 740-830:"; sed -n 740,830p docs/ref/forms/widgets.txt
+$ cd . && echo "--- MultiWidget.get_context:"; sed -n 836,870p django/forms/widgets.py; echo "--- Widget.get_context / build_attrs:"; grep -n "def get_context\|def build_attrs" -A 12 django/forms/widgets.py | sed -n 1,40p; echo "--- checkboxselectmultiple tests:"; sed -n 190,215p tests/forms_tests/widget_tests/test_checkboxselectmultiple.py; echo "--- radioselect test names:"; grep -n "def test_" tests/forms_tests/widget_tests/test_radioselect.py tests/forms_tests/widget_tests/test_checkboxselectmultiple.py
+$ cd . && sed -n 1,40p tests/forms_tests/tests/test_forms.py; echo "..."; grep -n "^class \|^from \|^import " tests/forms_tests/tests/test_forms.py | head -60; echo "--- subwidgets usage in tests:"; grep -rn "subwidgets" tests/ | grep -v "\.pyc" | head -30; echo "--- admin templates using subwidgets/for=:"; grep -rln "subwidgets\|id_for_label" django/contrib/*/templates 2>/dev/null; echo "(none above = none)"
+> edit tests/forms_tests/tests/test_forms.py
+> read tests/forms_tests/tests/test_forms.py
+> edit tests/forms_tests/tests/test_forms.py
+$ cd . && git diff --stat && echo "---" && git diff tests/forms_tests/tests/test_forms.py | head -150
+$ cd . && echo "--- BoundWidget constructions:"; grep -rn "BoundWidget(" django/ tests/ --include=*.py; echo "--- checkbox_option / radio_option templates:"; cat django/forms/templates/django/forms/widgets/checkbox_option.html; echo; cat django/forms/templates/django/forms/widgets/radio_option.html; echo; echo "--- RadioSelect.id_for_label:"; sed -n 764,774p django/forms/widgets.py; echo "--- run the 3 touched tests on UNFIXED code (expect failures):"; python tests/runtests.py forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_id_for_label_custom_auto_id forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_id_for_label_widget_id forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_select 2>&1 | grep -E "^(FAIL|ERROR|OK|Ran|FAILED)|AssertionError|KeyError" | head -30
+$ cd . && cat > /tmp/probe.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+from django.forms.boundfield import BoundWidget
+
+class Sel(forms.Form):
+    s = forms.ChoiceField(choices=[('a', 'A')], widget=forms.Select)
+    m = forms.SplitDateTimeField()  # MultiWidget-based
+
+f = Sel(auto_id=False)
+sw = f['s'].subwidgets[0]
+print("Select option attrs:", sw.data['attrs'], "-> has 'id' key:", 'id' in sw.data['attrs'])
+
+f2 = Sel()
+for sw in f2['m']:
+    print("MultiWidget subwidget keys:", sorted(sw.data.keys()))
+    try:
+        print("  old id_for_label:", sw.id_for_label)
+    except Exception as e:
+        print("  old id_for_label raised:", type(e).__name__, e)
+EOF
+python /tmp/probe.py
+> edit django/forms/boundfield.py
+$ cd . && echo "=== repro ==="; python /tmp/repro.py; echo "=== probe ==="; python /tmp/probe.py; echo "=== targeted tests ==="; python tests/runtests.py forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_id_for_label_custom_auto_id forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_id_for_label_widget_id forms_tests.tests.test_forms.FormsTestCase.test_iterable_boundfield_select 2>&1 | tail -4; echo "=== full forms_tests ==="; timeout 900 python tests/runtests.py forms_tests --parallel 1 2>&1 | tail -4
+$ cd . && echo "--- multiwidget.html (does the outer container carry an id?):"; cat django/forms/templates/django/forms/widgets/multiwidget.html; echo; echo "--- lint config:"; grep -n "max-line-length\|\[flake8\]\|\[isort\]" setup.cfg; echo "=== flake8 ==="; (python -m flake8 django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "flake8 clean") 2>&1 | tail -5; echo "=== isort ==="; (python -m isort --check-only --diff django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "isort clean") 2>&1 | tail -5
+$ cd . && echo "--- admin split_datetime.html:"; cat django/contrib/admin/templates/admin/widgets/split_datetime.html; echo; echo "=== template rendering of id_for_label when auto_id=False ==="; cat > /tmp/tmplcheck.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure(TEMPLATES=[{'BACKEND': 'django.template.backends.django.DjangoTemplates'}])
+django.setup()
+from django import forms
+from django.template import Template, Context
+
+class F(forms.Form):
+    name = forms.ChoiceField(choices=[('john', 'John')], widget=forms.RadioSelect)
+
+t = Template('{% for radio in form.name %}<label for="{{ radio.id_for_label }}">{{ radio.choice_label }}</label>{% endfor %}')
+print("auto_id=False:", t.render(Context({'form': F(auto_id=False)})))
+print("default      :", t.render(Context({'form': F()})))
+EOF
+python /tmp/tmplcheck.py; echo "=== MultiWidget BoundWidget id vs. real first-input id ==="; cat > /tmp/mw.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+class S(forms.Form):
+    m = forms.SplitDateTimeField()
+f = S()
+sw = f['m'].subwidgets[0]
+print("BoundWidget.id_for_label:", sw.id_for_label)
+print("rendered:", f['m'].as_widget())
+EOF
+python /tmp/mw.py
+$ cd . && echo "--- docs mentioning BoundWidget / subwidget context:"; grep -rn "BoundWidget\|subwidget" docs/ | head; echo "--- Widget.id_for_label docstring contract:"; sed -n 268,280p django/forms/widgets.py; echo "--- line length (>119) in changed files:"; awk 'length > 119 {print FILENAME": "FNR": "length}' django/forms/boundfield.py tests/forms_tests/tests/test_forms.py; echo "(none above = ok)"; echo "--- pyflakes/pycodestyle available?"; python -c "import pyflakes" 2>&1 | tail -1; python -c "import pycodestyle" 2>&1 | tail -1
+$ cd . && echo "--- long lines in HEAD (pre-existing?):"; git show HEAD:tests/forms_tests/tests/test_forms.py | awk 'length > 119 {print "HEAD line "FNR": "length}'; echo "--- long lines added by my diff:"; git diff -U0 | grep '^+' | grep -v '^+++' | awk 'length > 120 {print "ADDED too long: "length": "$0}'; echo "(none = ok)"; echo "--- trailing whitespace in diff:"; git diff --check && echo "no whitespace issues"; echo "=== try installing flake8 (may fail offline) ==="; timeout 60 python -m pip install -q flake8 2>&1 | tail -2; python -m flake8 --version 2>/dev/null | head -1 || echo "flake8 unavailable"
+$ cd . && echo "=== flake8 (repo config) ==="; python -m flake8 django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "flake8 clean"; echo "=== isort (repo config) ==="; timeout 60 python -m pip install -q isort 2>&1 | grep -v WARNING | tail -1; python -m isort --check-only --diff django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "isort clean"; echo "=== related suites ==="; timeout 900 python tests/runtests.py forms_tests model_forms admin_widgets model_formsets auth_tests admin_views --parallel 1 2>&1 | tail -6
+$ cd . && git show HEAD:tests/forms_tests/tests/test_forms.py > /tmp/head_test_forms.py && python -m flake8 --config setup.cfg /tmp/head_test_forms.py; echo "--- HEAD flake8 exit=$?"; python -m flake8 --config setup.cfg tests/forms_tests/tests/test_forms.py; echo "--- working-tree flake8 exit=$?"; echo "--- boundfield.py flake8 exit:"; python -m flake8 --config setup.cfg django/forms/boundfield.py; echo "exit=$?"
+$ cd . && cat > /tmp/regress.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+
+class Radio(forms.Form):
+    name = forms.ChoiceField(choices=[('john', 'John'), ('paul', 'Paul')], widget=forms.RadioSelect)
+class Checks(forms.Form):
+    name = forms.MultipleChoiceField(choices=[('john', 'John'), ('paul', 'Paul')], widget=forms.CheckboxSelectMultiple)
+class Nested(forms.Form):
+    name = forms.MultipleChoiceField(
+        choices=[('Group', [('a', 'A'), ('b', 'B')]), ('c', 'C')],
+        widget=forms.CheckboxSelectMultiple,
+    )
+
+# With default auto_id, the new value must equal the old 'id_<name>_<index>' formula
+# and must match the id actually rendered on the input.
+for form_cls in (Radio, Checks, Nested):
+    for sw in form_cls()['name']:
+        old = 'id_%s_%s' % (sw.data['name'], sw.data['index'])
+        new = sw.id_for_label
+        status = 'same' if old == new else 'DIFFERS'
+        print('%-8s old=%-14s new=%-14s %s' % (form_cls.__name__, old, new, status))
+EOF
+python /tmp/regress.py; echo "=== working tree ==="; git status --short; echo "=== template_tests + admin_inlines ==="; timeout 900 python tests/runtests.py template_tests admin_inlines --parallel 1 2>&1 | tail -4
+$ cd . && timeout 900 python tests/runtests.py template_tests admin_inlines --parallel 1 2>&1 | grep -B2 -A25 "^FAIL:" | head -60
+$ cd . && echo "uid=$(id -u) user=$(id -un)"; sed -n 185,200p tests/template_tests/test_loaders.py; echo "=== run the failing test on HEAD (my changes stashed) ==="; git stash push -q -- django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && echo "stashed: $(git status --short | wc -l) modified files left"; timeout 300 python tests/runtests.py template_tests.test_loaders.FileSystemLoaderTests.test_permissions_error 2>&1 | tail -3; git stash pop -q && echo "restored:"; git status --short
+$ cd . && echo "=== my fix is intact after stash pop? ==="; grep -n "return self.data\['attrs'\].get('id')" django/forms/boundfield.py; grep -c "test_iterable_boundfield_id_for_label" tests/forms_tests/tests/test_forms.py; echo "=== HEAD (stashed), full output ==="; git stash push -q -- django/forms/boundfield.py tests/forms_tests/tests/test_forms.py; timeout 300 python tests/runtests.py template_tests.test_loaders.FileSystemLoaderTests.test_permissions_error > /tmp/head_perm.txt 2>&1; echo "exit=$?"; cat /tmp/head_perm.txt; git stash pop -q; echo "=== restored ==="; git status --short; grep -n "return self.data\['attrs'\].get('id')" django/forms/boundfield.py
+$ cd . && sed -n 355,372p docs/ref/forms/widgets.txt; echo "..."; grep -n "attrs" docs/ref/forms/renderers.txt | head -5; echo "=== launching full suite in background ==="; nohup sh -c 'timeout 1500 python tests/runtests.py --parallel 4 > /tmp/full_after.txt 2>&1; echo "exit=$?" >> /tmp/full_after.txt' >/dev/null 2>&1 & echo "started pid $!"
+$ cd . && cat > /tmp/admin_split.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure(TEMPLATES=[{'BACKEND': 'django.template.backends.django.DjangoTemplates'}])
+django.setup()
+from django import forms
+from django.template import Template, Context
+
+class F(forms.Form):
+    when = forms.SplitDateTimeField()
+    pick = forms.ChoiceField(choices=[('a', 'A'), ('b', 'B')], widget=forms.Select)
+
+f = F(auto_id='x_%s')
+# Same template shape as admin/widgets/split_datetime.html, but using id_for_label
+t = Template('{% with w=form.when %}{{ w.0.id_for_label }}|{{ w.1.id_for_label }}{% endwith }')
+print("multiwidget ids via template:", t.render(Context({'form': f})).strip())
+print("select, custom auto_id      :", [sw.id_for_label for sw in f['pick']])
+print("select, auto_id=False       :", [sw.id_for_label for sw in F(auto_id=False)['pick']])
+EOF
+python /tmp/admin_split.py; echo "=== progress of background run ==="; sleep 60; tail -c 300 /tmp/full_after.txt; echo
+$ cd . && sed -i 's/{% endwith }/{% endwith %}/' /tmp/admin_split.py && python /tmp/admin_split.py; echo "=== progress of background run ==="; sleep 90; tail -c 400 /tmp/full_after.txt; echo
+$ cd . && echo "=== summary lines ==="; grep -E "^Ran |^FAILED|^OK" /tmp/full_after.txt; echo "=== failing/erroring tests ==="; grep -E "^(FAIL|ERROR):" /tmp/full_after.txt | sort | uniq -c
+$ cd . && T="sessions_tests.tests.ClearSessionsCommandTests.test_clearsessions_unsupported i18n.tests.WatchForTranslationChangesTests.test_i18n_app_dirs test_client.tests.ClientTest.test_response_resolver_match_middleware_urlconf test_client.tests.AsyncClientTest.test_response_resolver_match_middleware_urlconf inspectdb.tests.InspectDBTestCase.test_custom_fields file_uploads.tests.DirectoryCreationTests.test_readonly_root template_tests.test_loaders.FileSystemLoaderTests.test_permissions_error"; echo "=== WITH my changes ==="; for t in $T; do r=$(timeout 300 python tests/runtests.py $t 2>&1 | grep -E "^(OK|FAILED)" | tail -1); echo "$r  $t"; done; echo "=== HEAD (stashed) ==="; git stash push -q -- django/forms/boundfield.py tests/forms_tests/tests/test_forms.py && for t in $T; do r=$(timeout 300 python tests/runtests.py $t 2>&1 | grep -E "^(OK|FAILED)" | tail -1); echo "$r  $t"; done; git stash pop -q; echo "=== restored? ==="; git status --short; grep -c "return self.data\['attrs'\].get('id')" django/forms/boundfield.py
+$ cd . && cat > /tmp/consistency.py <<'EOF'
+import django
+from django.conf import settings
+settings.configure()
+django.setup()
+from django import forms
+class F(forms.Form):
+    name = forms.MultipleChoiceField(choices=[('john', 'John'), ('paul', 'Paul')], widget=forms.CheckboxSelectMultiple)
+for auto_id in ('custom_%s', True):
+    f = F(auto_id=auto_id)
+    first = f['name'].subwidgets[0]
+    print("auto_id=%-10r BoundField.id_for_label=%-14r first option BoundWidget.id_for_label=%-14r match=%s"
+          % (auto_id, f['name'].id_for_label, first.id_for_label, f['name'].id_for_label == first.id_for_label))
+EOF
+python /tmp/consistency.py; echo "=== final diff (source) ==="; git diff django/; echo "=== forms_tests after stash round-trips ==="; timeout 900 python tests/runtests.py forms_tests --parallel 1 2>&1 | tail -3; echo "=== flake8 on final source ==="; python -m flake8 --config setup.cfg django/forms/boundfield.py && echo clean; echo "=== cleanup: uninstall the lint tools I added to the env ==="; python -m pip uninstall -y -q flake8 isort >/dev/null 2>&1; git status --short
+$ cd . && echo "--- CheckboxSelectMultiple MRO and its id_for_label:"; python -c "
+import django
+from django.conf import settings; settings.configure(); django.setup()
+from django.forms import CheckboxSelectMultiple
+print([c.__name__ for c in CheckboxSelectMultiple.__mro__][:4])
+print('defines own id_for_label:', 'id_for_label' in CheckboxSelectMultiple.__dict__)
+print('BoundField.id_for_label is intentionally empty for outer <label>:', repr(CheckboxSelectMultiple(choices=[]).id_for_label('x')))
+"; echo "--- stash list (should be empty):"; git stash list; echo "(end)"; echo "--- lint tools removed?"; python -m pip show flake8 isort >/dev/null 2>&1 && echo "still installed" || echo "removed"; echo "--- final status:"; git status --short
+The task is finished, and no further changes are needed.
+
+**Fix** (`django/forms/boundfield.py`): `BoundWidget.id_for_label` now returns `self.data['attrs'].get('id')`, the id the choice widget already set on each option, instead of rebuilding `id_<name>_<index>`. `Select` options don't get an id attribute, so they return `None`. This also stops `MultiWidget` subwidgets from raising `KeyError: 'index'`.
+
+**Tests** (`tests/forms_tests/tests/test_forms.py`): I added tests for a custom `auto_id` and for an id set on the widget. I changed `test_iterable_boundfield_select`, which had asserted the buggy `id_name_0` for options, to expect `None`. All three fail on the old code and pass now.
+
+**Verification:**
+- `forms_tests` passes (697 tests).
+- A combined run of `forms_tests` and five related apps passed 2022 tests.
+- The full suite has 7 failures or errors. All 7 also fail with my change stashed, so they predate this work. For example, `test_permissions_error` expects a non-root user, and this sandbox runs as root.
+- flake8 is clean on `boundfield.py`. The two long-line warnings in the test file were already in HEAD. isort is clean on both files.
+
+**Caveats:**
+- With `auto_id=False`, a template using `for="{{ radio.id_for_label }}"` now renders `for="None"`. The old `for="id_name_0"` also pointed at nothing.
+- A `MultiWidget` subwidget returns its container id (`id_m`), which no rendered element carries. I left that alone because it's outside this issue.

@@ -1,0 +1,69 @@
+$ which nginx || true; nginx -v 2>&1 || true; ls -la /etc/nginx 2>/dev/null || true; cat /etc/os-release 2>/dev/null | head -20; id; ls /var/www/html 2>/dev/null || true; ls /etc/nginx/sites-enabled 2>/dev/null || true; ls /etc/nginx/conf.d 2>/dev/null || true
+$ apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx >/tmp/nginx-install.log 2>&1 && echo OK && nginx -v && ls -la /etc/nginx && echo '---nginx.conf---' && cat /etc/nginx/nginx.conf && echo '---sites-enabled---' && ls -la /etc/nginx/sites-enabled /etc/nginx/conf.d
+$ python3 << 'PY'
+from pathlib import Path
+
+nginx_conf = Path("/etc/nginx/nginx.conf")
+text = nginx_conf.read_text()
+
+log_format = 'log_format benchmark \'$time_local $request_method $status "$http_user_agent"\';\n'
+zone = "limit_req_zone $binary_remote_addr zone=benchmark:10m rate=10r/s;\n"
+
+# Insert into http block after the opening brace of http, before other settings,
+# but after we find "http {"
+if "log_format benchmark" not in text:
+    needle = "http {\n"
+    idx = text.find(needle)
+    if idx == -1:
+        raise SystemExit("http block not found")
+    insert_at = idx + len(needle)
+    text = text[:insert_at] + "\n\t" + log_format + "\t" + zone + text[insert_at:]
+elif "limit_req_zone $binary_remote_addr zone=benchmark:10m rate=10r/s;" not in text:
+    needle = "http {\n"
+    idx = text.find(needle)
+    insert_at = idx + len(needle)
+    text = text[:insert_at] + "\n\t" + zone + text[insert_at:]
+
+nginx_conf.write_text(text)
+
+site = """server {
+    listen 8080;
+    server_name localhost;
+
+    root /var/www/html;
+    index index.html;
+
+    access_log /var/log/nginx/benchmark-access.log benchmark;
+    error_log /var/log/nginx/benchmark-error.log;
+
+    limit_req zone=benchmark burst=10;
+
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+"""
+Path("/etc/nginx/conf.d/benchmark-site.conf").write_text(site)
+
+default = Path("/etc/nginx/sites-enabled/default")
+if default.exists() or default.is_symlink():
+    default.unlink()
+
+Path("/var/www/html").mkdir(parents=True, exist_ok=True)
+Path("/var/www/html/index.html").write_text("Welcome to the benchmark webserver\n")
+Path("/var/www/html/404.html").write_text("Page not found - Please check your URL\n")
+print("configured")
+PY
+nginx -t && (nginx -s reload 2>/dev/null || service nginx start || nginx) && sleep 0.3 && curl -sS -D- http://127.0.0.1:8080/ && echo && curl -sS -o /dev/null -w "404status:%{http_code}\n" http://127.0.0.1:8080/missing && echo "ACCESS LOG: /var/log/nginx/benchmark-access.log" && cat /var/log/nginx/benchmark-access.log && echo "---nginx.conf head---" && sed -n '1,80p' /etc/nginx/nginx.conf
+Nginx is installed and serving on localhost:8080.
+
+- Config is in `/etc/nginx/conf.d/benchmark-site.conf` (port 8080, root `/var/www/html`, custom 404, rate limit).
+- The `benchmark` log format and `limit_req_zone` (10r/s, 10MB, burst 10) are in `/etc/nginx/nginx.conf`.
+- Logs go to `/var/log/nginx/benchmark-access.log` and `/var/log/nginx/benchmark-error.log`.
+- The default site was removed; `index.html` and `404.html` were created.
+- The config test passed and nginx is running.

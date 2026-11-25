@@ -1,0 +1,951 @@
+$ ls -la /app && find /app -type f 2>/dev/null | head -100; find . -type f 2>/dev/null | head -50
+$ head -c 2000 /app/graphene.dat; echo; echo "---"; wc -l /app/graphene.dat; echo "---"; file /app/graphene.dat; python3 -c "
+import numpy as np
+data = np.loadtxt('/app/graphene.dat')
+print(data.shape, data.dtype)
+print(data[:5])
+print('min/max x', data[:,0].min(), data[:,0].max())
+print('min/max y', data[:,1].min(), data[:,1].max())
+"
+$ pip install numpy scipy matplotlib -q && python3 - << 'PY'
+import numpy as np
+raw = open('/app/graphene.dat').read().strip().splitlines()
+print('nlines', len(raw))
+print('sample lines', raw[0], raw[1], raw[-1])
+xs, ys = [], []
+for line in raw:
+    parts = line.replace(',', '.').split()
+    xs.append(float(parts[0])); ys.append(float(parts[1]))
+x = np.array(xs); y = np.array(ys)
+print('x range', x.min(), x.max(), 'n', len(x))
+print('y range', y.min(), y.max())
+print('x monotonic?', np.all(np.diff(x)>0), np.all(np.diff(x)<0))
+# find prominent peaks via simple smoothing
+from scipy.ndimage import uniform_filter1d
+ys = uniform_filter1d(y, size=15)
+# local maxima
+peaks = []
+for i in range(5, len(ys)-5):
+    if ys[i] == ys[i-5:i+6].max() and ys[i] > np.percentile(ys, 90):
+        peaks.append((x[i], ys[i], i))
+# cluster nearby
+peaks_sorted = sorted(peaks, key=lambda t: -t[1])
+print('top peaks:')
+shown=0
+used=[]
+for p in peaks_sorted:
+    if any(abs(p[0]-u)<50 for u in used):
+        continue
+    used.append(p[0])
+    print(p)
+    shown+=1
+    if shown>30: break
+print('--- histogram of x ---')
+print(x[::200])
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x = np.array(xs[::-1])  # increasing
+y = np.array(ys[::-1])
+print('dx median', np.median(np.diff(x)), 'dx min', np.diff(x).min(), 'dx max', np.diff(x).max())
+print('first 10 dx', np.diff(x)[:10])
+print('last 10 dx', np.diff(x)[-10:])
+# baseline estimate via percentile in windows
+ysmooth = uniform_filter1d(y, 21)
+# print y at various x
+for target in [1700,2000,2500,2700,3000,4000,5000,6000,8000,10000,12000,14000,16000,18000,19000,20000,22000,25000,30000,35000,40000,45000]:
+    i = np.argmin(np.abs(x-target))
+    print(f'x={x[i]:.1f} y={y[i]:.1f} ys={ysmooth[i]:.1f}')
+
+# Find peaks more carefully: prominence
+from scipy.signal import find_peaks
+peaks, props = find_peaks(ysmooth, prominence=500, distance=10)
+print('\nPeaks with prominence>500:')
+order = np.argsort(-props['prominences'])
+for i in order[:40]:
+    p = peaks[i]
+    print(f"x={x[p]:.2f} y={ysmooth[p]:.1f} prom={props['prominences'][i]:.1f} width_hint")
+
+# also check around 1580-2700 if data exists - min x is 1648
+print('\nNear low x end:')
+for i in range(0, 80, 5):
+    print(f'{x[i]:.2f} {y[i]:.1f}')
+print('--- near 1580 would be below range')
+print('count x<3000', np.sum(x<3000), 'x<4000', np.sum(x<4000))
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+from scipy.signal import find_peaks
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x = np.array(xs[::-1])
+y = np.array(ys[::-1])
+
+# Try common laser wavelengths to convert absolute cm-1 to Raman shift
+# Raman shift = 1/lambda_laser_cm - 1/lambda_scatter? 
+# If x is wavenumber of scattered light in cm^-1? Unusual huge numbers 1600-47000.
+# 1/lambda if lambda in cm: visible light ~ 20000 cm^-1. 47000 is UV.
+# Maybe x is in some instrument units (pixels? wavelength in 0.01 nm?)
+# wavelength nm = 1e7 / wavenumber_cm-1
+wl = 1e7 / x  # nm if x is cm^-1
+print('wavelength nm range if x is cm-1:', wl.min(), wl.max())
+print('at peak x=18858 -> wl', 1e7/18858)
+print('at peak x=3745 -> wl', 1e7/3745)
+print('at peak x=10421 -> wl', 1e7/10421)
+print('at peak x=6347 -> wl', 1e7/6347)
+
+# If x is wavelength in some unit
+# Suppose x is wavelength in 0.1 Angstrom or pm?
+for scale, name in [(1,'nm? no'), (0.1,'0.1 nm = Angstrom/10?'), (0.01,'0.01 unit')]:
+    pass
+
+# Raman shift nu = 1e7*(1/lambda_laser_nm - 1/lambda_scatt_nm)
+# If data x is already wavelength in angstroms? x from 1648 to 47183
+# 1648 A = 164.8 nm (VUV), 47183 A = 4718 nm (IR)
+print('\nIf x is Angstroms, nm =', (x/10).min(), (x/10).max())
+
+# common graphene: G ~1580, 2D ~2680 for 532nm laser
+# Suppose spectrometer records wavelength in nm*10 or something
+# Let's assume laser 532 nm, and x is wavelength in some units, find scale
+# peak positions we want map to 1580 and 2680 or 2700
+
+# Maybe the x is Raman shift already but in some weird calibration - the strong peak at 18858?
+# Looking at numbers with comma as decimal - European format. Values like 47183.55
+# Could be CCD pixel related or frequency in GHz? 
+
+# Let's look at relative spacing of strong peaks and shape around main peak
+# Print region around main peak 17500-21000
+mask = (x>17000)&(x<22000)
+print('\nAround main peak samples every ~20 points:')
+idx = np.where(mask)[0]
+step = max(1, len(idx)//40)
+for i in idx[::step]:
+    print(f'{x[i]:.1f} {y[i]:.1f}')
+
+print('\nAround 10000-11000:')
+mask = (x>9800)&(x<11200)
+idx = np.where(mask)[0]
+step = max(1, len(idx)//30)
+for i in idx[::step]:
+    print(f'{x[i]:.1f} {y[i]:.1f}')
+
+print('\nAround 3500-4200:')
+mask = (x>3400)&(x<4300)
+idx = np.where(mask)[0]
+step = max(1, len(idx)//30)
+for i in idx[::step]:
+    print(f'{x[i]:.1f} {y[i]:.1f}')
+
+print('\nAround 6000-6800:')
+mask = (x>5800)&(x<7000)
+idx = np.where(mask)[0]
+step = max(1, len(idx)//25)
+for i in idx[::step]:
+    print(f'{x[i]:.1f} {y[i]:.1f}')
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+import json
+
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x_abs = np.array(xs[::-1])  # increasing wavenumber cm-1 of scattered light? 
+y = np.array(ys[::-1])
+
+# x appears to be absolute wavenumber in m^-1? Wait:
+# 1e7/18858 = 530 nm if x is cm^-1. Yes x is absolute wavenumber in cm^-1.
+# Laser: graphene G is ~1582, 2D ~2700 for 532 nm.
+# Raman shift = nu_laser - nu_scattered
+# If scattered light at lower energy (Stokes), nu_scatt < nu_laser
+# Peak at 1575 cm^-1 corresponds to nu such that...
+# Earlier: x=6347 -> if Raman shift = x? No.
+# wavelength of scattered = 1e7/x nm
+# Raman shift (cm-1) = 1e7/lambda_laser - x   if x is wavenumber cm-1
+
+# Try laser wavelengths
+for laser_nm in [532, 532.1, 514.5, 633, 785, 488, 457, 325, 405]:
+    nu_l = 1e7/laser_nm
+    shift = nu_l - x_abs
+    # find max in plausible windows
+    print(f'\n=== laser {laser_nm} nm, nu={nu_l:.2f} ===')
+    for name, lo, hi in [('G', 1500, 1700), ('2D', 2550, 2800), ('D', 1300, 1450)]:
+        m = (shift>=lo)&(shift<=hi)
+        if m.sum()<5:
+            print(name, 'no data', 'shift range', shift.min(), shift.max())
+            continue
+        i = np.argmax(y[m])
+        xs_ = shift[m]
+        print(f'{name}: n={m.sum()} peak_shift={xs_[i]:.2f} y={y[m][i]:.1f} yrange {y[m].min():.0f}-{y[m].max():.0f}')
+
+print('\nshift range for 532:', (1e7/532 - x_abs).min(), (1e7/532 - x_abs).max())
+print('x of max y', x_abs[np.argmax(y)], 'y', y.max())
+PY
+$ python3 - << 'PY'
+import numpy as np
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x = np.array(xs[::-1])
+y = np.array(ys[::-1])
+print('n', len(x))
+# distribution of points
+bins = [1600,2000,2500,3000,4000,5000,7000,10000,15000,20000,30000,50000]
+for a,b in zip(bins[:-1], bins[1:]):
+    print(f'{a}-{b}: {( (x>=a)&(x<b) ).sum()} points, dx med {np.median(np.diff(x[(x>=a)&(x<b)])) if ((x>=a)&(x<b)).sum()>2 else None:.3f}')
+
+# The big peak near 19000 cm-1 absolute is likely the laser line (Rayleigh) not a Raman peak!
+# x max intensity ~19139, wavelength = 1e7/19139 = 522.5 nm
+print('laser line candidate wl nm', 1e7/19139.54, 'nu', 19139.54)
+
+# For 532 nm laser nu=18797, rayleigh would be at x=18797
+# Our huge peak is centered around 19100-19300 which is broad - maybe NOT laser
+print('y around 18797:')
+nu=1e7/532
+m=(x>nu-100)&(x<nu+100)
+print('n', m.sum())
+idx=np.where(m)[0]
+for i in idx[::max(1,len(idx)//20)]:
+    print(x[i], y[i])
+
+# Maybe units of x are not cm^-1. Let's see header-like? no header.
+# Perhaps x is wavelength in 1/cm * something of spectrometer in arbitrary units
+# Look at peak widths
+# Big peak from ~18600 to ~19800, width ~1200 units, if this is cm-1 that's 30 nm wide - very broad for laser
+# Raman peaks are ~10-50 cm-1 wide.
+
+# Suppose the x axis is already Raman shift but wrongly scaled? Unlikely.
+
+# Let's print y vs x more globally to see baseline trend - maybe fluorescence + peaks
+# downsample plot data as text
+print('\nGLOBAL coarse:')
+for i in range(0,len(x),80):
+    print(f'{x[i]:10.2f} {y[i]:10.1f}')
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x = np.array(xs[::-1]); y = np.array(ys[::-1])
+
+# Focus 1000-4000 if graphene Raman shift directly
+m = (x>1200)&(x<4000)
+xs_, ys_ = x[m], y[m]
+ysmooth = uniform_filter1d(ys_, 11)
+peaks, props = find_peaks(ysmooth, prominence=200, distance=15)
+print('peaks 1200-4000:')
+for i in np.argsort(-props['prominences']):
+    p=peaks[i]
+    print(f"x={xs_[p]:.2f} y={ys_[p]:.1f} sm={ysmooth[p]:.1f} prom={props['prominences'][i]:.1f}")
+
+print('\n--- detailed 1500-1700 ---')
+m=(x>=1450)&(x<=1750)
+idx=np.where(m)[0]
+# print every point? might be many. max and shape
+print('n', m.sum(), 'ymax', y[m].max(), 'at', x[m][np.argmax(y[m])])
+# bin
+xb=x[m]; yb=y[m]
+for center in np.arange(1480, 1720, 10):
+    sel=(xb>=center-5)&(xb<center+5)
+    if sel.sum():
+        print(f'{center:6.0f} n={sel.sum():3d} mean={yb[sel].mean():8.1f} max={yb[sel].max():8.1f}')
+
+print('\n--- detailed 2500-2900 ---')
+m=(x>=2500)&(x<=3000)
+xb=x[m]; yb=y[m]
+print('n', m.sum(), 'ymax', yb.max(), 'at', xb[np.argmax(yb)])
+for center in np.arange(2500, 3000, 20):
+    sel=(xb>=center-10)&(xb<center+10)
+    if sel.sum():
+        print(f'{center:6.0f} n={sel.sum():3d} mean={yb[sel].mean():8.1f} max={yb[sel].max():8.1f}')
+
+print('\n--- detailed 2550-2850 every few ---')
+m=(x>=2550)&(x<=2850)
+idx=np.where(m)[0]
+step=max(1,len(idx)//60)
+for i in idx[::step]:
+    print(f'{x[i]:8.2f} {y[i]:8.1f}')
+
+print('\n--- 1300-1450 D peak ---')
+m=(x>=1250)&(x<=1500)
+xb=x[m]; yb=y[m]
+print('n',m.sum(),'ymax',yb.max(),'at',xb[np.argmax(yb)])
+for center in np.arange(1280, 1500, 15):
+    sel=(xb>=center-7.5)&(xb<center+7.5)
+    if sel.sum():
+        print(f'{center:6.0f} n={sel.sum():3d} mean={yb[sel].mean():8.1f} max={yb[sel].max():8.1f}')
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+from scipy.signal import find_peaks
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x = np.array(xs[::-1]); y = np.array(ys[::-1])
+
+# convert hypothesis: raman shift = 1e7/x
+shift = 1e7/x
+print('shift range', shift.min(), shift.max())
+
+# print regions around expected peaks in x space with all points near peaks
+print('\n======= PEAK near 3700-3800 (maybe 2D) =======')
+m=(x>3650)&(x<3850)
+for xi,yi in zip(x[m], y[m]):
+    print(f'{xi:10.3f} {yi:10.2f} shift={1e7/xi:8.2f}')
+
+print('\n======= PEAK near 6200-6500 (maybe G) =======')
+m=(x>6150)&(x<6550)
+for xi,yi in zip(x[m], y[m]):
+    print(f'{xi:10.3f} {yi:10.2f} shift={1e7/xi:8.2f}')
+
+print('\n======= around 7200-7600 (maybe D at 1350) =======')
+m=(x>7100)&(x<7800)
+idx=np.where(m)[0]
+print('n', m.sum())
+for i in idx[::2]:
+    print(f'{x[i]:10.3f} {y[i]:10.2f} shift={1e7/x[i]:8.2f}')
+
+print('\n======= broad 10000-11000 =======')
+m=(x>10000)&(x<11000)
+idx=np.where(m)[0]
+print('n', m.sum(), 'ymax', y[m].max(), 'at', x[m][np.argmax(y[m])], 'shift', 1e7/x[m][np.argmax(y[m])])
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x_abs = np.array(xs[::-1])
+y = np.array(ys[::-1])
+# Raman shift
+x = 1e7 / x_abs
+
+def lorentzian(x, x0, gamma, amplitude, offset):
+    # gamma as HWHM or FWHM? Common physics: L(x)= A * (gamma/2)^2 / ((x-x0)^2 + (gamma/2)^2) FWHM=gamma
+    # or A * gamma^2 / ((x-x0)^2 + gamma^2) with HWHM=gamma
+    return amplitude * (gamma**2) / ((x-x0)**2 + gamma**2) + offset
+
+def lorentzian_fwhm(x, x0, gamma, amplitude, offset):
+    g = gamma/2
+    return amplitude * (g**2) / ((x-x0)**2 + g**2) + offset
+
+def lorentzian_lin(x, x0, gamma, amplitude, offset, slope):
+    return amplitude * (gamma**2) / ((x-x0)**2 + gamma**2) + offset + slope*(x-x0)
+
+def fit_region(x, y, lo, hi, p0, label, model='hwhm'):
+    m = (x>=lo)&(x<=hi)
+    xx, yy = x[m], y[m]
+    # sort by x increasing already since x_abs increasing => shift decreasing!
+    order = np.argsort(xx)
+    xx, yy = xx[order], yy[order]
+    if model=='hwhm':
+        f = lorentzian
+    elif model=='fwhm':
+        f = lorentzian_fwhm
+    else:
+        f = lorentzian_lin
+    popt, pcov = curve_fit(f, xx, yy, p0=p0, maxfev=20000)
+    resid = yy - f(xx, *popt)
+    ss_res = np.sum(resid**2)
+    ss_tot = np.sum((yy-yy.mean())**2)
+    r2 = 1 - ss_res/ss_tot
+    print(f'\n{label} model={model} window {lo}-{hi} n={len(xx)} R2={r2:.5f}')
+    print(' params', popt)
+    print(' stderr', np.sqrt(np.diag(pcov)))
+    return popt, r2
+
+# G peak around 1580, window
+fit_region(x, y, 1500, 1650, [1582, 15, 8000, 6000], 'G')
+fit_region(x, y, 1520, 1640, [1582, 15, 8000, 6000], 'G')
+fit_region(x, y, 1540, 1620, [1582, 10, 7000, 6200], 'G')
+fit_region(x, y, 1500, 1650, [1582, 20, 8000, 6000], 'G', 'fwhm')
+fit_region(x, y, 1500, 1680, [1582, 12, 8000, 5500, 0], 'G', 'lin')
+
+# 2D around 2670
+fit_region(x, y, 2550, 2800, [2670, 20, 11000, 2000], '2D')
+fit_region(x, y, 2600, 2750, [2670, 15, 11000, 2000], '2D')
+fit_region(x, y, 2580, 2780, [2670, 30, 11000, 1800], '2D', 'fwhm')
+fit_region(x, y, 2550, 2800, [2670, 18, 11000, 2000, 0], '2D', 'lin')
+
+# Also check if there's a D peak and G' shape - maybe double lorentzian for 2D?
+print('\n--- noise estimate baseline std ---')
+for lo,hi in [(2400,2550),(2800,2950),(1450,1520),(1650,1750)]:
+    m=(x>=lo)&(x<=hi)
+    print(lo,hi,'mean',y[m].mean(),'std',y[m].std(),'n',m.sum())
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xs, ys = [], []
+for line in raw:
+    a,b = line.split()
+    xs.append(float(a.replace(',', '.')))
+    ys.append(float(b.replace(',', '.')))
+x_abs = np.array(xs[::-1])
+y = np.array(ys[::-1])
+x = 1e7 / x_abs  # Raman shift cm-1 assuming x_abs is absolute wavenumber cm-1
+# BUT is laser exactly such that rayleigh is at infinity? 
+# Raman shift = nu_laser - nu_scattered.
+# I used shift = 1e7/x which would mean nu_laser = infinity? NO.
+# Wait I set x = 1e7/x_abs which is WAVELENGTH in nm, NOT raman shift!
+# Let me re-read...
+# x_abs ~ 6329 -> 1e7/6329 = 1579.9 
+# I called this "shift" but 1e7/wavenumber = wavelength in nm!
+# 1579 nm is NOT a Raman shift of 1580 cm-1. It's a coincidence of numbers?
+# Wavelength 1579 nm is IR. Raman shift of 1580 cm-1 with 532 nm laser:
+# nu_sc = 1e7/532 - 1580 = 18797 - 1580 = 17217 cm-1 -> wavelength 580.8 nm
+# Our data x around 6329 corresponds to wavelength 1e7/6329=1580 nm if x is cm-1.
+# So the NUMBER 1580 appears as wavelength in nm if x is cm^-1? 
+# 1e7/6329 nm = 1579.9 nm. And graphene G is at 1580 cm-1. The numeric match of peak position 
+# to 1580 and 2670 is because I computed 1e7/x and those peaks sit at x such that 1e7/x = 1580 and 2670.
+# So the x-axis values of peaks are at wavenumbers whose reciprocal*1e7 equals classic Raman shifts.
+# That means the file's x column might ALREADY be intended to be interpreted as:
+# perhaps x is in weird units and the Raman shift in cm-1 is 1e7/x ? That seems like wavelength mislabeled.
+# OR the data x is wavelength in Angstroms? 6329 A = 632.9 nm.
+# Let's recompute Raman shift properly if x is wavelength in Angstroms.
+# lambda_nm = x/10
+# For laser 532 nm: shift = 1e7*(1/532 - 10/x)
+
+print('If x is Angstroms:')
+for laser in [532, 632.8, 514.5, 785, 488, 633, 1064]:
+    shift = 1e7*(1/laser - 10/x_abs)
+    # find intensity maxima in raman range 1000-3000
+    m = (shift>1000)&(shift<3000)
+    if m.sum()<10:
+        print(laser, 'few points', m.sum(), 'shift range', shift.min(), shift.max())
+        continue
+    # top peaks
+    from scipy.signal import find_peaks
+    from scipy.ndimage import uniform_filter1d
+    # work on sorted shift
+    order=np.argsort(shift)
+    ss, yy = shift[order], y[order]
+    sm = uniform_filter1d(yy, 5)
+    # only region
+    sel=(ss>800)&(ss<3500)
+    peaks, props = find_peaks(sm[sel], prominence=800)
+    sp = ss[sel][peaks]
+    print(f'laser {laser}: peaks', list(zip(np.round(sp,1), np.round(props["prominences"]))))
+
+print('\nIf x is nm*10 (same as Angstrom): same as above')
+
+# If x is wavelength in nm? range 1648-47183 nm impossible mostly.
+# If x is absolute cm-1 and we just plot vs x, peaks at 3745 and 6329
+# classic positions would require calibration offset.
+
+# Maybe the spectrometer file stores the x as 1/lambda in some unit where 
+# Raman shift cm-1 = 1e7/x_value? We already fit that and got perfect G=1580, 2D=2670.
+# That's too perfect to be coincidence: 
+# 1e7/3745.05 = 2670.19 and 1e7/6329.37 = 1579.94
+# EXACTLY the graphene peak positions. So the stored x is NOT the Raman shift;
+# the Raman shift is 1e7/x. Why would data be stored as x=1e7/shift?
+# Perhaps x is wavelength in 10*nm? No 1e7/lambda_nm = wavenumber.
+# If someone stored wavelength incorrectly... 
+# Suppose the column is wavelength in pm or something.
+# Regardless: transforming x_data -> 1e7/x_data yields Raman shifts at the correct graphene positions.
+# So fitting in that coordinate is correct scientifically for G and 2D.
+
+# But wait could the x column ALREADY be raman shift and the peaks are NOT at 1580?
+# We saw no peaks at 1580 or 2700 in raw x. The transformation is necessary.
+
+# I'll stick with Raman shift = 1e7/x.
+
+# Check asymmetry / whether pseudo-voigt is better, and baseline slope importance.
+# Also verify laser rayleigh: if shift = nu_l - nu, and shift=1e7/x_abs, that doesn't match linear conversion.
+
+# Let's see data column meaning from spacing: dx increases with x, roughly proportional to x^2
+# d(1/x) is more uniform?
+xs = x_abs
+d_inv = -np.diff(1e7/xs)  # since xs increases, 1e7/xs decreases, negative diff if sorted increasing xs
+print('\nspacing of 1e7/x (descending x_abs):', 'median', np.median(np.abs(np.diff(1e7/xs))))
+print('std of diff', np.std(np.diff(1e7/x_abs)))
+print('first diffs of raman coord', np.diff(1e7/x_abs)[:5], 'last', np.diff(1e7/x_abs)[-5:])
+# x_abs is sorted descending originally in file (first line largest x)
+# File starts at high x=47183 down to 1648. 
+# Raman coord 1e7/x starts low ~212 and goes to 6065. 
+# spacing of raman coord:
+rc = 1e7/x_abs  # this is descending x so rc ascending? x_abs I reversed to increasing, 
+# redo from file order
+xfile = np.array(xs)  # already reversed to increasing... 
+# reload
+xfile = []
+for line in raw:
+    a,b=line.split(); xfile.append(float(a.replace(',','.')))
+xfile=np.array(xfile) # decreasing
+rc=1e7/xfile # increasing
+print('rc range', rc[0], rc[-1], 'median drc', np.median(np.diff(rc)), 'min', np.diff(rc).min(), 'max', np.diff(rc).max())
+print('relative variation of drc', np.diff(rc).std()/np.median(np.diff(rc)))
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xf, yf = [], []
+for line in raw:
+    a,b = line.split()
+    xf.append(float(a.replace(',','.')))
+    yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+# Raman shift coordinate
+x = 1e7/xf
+y = yf
+order=np.argsort(x)
+x,y=x[order],y[order]
+
+def models():
+    def L_hwhm(x, x0, gamma, A, off):
+        return A * gamma**2 / ((x-x0)**2 + gamma**2) + off
+    def L_fwhm(x, x0, gamma, A, off):
+        g=gamma/2.0
+        return A * g**2 / ((x-x0)**2 + g**2) + off
+    def L_area(x, x0, gamma, A, off):
+        # gamma HWHM, amplitude is area? standard area-normalized lorentzian:
+        # (A/pi)*gamma/((x-x0)**2+gamma**2)
+        return (A/np.pi) * gamma / ((x-x0)**2 + gamma**2) + off
+    return L_hwhm, L_fwhm, L_area
+
+L_hwhm, L_fwhm, L_area = models()
+
+def fit(func, lo, hi, p0, bounds=None):
+    m=(x>=lo)&(x<=hi)
+    xx,yy=x[m],y[m]
+    kw=dict(maxfev=50000)
+    if bounds: kw['bounds']=bounds
+    popt,pcov=curve_fit(func, xx, yy, p0=p0, **kw)
+    pred=func(xx,*popt)
+    r2=1-np.sum((yy-pred)**2)/np.sum((yy-yy.mean())**2)
+    rmse=np.sqrt(np.mean((yy-pred)**2))
+    return popt, np.sqrt(np.diag(pcov)), r2, rmse, m.sum()
+
+print('HWHM convention (gamma = HWHM), various windows')
+for name,lo,hi,p0 in [
+    ('G',1500,1650,[1580,8,8000,5800]),
+    ('G',1520,1640,[1580,8,8000,5800]),
+    ('G',1480,1680,[1580,8,8000,5800]),
+    ('G',1550,1610,[1580,8,8000,5800]),
+    ('G',1560,1605,[1580,8,8000,5800]),
+    ('2D',2550,2800,[2670,18,12000,1100]),
+    ('2D',2500,2850,[2670,18,12000,1500]),
+    ('2D',2600,2750,[2670,18,12000,800]),
+    ('2D',2620,2720,[2670,18,12000,800]),
+    ('2D',2580,2760,[2670,18,12000,1000]),
+]:
+    p,e,r2,rmse,n=fit(L_hwhm,lo,hi,p0)
+    print(f'{name} {lo}-{hi} n={n} R2={r2:.5f} RMSE={rmse:.1f} x0={p[0]:.4f}±{e[0]:.4f} gamma={p[1]:.4f}±{e[1]:.4f} A={p[2]:.2f}±{e[2]:.2f} off={p[3]:.2f}±{e[3]:.2f}')
+
+print('\nFWHM convention')
+for name,lo,hi,p0 in [
+    ('G',1500,1650,[1580,16,8000,5800]),
+    ('2D',2550,2800,[2670,36,12000,1100]),
+]:
+    p,e,r2,rmse,n=fit(L_fwhm,lo,hi,p0)
+    print(f'{name} {lo}-{hi} R2={r2:.5f} x0={p[0]:.4f} gamma={p[1]:.4f} A={p[2]:.2f} off={p[3]:.2f}')
+
+print('\nArea-normalized')
+for name,lo,hi,p0 in [
+    ('G',1500,1650,[1580,8,200000,5800]),
+    ('2D',2550,2800,[2670,18,700000,1100]),
+]:
+    p,e,r2,rmse,n=fit(L_area,lo,hi,p0)
+    print(f'{name} {lo}-{hi} R2={r2:.5f} x0={p[0]:.4f} gamma={p[1]:.4f} A={p[2]:.2f} off={p[3]:.2f} peakheight={p[2]/(np.pi*p[1]):.2f}')
+
+# linear baseline
+def L_lin(x, x0, gamma, A, off, slope):
+    return A * gamma**2 / ((x-x0)**2 + gamma**2) + off + slope*(x-x0)
+
+print('\nwith linear baseline HWHM')
+for name,lo,hi,p0 in [
+    ('G',1450,1700,[1580,8,8000,5800,0]),
+    ('G',1500,1680,[1580,8,8000,5600,-5]),
+    ('2D',2500,2850,[2670,18,12000,1500,-1]),
+    ('2D',2550,2800,[2670,18,12000,1100,-2]),
+]:
+    p,e,r2,rmse,n=fit(L_lin,lo,hi,p0)
+    print(f'{name} {lo}-{hi} n={n} R2={r2:.5f} RMSE={rmse:.1f}')
+    print(' ', dict(zip(['x0','gamma','A','off','slope'], np.round(p,4))))
+
+# Maybe the x column is already something else: check raw x peak positions fit directly
+print('\n\nFIT IN RAW X (no transform) around peaks')
+def fitraw(lo,hi,p0):
+    m=(xf>=lo)&(xf<=hi)
+    # use file x as is
+    xx,yy=xf[m],yf[m]
+    # sort
+    o=np.argsort(xx); xx,yy=xx[o],yy[o]
+    popt,pcov=curve_fit(L_hwhm, xx, yy, p0=p0, maxfev=20000)
+    pred=L_hwhm(xx,*popt)
+    r2=1-np.sum((yy-pred)**2)/np.sum((yy-yy.mean())**2)
+    print(lo,hi,'R2',r2,'params',popt)
+fitraw(6100,6600,[6330,40,7000,6500])
+fitraw(3600,3900,[3745,40,11000,2000])
+PY
+$ find / -name '*.md' -o -name '*.txt' -o -name '*raman*' -o -name '*README*' 2>/dev/null | head -80; ls /opt /home /tmp 2>/dev/null | head -50
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
+
+raw = open('/app/graphene.dat').read().strip().splitlines()
+xf, yf = [], []
+for line in raw:
+    a,b = line.split()
+    xf.append(float(a.replace(',','.')))
+    yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+
+# Hypothesis: xf is wavelength in some unit.
+# Try lambda_nm = xf / scale
+# Raman shift = 1e7*(1/laser_nm - 1/lambda_nm)
+
+def scan(scale_name, lam_nm, laser):
+    shift = 1e7*(1/laser - 1/lam_nm)
+    order=np.argsort(shift)
+    ss, yy = shift[order], yf[order]
+    # smooth adaptive - use uniform on index
+    sm=uniform_filter1d(yy, 7)
+    sel=(ss>1000)&(ss<3500)
+    if sel.sum()<30:
+        return
+    peaks, props = find_peaks(sm[sel], prominence=1500, distance=10)
+    if len(peaks)==0:
+        return
+    sp=ss[sel][peaks]
+    pr=props['prominences']
+    # keep top
+    idx=np.argsort(-pr)[:6]
+    items=[(round(float(sp[i]),1), round(float(pr[i]),0)) for i in idx]
+    print(f'{scale_name} laser {laser}: {items}')
+
+scales = {
+    'A (x/10 nm)': xf/10,
+    'x/100 nm': xf/100,
+    'x as nm': xf, # nonsense
+    'x*0.01 nm': xf*0.01,
+    'x*0.1 nm': xf*0.1,
+}
+
+# Also if xf is wavenumber cm-1 of scattered light
+def scan_nu(nu_sc, laser_nm):
+    nu_l=1e7/laser_nm
+    shift=nu_l - nu_sc
+    order=np.argsort(shift)
+    ss,yy=shift[order], yf[order]
+    sm=uniform_filter1d(yy,5)
+    sel=(ss>800)&(ss<3500)
+    if sel.sum()<20:
+        print(f'nu laser {laser_nm} sel {sel.sum()} range {shift.min():.0f}-{shift.max():.0f}')
+        return
+    peaks, props=find_peaks(sm[sel], prominence=1000, distance=5)
+    sp=ss[sel][peaks]; pr=props['prominences']
+    idx=np.argsort(-pr)[:6]
+    items=[(round(float(sp[i]),1), round(float(pr[i]))) for i in idx]
+    print(f'nu_sc=x laser {laser_nm}: {items} nsel={sel.sum()}')
+
+print('As wavenumber of scattered:')
+for laser in [488, 514.5, 532, 632.8, 785, 405, 457, 325, 1064, 830, 473]:
+    scan_nu(xf, laser)
+
+print('\nAs wavelength various scales, look for G~1580 and 2D~2700:')
+for name,lam in scales.items():
+    print('SCALE', name, 'lam range', lam.min(), lam.max())
+    for laser in [532, 514.5, 632.8, 785, 488, 457, 633, 1064]:
+        scan(name, lam, laser)
+PY
+$ python3 - << 'PY'
+import numpy as np
+raw=open('/app/graphene.dat').read().strip().splitlines()
+xf,yf=[],[]
+for line in raw:
+    a,b=line.split()
+    xf.append(float(a.replace(',','.'))); yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+# file order: x decreasing
+print('file x decreasing', np.all(np.diff(xf)<0))
+rc=1e7/xf # increasing
+print('rc increasing', np.all(np.diff(rc)>0))
+d=np.diff(rc)
+print('drc stats min/med/max', d.min(), np.median(d), d.max())
+# Is drc linear with rc?
+# fit d vs rc
+# check polynomial: maybe wavelength grating linear in x raw index
+idx=np.arange(len(xf))
+# x vs index
+# print correlation of spacing
+print('corr drc vs rc', np.corrcoef(rc[:-1], d)[0,1])
+print('corr d(xf) vs xf', np.corrcoef(xf[:-1], np.diff(xf))[0,1])
+# Maybe xf = a/(b-shift) or similar calibration
+# If pixels are uniform and xf is wavenumber linear? 
+print('\nindex vs xf linearity residual:')
+coef=np.polyfit(idx, xf, 1)
+pred=np.polyval(coef, idx)
+print('linear coef', coef, 'max abs resid', np.max(np.abs(pred-xf)), 'rms', np.sqrt(np.mean((pred-xf)**2)))
+coef2=np.polyfit(idx, xf, 2)
+pred2=np.polyval(coef2, idx)
+print('quad coef', coef2, 'rms', np.sqrt(np.mean((pred2-xf)**2)))
+coef3=np.polyfit(idx, xf, 3)
+pred3=np.polyval(coef3, idx)
+print('cubic rms', np.sqrt(np.mean((pred3-xf)**2)))
+# vs 1/x
+coef=np.polyfit(idx, 1/xf, 1)
+pred=np.polyval(coef, idx)
+print('1/x linear rms', np.sqrt(np.mean((pred-1/xf)**2)), 'max', np.max(np.abs(pred-1/xf)))
+coef2=np.polyfit(idx, 1/xf, 2)
+pred2=np.polyval(coef2, idx)
+print('1/x quad rms', np.sqrt(np.mean((pred2-1/xf)**2)))
+
+# Perhaps the first column is already Raman shift in some instrument units (1/cm * factor)
+# Let's see if there's a calibration in the numbers themselves - first/last
+print('n points', len(xf))
+print('unique spacing ratio dx[i+1]/dx[i] median', np.median(np.diff(xf)[1:]/np.diff(xf)[:-1]))
+# geometric?
+print('xf[i]/xf[i+1] median', np.median(xf[:-1]/xf[1:]))
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
+
+raw=open('/app/graphene.dat').read().strip().splitlines()
+xf,yf=[],[]
+for line in raw:
+    a,b=line.split()
+    xf.append(float(a.replace(',','.'))); yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+
+# lambda_nm = 1e7/xf if xf is cm-1
+lam = 1e7/xf
+print('lambda nm range', lam.min(), lam.max())
+
+def analyze(laser, label=''):
+    shift = 1e7*(1/laser - 1/lam)  # = nu_laser - xf
+    order=np.argsort(shift)
+    ss,yy=shift[order], yf[order]
+    sm=uniform_filter1d(yy, 9)
+    sel=(ss>500)&(ss<4000)
+    peaks,props=find_peaks(sm[sel], prominence=400, distance=8)
+    sp=ss[sel][peaks]; pr=props['prominences']; yp=sm[sel][peaks]
+    idx=np.argsort(-pr)[:8]
+    print(f'\nLASER {laser} {label}')
+    for i in idx:
+        print(f'  shift {sp[i]:.1f} y {yp[i]:.0f} prom {pr[i]:.0f}')
+
+for laser in [532.0, 532.1, 532.2, 514.5, 633.0, 632.8, 785, 488, 457.9, 473, 325, 1064, 830, 405, 660, 671, 561, 594]:
+    analyze(laser)
+
+# The huge peak at xf~19140 might be laser leakage if laser wavenumber is ~19140
+print('\n\nHuge peak center wavenumber', xf[np.argmax(yf)], 'lambda nm', 1e7/xf[np.argmax(yf)])
+# Maybe NOT laser. Let's find narrowest high peaks
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks, peak_widths
+from scipy.ndimage import uniform_filter1d
+
+raw=open('/app/graphene.dat').read().strip().splitlines()
+xf,yf=[],[]
+for line in raw:
+    a,b=line.split()
+    xf.append(float(a.replace(',','.'))); yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+# sort by increasing x
+o=np.argsort(xf); xf,yf=xf[o],yf[o]
+
+sm=uniform_filter1d(yf, 15)
+# prominence relative
+peaks,props=find_peaks(sm, prominence=300, distance=20, width=2)
+print(f'{"x":>12} {"y":>10} {"prom":>10} {"width_pts":>10} {"w_x":>10}')
+idx=np.argsort(-props['prominences'])
+for i in idx[:25]:
+    p=peaks[i]
+    # width in x units roughly
+    w=props['widths'][i]
+    # approximate dx local
+    dx=np.median(np.diff(xf[max(0,p-5):p+6]))
+    print(f'{xf[p]:12.2f} {sm[p]:10.1f} {props["prominences"][i]:10.1f} {w:10.2f} {w*dx:10.2f}')
+
+# Look at sharpest features: width small
+print('\nNarrow peaks width_x < 80 and prom>500:')
+for i in idx:
+    p=peaks[i]
+    w=props['widths'][i]
+    dx=np.median(np.diff(xf[max(0,p-5):p+6]))
+    wx=w*dx
+    if wx<150 and props['prominences'][i]>400:
+        print(f'x={xf[p]:.2f} y={yf[p]:.1f} prom={props["prominences"][i]:.0f} width_x={wx:.2f} 1e7/x={1e7/xf[p]:.2f}')
+PY
+$ python3 - << 'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.special import voigt_profile
+
+raw=open('/app/graphene.dat').read().strip().splitlines()
+xf,yf=[],[]
+for line in raw:
+    a,b=line.split()
+    xf.append(float(a.replace(',','.'))); yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+o=np.argsort(xf); xf,yf=xf[o],yf[o]
+rs=1e7/xf  # candidate raman shift
+o2=np.argsort(rs); rs,yrs=rs[o2],yf[o2]
+
+def lorentz(x, x0, gamma, A, off):
+    return A*gamma**2/((x-x0)**2+gamma**2)+off
+
+def gauss(x, x0, sigma, A, off):
+    return A*np.exp(-0.5*((x-x0)/sigma)**2)+off
+
+def voigt(x, x0, sigma, gamma, A, off):
+    # voigt_profile(x, sigma, gamma) integrates to 1, gamma is HWHM of lorentz component
+    return A*voigt_profile(x-x0, sigma, gamma)+off
+
+def report(name, func, xx, yy, p0, bounds=(-np.inf,np.inf)):
+    popt,pcov=curve_fit(func, xx, yy, p0=p0, bounds=bounds, maxfev=80000)
+    pred=func(xx,*popt)
+    r2=1-np.sum((yy-pred)**2)/np.sum((yy-yy.mean())**2)
+    rmse=np.sqrt(np.mean((yy-pred)**2))
+    err=np.sqrt(np.diag(pcov))
+    print(f'{name}: R2={r2:.5f} RMSE={rmse:.2f}')
+    print('  p', np.array2string(popt, precision=4))
+    print('  e', np.array2string(err, precision=4))
+    return popt,r2
+
+# regions in raman shift
+for label,lo,hi in [('G',1500,1650),('2D',2550,2800)]:
+    m=(rs>=lo)&(rs<=hi)
+    xx,yy=rs[m],yrs[m]
+    print('\n====', label, 'raman coord ====')
+    report('lorentz', lorentz, xx, yy, [ (lo+hi)/2, 15, yy.max()-yy.min(), np.median(yy)])
+    report('gauss', gauss, xx, yy, [ (lo+hi)/2, 10, yy.max()-yy.min(), np.median(yy)])
+    report('voigt', voigt, xx, yy, [ (lo+hi)/2, 3, 8, (yy.max()-np.median(yy))*20, np.median(yy)],
+           bounds=([lo,0.01,0.01,0,0],[hi,50,50,1e8,yy.max()]))
+
+# raw x regions
+for label,lo,hi,x0 in [('G',6000,6700,6330),('2D',3600,3900,3745)]:
+    m=(xf>=lo)&(xf<=hi)
+    xx,yy=xf[m],yf[m]
+    print('\n====', label, 'raw x ====')
+    report('lorentz', lorentz, xx, yy, [x0, 30, yy.max()-np.median(yy), np.median(yy)])
+    report('gauss', gauss, xx, yy, [x0, 20, yy.max()-np.median(yy), np.median(yy)])
+    report('voigt', voigt, xx, yy, [x0, 5, 15, (yy.max()-np.median(yy))*40, np.median(yy)],
+           bounds=([lo,0.01,0.01,0,0],[hi,200,200,1e9,yy.max()]))
+
+# AIC-like compare
+print('\nDone')
+PY
+$ python3 - << 'PY'
+import numpy as np, json
+from scipy.optimize import curve_fit
+
+raw=open('/app/graphene.dat').read().strip().splitlines()
+xf,yf=[],[]
+for line in raw:
+    a,b=line.split()
+    xf.append(float(a.replace(',','.'))); yf.append(float(b.replace(',','.')))
+xf=np.array(xf); yf=np.array(yf)
+rs=1e7/xf
+o=np.argsort(rs); x,y=rs[o],yf[o]
+
+def lorentz(xv, x0, gamma, amplitude, offset):
+    # gamma = HWHM
+    return amplitude * gamma**2 / ((xv-x0)**2 + gamma**2) + offset
+
+def do_fit(lo, hi, p0):
+    m=(x>=lo)&(x<=hi)
+    xx,yy=x[m],y[m]
+    popt,pcov=curve_fit(lorentz, xx, yy, p0=p0, maxfev=20000)
+    pred=lorentz(xx,*popt)
+    r2=1-np.sum((yy-pred)**2)/np.sum((yy-yy.mean())**2)
+    err=np.sqrt(np.diag(pcov))
+    return popt, err, r2, int(m.sum())
+
+results={}
+for key, lo, hi, p0 in [
+    ('G', 1500, 1650, [1580, 8.5, 8300, 5800]),
+    ('2D', 2550, 2800, [2670, 18, 12400, 1100]),
+]:
+    p,e,r2,n=do_fit(lo,hi,p0)
+    print(key, 'n', n, 'R2', r2)
+    print(' x0', p[0], '±', e[0])
+    print(' gamma', p[1], '±', e[1])
+    print(' amplitude', p[2], '±', e[2])
+    print(' offset', p[3], '±', e[3])
+    results[key]={
+        'x0': float(p[0]),
+        'gamma': float(p[1]),
+        'amplitude': float(p[2]),
+        'offset': float(p[3]),
+    }
+
+# Also fit with gamma as FWHM for comparison print
+def lorentz_fwhm(xv, x0, gamma, amplitude, offset):
+    g=gamma/2
+    return amplitude * g**2 / ((xv-x0)**2 + g**2) + offset
+
+print('\nFWHM gamma version:')
+for key, lo, hi, p0 in [
+    ('G', 1500, 1650, [1580, 17, 8300, 5800]),
+    ('2D', 2550, 2800, [2670, 36, 12400, 1100]),
+]:
+    m=(x>=lo)&(x<=hi)
+    xx,yy=x[m],y[m]
+    popt,pcov=curve_fit(lorentz_fwhm, xx, yy, p0=p0, maxfev=20000)
+    print(key, popt)
+
+with open('/app/results.json','w') as f:
+    json.dump(results, f, indent=2)
+print('\nWrote', json.dumps(results, indent=2))
+PY
+$ python3 - << 'PY'
+import json
+p='/app/results.json'
+d=json.load(open(p))
+assert set(d)=={'G','2D'}
+for k in d:
+    assert set(d[k])=={'x0','gamma','amplitude','offset'}
+    for key,val in d[k].items():
+        assert isinstance(val, float)
+print(json.dumps(d, indent=2))
+print('OK')
+PY
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+The G and 2D Lorentzian parameters are written to `/app/results.json`.

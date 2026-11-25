@@ -1,0 +1,152 @@
+$ cd . && git log --oneline -3 && git status && ls
+$ cd . && python --version && python -c "import sympy; print(sympy.__version__)"
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import sympy
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+try:
+    _ = sympy.Symbol('x') == C()
+    print("Case 1 result:", _)
+except Exception as e:
+    print("Case 1 raised:", type(e).__name__, e)
+
+class C2:
+    def __repr__(self):
+        return 'x'
+
+r = sympy.Symbol('x') != C2()
+print("Case 2: Symbol('x') != C2() ->", r, "(expected True)")
+EOF
+python /tmp/repro.py
+$ cd . && grep -n "sympify\|_sympify\|SympifyError" sympy/core/expr.py | head -80
+> read sympy/core/expr.py
+> read sympy/core/sympify.py
+$ cd . && grep -rn "def __eq__" sympy --include=*.py | grep -v "/tests/" | wc -l && grep -rn -A12 "def __eq__" sympy --include=*.py | grep -v "/tests/" | grep -E "[^_]sympify\(" 
+$ cd . && sed -n 100,135p sympy/geometry/ellipse.py; echo ----; sed -n 35,75p sympy/matrices/dense.py
+$ cd . && grep -n "def __eq__" -A45 sympy/core/basic.py | head -70
+$ cd . && grep -rn -B2 -A14 "def __eq__" sympy/core/numbers.py | grep -n "sympify\|def __eq__\|SympifyError" 
+$ cd . && git log -L122,128:sympy/core/expr.py --oneline | head -80
+$ cd . && git show 73caef3991 --stat && git show 73caef3991 | head -150
+$ cd . && sed -n 1,80p sympy/core/decorators.py | grep -n "def _sympifyit\|def __sympifyit\|strict\|sympify" 
+$ cd . && cat > /tmp/scan.py << 'EOF'
+import ast, os, sys
+
+DUNDERS = {'__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+           '__hash__', '__contains__', '__bool__', '__nonzero__'}
+
+for root, dirs, files in os.walk('sympy'):
+    if '/tests' in root or root.endswith('tests'):
+        continue
+    for f in files:
+        if not f.endswith('.py'):
+            continue
+        p = os.path.join(root, f)
+        try:
+            tree = ast.parse(open(p).read())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in DUNDERS:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        fn = sub.func
+                        name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
+                        if name in ('sympify', 'S'):
+                            strict = any(k.arg == 'strict' for k in sub.keywords)
+                            print("%s:%d %s calls %s(strict=%s)" % (p, sub.lineno, node.name, name, strict))
+EOF
+python /tmp/scan.py
+$ cd . && grep -rn "def __eq__" sympy --include=*.py | grep -v "/tests/"
+$ cd . && python -c "
+import sympy
+from sympy import Symbol, Add, Mul, Integer, Float, Function, Matrix, Tuple
+x = Symbol('x')
+for obj in [x, x+1, 2*x, sympy.sin(x), Function('f')(x), sympy.pi, Integer(1), Float(1.5), Tuple(1,2), Matrix([1])]:
+    cls = type(obj)
+    owner = next(k for k in cls.__mro__ if '__eq__' in k.__dict__)
+    print('%-22s __eq__ from %s.%s' % (cls.__name__, owner.__module__, owner.__name__))
+"
+$ cd . && sed -n 1385,1420p sympy/core/numbers.py; echo ----; sed -n 2240,2265p sympy/core/numbers.py; echo ----; sed -n 3235,3260p sympy/core/numbers.py
+$ cd . && sed -n 108,118p sympy/core/containers.py; echo ----; sed -n 276,286p sympy/core/containers.py; echo ----; sed -n 160,210p sympy/functions/elementary/integers.py; echo ----; sed -n 645,660p sympy/sets/sets.py
+$ cd . && python -c "
+from sympy import Matrix
+class C:
+    def __repr__(self):
+        return 'x.y'
+try:
+    print(Matrix([1]) == C())
+except Exception as e:
+    print('Matrix == C() raised', type(e).__name__, e)
+
+class D:
+    def __repr__(self):
+        return 'Matrix([1])'
+print('Matrix([1]) == D() ->', Matrix([1]) == D(), '(expected False)')
+"
+$ cd . && sed -n 205,240p sympy/matrices/sparse.py; echo ----; sed -n 2490,2505p sympy/matrices/common.py; echo -----; sed -n 60,70p sympy/matrices/common.py
+$ cd . && git log -L46,58:sympy/matrices/dense.py --oneline | head -120
+$ cd . && git show 042362cfea --stat | head -20 && git show 042362cfea -- sympy/matrices/dense.py | head -60
+$ cd . && git log --format='%h %ad %s' --date=short -S'other = sympify(other)' -- sympy/matrices/dense.py sympy/matrices/matrices.py | head
+$ cd . && git show 4c8b2d16e1 | head -80
+$ cd . && grep -n "def __ne__" -A3 sympy/core/basic.py sympy/core/expr.py sympy/matrices/dense.py sympy/matrices/common.py sympy/matrices/matrices.py sympy/matrices/immutable.py sympy/matrices/sparse.py
+$ cd . && python -c "import numpy; print(numpy.__version__)" ; python -c "import symengine; print(symengine.__version__)"; python -c "import gmpy2; print(gmpy2.version())"
+$ cd . && python -c "
+from sympy import Matrix, ImmutableMatrix, Symbol
+from sympy.core.sympify import _sympify, SympifyError
+class WithSympy:
+    def _sympy_(self): return Symbol('x')
+class WithFloat:
+    def __float__(self): return 2.5
+class Arbitrary:
+    def __repr__(self): return 'x'
+for obj in ['x', None, [1, 2], (1, 2), {1: 2}, True, 1, 2.5, WithSympy(), WithFloat(), Arbitrary(), Matrix([1]), ImmutableMatrix([1])]:
+    try:
+        r = _sympify(obj)
+        print('%-30r -> %r (%s)' % (obj, r, type(r).__name__))
+    except SympifyError as e:
+        print('%-30r -> SympifyError' % (obj,))
+"
+$ cd . && python -c "import pytest, sys; print(pytest.__version__)"; python -c "import xdist; print('xdist', xdist.__version__)"; nproc; cat pytest.ini; ls bin
+$ cd . && python bin/test --help 2>&1 | head -80
+> read sympy/core/decorators.py
+> read sympy/core/basic.py
+$ cd . && grep -n "__eq__\|sympify" sympy/matrices/immutable.py | head -20; echo ----; sed -n 100,125p sympy/polys/domains/expressiondomain.py; echo ----; sed -n 25,40p sympy/polys/domains/expressiondomain.py
+$ cd . && sed -n 800,815p sympy/core/exprtools.py; echo ----; sed -n 915,925p sympy/core/exprtools.py; echo ----; sed -n 455,480p sympy/tensor/array/ndim_array.py
+> edit sympy/core/expr.py
+$ cd . && grep -rn "converter\[" sympy --include=*.py | grep -v "/tests/" | grep -v "^\s*#"
+$ cd . && sed -n 20,70p sympy/core/containers.py; echo ----; sed -n 225,260p sympy/core/containers.py
+$ cd . && python /tmp/repro.py; python -c "
+import sympy
+from sympy import Symbol, Matrix, Tuple
+x = Symbol('x')
+class C:
+    def __repr__(self):
+        return 'x.y'
+for label, f in [('x == (C(),)', lambda: x == (C(),)),
+                 ('x in [(C(), 1)]', lambda: x in [(C(), 1)]),
+                 ('x == {C(): 1}', lambda: x == {C(): 1}),
+                 ('x == {C()}', lambda: x == {C()}),
+                 ('Tuple(1) == (C(),)', lambda: Tuple(1) == (C(),)),
+                 ('Matrix([1]) == C()', lambda: Matrix([1]) == C()),
+                 ('Matrix([1]) == object()', lambda: Matrix([1]) == object()),
+                 ]:
+    try:
+        print('%-26s -> %r' % (label, f()))
+    except Exception as e:
+        print('%-26s -> raised %s: %s' % (label, type(e).__name__, e))
+"
+> read sympy/core/containers.py
+$ cd . && python -c "
+from sympy import FiniteSet, Symbol, Tuple, Matrix
+x = Symbol('x')
+print('FiniteSet(x) == {\"x\"} ->', FiniteSet(x) == {'x'})
+print('Tuple(x) == (\"x\",) ->', Tuple(x) == ('x',))
+print('Matrix([1]) == \"Matrix([1])\" ->', Matrix([1]) == 'Matrix([1])')
+"
+> edit sympy/core/expr.py
+$ cd . && sed -n 4110,4135p sympy/polys/polytools.py; echo ----; sed -n 4190,4215p sympy/polys/polytools.py; echo ----; sed -n 6865,6885p sympy/polys/polytools.py
+$ cd . && sed -n 480,500p sympy/tensor/array/ndim_array.py; echo ----; grep -n "def __new__" -A12 sympy/sets/sets.py | sed -n '/class FiniteSet/,$p' | head -5; grep -n "class FiniteSet" sympy/sets/sets.py
+$ cd . && timeout 900 python bin/test sympy/core 2>&1 | tail -30

@@ -1,0 +1,1150 @@
+2026-11-25 07:37:07,805 - INFO - Creating container for pylint-dev__pylint-7080...
+2026-11-25 07:37:07,839 - INFO - Container for pylint-dev__pylint-7080 created: db5004ff470ca8ebac82261365987129b493692858bb54a6eda9490a2ef69836
+2026-11-25 07:37:08,526 - INFO - Container for pylint-dev__pylint-7080 started: db5004ff470ca8ebac82261365987129b493692858bb54a6eda9490a2ef69836
+2026-11-25 07:37:08,526 - INFO - Intermediate patch for pylint-dev__pylint-7080 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pylint-dev__pylint-7080/patch.diff, now applying to container...
+2026-11-25 07:37:08,602 - INFO - >>>>> Applied Patch:
+Checking patch doc/user_guide/usage/run.rst...
+Checking patch doc/whatsnew/2/2.15/index.rst...
+Checking patch pylint/lint/expand_modules.py...
+Checking patch pylint/lint/pylinter.py...
+Checking patch tests/lint/unittest_expand_modules.py...
+Checking patch tests/lint/unittest_lint.py...
+Applied patch doc/user_guide/usage/run.rst cleanly.
+Applied patch doc/whatsnew/2/2.15/index.rst cleanly.
+Applied patch pylint/lint/expand_modules.py cleanly.
+Applied patch pylint/lint/pylinter.py cleanly.
+Applied patch tests/lint/unittest_expand_modules.py cleanly.
+Applied patch tests/lint/unittest_lint.py cleanly.
+
+2026-11-25 07:37:08,812 - INFO - Git diff before:
+diff --git a/doc/user_guide/usage/run.rst b/doc/user_guide/usage/run.rst
+index 9a15d04a..8a00ddc3 100755
+--- a/doc/user_guide/usage/run.rst
++++ b/doc/user_guide/usage/run.rst
+@@ -24,6 +24,18 @@ When ``--recursive=y`` option is used, modules and packages are also accepted as
+ This option makes ``pylint`` attempt to discover all modules (files ending with ``.py`` extension)
+ and all packages (all directories containing a ``__init__.py`` file).
+ 
++``ignore-paths`` uses regular expressions matched from the start of each path. Relative
++patterns match paths relative to the current working directory when Pylint is given
++relative targets. For example, to skip generated code under ``src/gen``::
++
++    [tool.pylint.MASTER]
++    ignore-paths = ["^src/gen/.*$"]
++
++Run ``pylint --recursive=y src/`` from the directory containing that configuration.
++The pattern matches the contents of the directory; ``^src/gen$`` can instead be used
++to ignore the directory itself and everything under it. For absolute targets, use a
++pattern that matches the absolute path or a pattern such as ``.*/src/gen/.*``.
++
+ Pylint **will not import** this package or module, though uses Python internals
+ to locate them and as such is subject to the same rules and configuration.
+ You should pay attention to your ``PYTHONPATH``, since it is a common error
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..d5a7f1aa 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,9 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* Respect ``ignore-paths`` during recursive discovery when paths use mixed separators,
++  and apply directory and file exclusions consistently inside Python packages.
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..7322b3ff 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -52,14 +52,77 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
+-    basename = os.path.basename(element)
++    normalized_element = os.path.normpath(element)
++    basename = os.path.basename(normalized_element)
++    # Keep the original spelling for existing patterns, but also handle mixed
++    # separators and redundant components in paths supplied on the command line.
+     return (
+         basename in ignore_list
+         or _is_in_ignore_list_re(basename, ignore_list_re)
+         or _is_in_ignore_list_re(element, ignore_list_paths_re)
++        or _is_in_ignore_list_re(normalized_element, ignore_list_paths_re)
+     )
+ 
+ 
++def _is_ignored_file_or_directory(
++    element: str,
++    root: str,
++    ignore_list: list[str],
++    ignore_list_re: list[Pattern[str]],
++    ignore_list_paths_re: list[Pattern[str]],
++) -> bool:
++    """Check a file and its parent directories below the package root."""
++    while element != root:
++        if _is_ignored_file(element, ignore_list, ignore_list_re, ignore_list_paths_re):
++            return True
++        parent = os.path.dirname(element)
++        if parent == element:
++            break
++        element = parent
++    return False
++
++
++def _relative_if_absolute_file(filepath: str, argument: str) -> str:
++    """Make resolved module paths relative so relative ignore patterns also match."""
++    if os.path.isabs(filepath) and not os.path.isabs(argument):
++        try:
++            return os.path.relpath(filepath)
++        except ValueError:
++            # Windows cannot make a relative path across drives.
++            pass
++    return filepath
++
++
++def _is_ignored_subfile(
++    subfilepath: str,
++    package_directory: str,
++    ignore_directory: str,
++    ignore_list: list[str],
++    ignore_list_re: list[Pattern[str]],
++    ignore_list_paths_re: list[Pattern[str]],
++) -> bool:
++    """Check a discovered file and its parents in both path representations."""
++    if _is_ignored_file_or_directory(
++        subfilepath,
++        package_directory,
++        ignore_list,
++        ignore_list_re,
++        ignore_list_paths_re,
++    ):
++        return True
++    if package_directory != ignore_directory:
++        relative_path = os.path.relpath(subfilepath, package_directory)
++        relative_path = os.path.normpath(os.path.join(ignore_directory, relative_path))
++        return _is_ignored_file_or_directory(
++            relative_path,
++            ignore_directory,
++            ignore_list,
++            ignore_list_re,
++            ignore_list_paths_re,
++        )
++    return False
++
++
+ def expand_modules(
+     files_or_modules: Sequence[str],
+     ignore_list: list[str],
+@@ -108,6 +171,7 @@ def expand_modules(
+                 errors.append({"key": "fatal", "mod": modname, "ex": ex})
+                 continue
+         filepath = os.path.normpath(filepath)
++        filepath_for_ignore = _relative_if_absolute_file(filepath, something)
+         modparts = (modname or something).split(".")
+         try:
+             spec = modutils.file_info_from_modpath(
+@@ -120,7 +184,30 @@ def expand_modules(
+         else:
+             is_namespace = modutils.is_namespace(spec)
+             is_directory = modutils.is_directory(spec)
+-        if not is_namespace:
++        has_init = (
++            not (modname.endswith(".__init__") or modname == "__init__")
++            and os.path.basename(filepath) == "__init__.py"
++        )
++        package_directory = os.path.dirname(filepath)
++        package_directory_for_ignore = os.path.dirname(filepath_for_ignore)
++        if has_init or is_namespace or is_directory:
++            if _is_ignored_file(
++                package_directory, ignore_list, ignore_list_re, ignore_list_paths_re
++            ) or _is_ignored_file(
++                package_directory_for_ignore,
++                ignore_list,
++                ignore_list_re,
++                ignore_list_paths_re,
++            ):
++                continue
++        if not is_namespace and not _is_ignored_subfile(
++            filepath,
++            package_directory,
++            package_directory_for_ignore,
++            ignore_list,
++            ignore_list_re,
++            ignore_list_paths_re,
++        ):
+             result.append(
+                 {
+                     "path": filepath,
+@@ -130,19 +217,20 @@ def expand_modules(
+                     "basename": modname,
+                 }
+             )
+-        has_init = (
+-            not (modname.endswith(".__init__") or modname == "__init__")
+-            and os.path.basename(filepath) == "__init__.py"
+-        )
+         if has_init or is_namespace or is_directory:
+             for subfilepath in modutils.get_module_files(
+-                os.path.dirname(filepath), ignore_list, list_all=is_namespace
++                package_directory, ignore_list, list_all=is_namespace
+             ):
+-                if filepath == subfilepath:
++                if filepath == os.path.normpath(subfilepath):
+                     continue
+-                if _is_in_ignore_list_re(
+-                    os.path.basename(subfilepath), ignore_list_re
+-                ) or _is_in_ignore_list_re(subfilepath, ignore_list_paths_re):
++                if _is_ignored_subfile(
++                    subfilepath,
++                    package_directory,
++                    package_directory_for_ignore,
++                    ignore_list,
++                    ignore_list_re,
++                    ignore_list_paths_re,
++                ):
+                     continue
+ 
+                 modpath = _modpath_from_file(
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..13090d25 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -591,23 +591,19 @@ class PyLinter(
+             if os.path.isdir(something) and not os.path.isfile(
+                 os.path.join(something, "__init__.py")
+             ):
+-                skip_subtrees: list[str] = []
+-                for root, _, files in os.walk(something):
+-                    if any(root.startswith(s) for s in skip_subtrees):
+-                        # Skip subtree of already discovered package.
+-                        continue
+-
++                for root, dirs, files in os.walk(something):
+                     if _is_ignored_file(
+                         root,
+                         self.config.ignore,
+                         self.config.ignore_patterns,
+                         self.config.ignore_paths,
+                     ):
+-                        skip_subtrees.append(root)
++                        dirs[:] = []
+                         continue
+ 
+                     if "__init__.py" in files:
+-                        skip_subtrees.append(root)
++                        # The package's contents will be handled by expand_modules.
++                        dirs[:] = []
+                         yield root
+                     else:
+                         yield from (
+diff --git a/tests/lint/unittest_expand_modules.py b/tests/lint/unittest_expand_modules.py
+index 15f72d0c..55696ce6 100755
+--- a/tests/lint/unittest_expand_modules.py
++++ b/tests/lint/unittest_expand_modules.py
+@@ -4,13 +4,21 @@
+ 
+ from __future__ import annotations
+ 
++import ntpath
+ import re
+ from pathlib import Path
++from types import SimpleNamespace
+ 
+ import pytest
+ 
++import pylint.lint.expand_modules as expand_modules_module
+ from pylint.checkers import BaseChecker
+-from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules
++from pylint.config.argument import _regexp_paths_csv_transfomer
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+ from pylint.testutils import CheckerTestCase, set_config
+ from pylint.typing import MessageDefinitionTuple
+ 
+@@ -26,6 +34,31 @@ def test__is_in_ignore_list_re_match() -> None:
+     assert _is_in_ignore_list_re("src/tests/whatever.xml", patterns)
+ 
+ 
++@pytest.mark.parametrize(
++    "path,ignored",
++    [
++        (r"src/gen\about.py", True),
++        (r"src/gen\nested\about.py", True),
++        (r"./src/gen\about.py", True),
++        (r"src\gen\about.py", True),
++        ("src/gen/about.py", True),
++        (r"src/generated\about.py", False),
++    ],
++)
++def test_is_ignored_file_with_windows_paths(
++    monkeypatch: pytest.MonkeyPatch, path: str, ignored: bool
++) -> None:
++    # os.walk("src/") on Windows can produce paths with both kinds of separator.
++    monkeypatch.setattr(expand_modules_module, "os", SimpleNamespace(path=ntpath))
++    patterns = _regexp_paths_csv_transfomer("^src/gen/.*$")
++    assert _is_ignored_file(path, [], [], patterns) is ignored
++
++
++def test_is_ignored_file_preserves_matching_unnormalized_paths() -> None:
++    patterns = [re.compile(r"^\./src/.*")]
++    assert _is_ignored_file("./src/file.py", [], [], patterns)
++
++
+ TEST_DIRECTORY = Path(__file__).parent.parent
+ INIT_PATH = str(TEST_DIRECTORY / "lint/__init__.py")
+ EXPAND_MODULES = str(TEST_DIRECTORY / "lint/unittest_expand_modules.py")
+@@ -134,12 +167,7 @@ class TestExpandModules(CheckerTestCase):
+         "files_or_modules,expected",
+         [
+             ([__file__], []),
+-            (
+-                [str(Path(__file__).parent)],
+-                [
+-                    init_of_package,
+-                ],
+-            ),
++            ([str(Path(__file__).parent)], []),
+         ],
+     )
+     @set_config(ignore_paths=".*/lint/.*")
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..079cd713 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -912,6 +912,260 @@ def test_recursive_ignore(ignore_parameter, ignore_parameter_value) -> None:
+     assert module in linted_file_paths
+ 
+ 
++def _create_recursive_ignore_project(
++    project: Path, root_package: bool, generated_package: bool
++) -> set[str]:
++    files = [
++        "src/kept.py",
++        "src/gen/ignored.py",
++        "src/gen/nested/ignored_nested.py",
++        "src/generated/__init__.py",
++        "src/generated/kept_nested.py",
++    ]
++    expected = {
++        "src/kept.py",
++        "src/generated/__init__.py",
++        "src/generated/kept_nested.py",
++    }
++    if root_package:
++        files.append("src/__init__.py")
++        expected.add("src/__init__.py")
++    if generated_package:
++        files.extend(("src/gen/__init__.py", "src/gen/nested/__init__.py"))
++    for name in files:
++        path = project / name
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_text("value = 1\n", encoding="utf-8")
++    return expected
++
++
++def _lint_recursive_ignore_project(args: list[str], project: Path) -> set[str]:
++    reporter = testutils.GenericTestReporter()
++    lint.Run(
++        [
++            "--recursive=y",
++            "--disable=all",
++            "--enable=missing-module-docstring",
++            "--score=n",
++            "--persistent=n",
++            *args,
++        ],
++        reporter=reporter,
++        exit=False,
++    )
++    assert all(msg.symbol == "missing-module-docstring" for msg in reporter.messages)
++    paths = {
++        Path(msg.abspath).resolve().relative_to(project.resolve()).as_posix()
++        for msg in reporter.messages
++    }
++    assert len(paths) == len(reporter.messages)
++    return paths
++
++
++@pytest.mark.parametrize(
++    "root_package,generated_package",
++    [(False, False), (False, True), (True, True)],
++    ids=["directories", "nested-package", "root-package"],
++)
++@pytest.mark.parametrize("pattern", ["^src/gen/.*$", "^src/gen$"])
++@pytest.mark.parametrize(
++    "config_source,target",
++    [("toml", "src/"), ("toml", "./src/"), ("command-line", "src")],
++)
++def test_recursive_ignore_paths(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    root_package: bool,
++    generated_package: bool,
++    pattern: str,
++    config_source: str,
++    target: str,
++) -> None:
++    expected = _create_recursive_ignore_project(
++        tmp_path, root_package, generated_package
++    )
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    args = [target]
++    if config_source == "toml":
++        (tmp_path / "pyproject.toml").write_text(
++            f'[tool.pylint.MASTER]\nignore-paths = ["{pattern}"]\n',
++            encoding="utf-8",
++        )
++    else:
++        args.append(f"--ignore-paths={pattern}")
++
++    assert _lint_recursive_ignore_project(args, tmp_path) == expected
++
++
++@pytest.mark.parametrize("target", ["src/", "src/gen/", "src.gen", "src/__init__.py"])
++def test_recursive_ignore_package_init_only(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
++) -> None:
++    expected = _create_recursive_ignore_project(
++        tmp_path, target in {"src.gen", "src/__init__.py"}, True
++    )
++    generated_files = {
++        "src/gen/ignored.py",
++        "src/gen/nested/__init__.py",
++        "src/gen/nested/ignored_nested.py",
++    }
++    if target == "src/__init__.py":
++        expected = {"src/__init__.py"}
++    elif target == "src/":
++        expected |= generated_files
++    else:
++        expected = generated_files
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert (
++        _lint_recursive_ignore_project(
++            [target, "--ignore-paths=^src/gen/__init__.py$"], tmp_path
++        )
++        == expected
++    )
++
++
++def test_recursive_ignore_explicit_package_directory(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _create_recursive_ignore_project(tmp_path, False, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    assert not _lint_recursive_ignore_project(
++        ["src/gen/", "--ignore-paths=^src/gen$"], tmp_path
++    )
++
++
++@pytest.mark.needs_two_cores
++def test_recursive_ignore_paths_parallel(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    (tmp_path / "pyproject.toml").write_text(
++        '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n',
++        encoding="utf-8",
++    )
++
++    assert _lint_recursive_ignore_project(["src/", "--jobs=2"], tmp_path) == expected
++
++
++@pytest.mark.parametrize("ignore_option", ["--ignore=gen", "--ignore-patterns=^gen$"])
++def test_recursive_ignore_package_directory_by_name(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_option: str
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert _lint_recursive_ignore_project(["src/", ignore_option], tmp_path) == expected
++
++
++@pytest.mark.parametrize("pattern", ["^src/gen/.*$", "^src/gen$", "^src/gen"])
++def test_recursive_ignore_package_module_argument(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
++) -> None:
++    import astroid.modutils
++
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    if pattern == "^src/gen":
++        expected -= {"src/generated/__init__.py", "src/generated/kept_nested.py"}
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    package_init = str(tmp_path / "src" / "__init__.py")
++    original_file_from_modpath = astroid.modutils.file_from_modpath
++
++    def file_from_modpath(modpath, *args, **kwargs):
++        if modpath == ["src"]:
++            return package_init
++        return original_file_from_modpath(modpath, *args, **kwargs)
++
++    # "src" is also a valid path, so force module-name resolution to test the
++    # absolute file paths that astroid returns for such arguments.
++    monkeypatch.setattr(astroid.modutils, "file_from_modpath", file_from_modpath)
++    original_exists = os.path.exists
++    monkeypatch.setattr(
++        os.path,
++        "exists",
++        lambda path: False if path == "src" else original_exists(path),
++    )
++
++    assert (
++        _lint_recursive_ignore_project(["src", f"--ignore-paths={pattern}"], tmp_path)
++        == expected
++    )
++
++
++@pytest.mark.parametrize("pattern", ["^src/gen$", "^src/gen/.*$"])
++def test_recursive_ignore_named_package_argument(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
++) -> None:
++    _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.syspath_prepend(str(tmp_path))
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert not _lint_recursive_ignore_project(
++        ["src.gen", f"--ignore-paths={pattern}"], tmp_path
++    )
++
++
++def test_recursive_ignore_root_package_with_different_path_spelling(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import pylint.lint.expand_modules as expand_modules_module
++
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    get_module_files = expand_modules_module.modutils.get_module_files
++
++    def get_files_with_dot_prefix(*args, **kwargs):
++        return ["./" + path for path in get_module_files(*args, **kwargs)]
++
++    monkeypatch.setattr(
++        expand_modules_module.modutils, "get_module_files", get_files_with_dot_prefix
++    )
++    assert (
++        _lint_recursive_ignore_project(
++            ["src/", "--ignore-paths=^src/gen/.*$"], tmp_path
++        )
++        == expected
++    )
++
++
++def test_recursive_ignore_syntax_error(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, False, True)
++    (tmp_path / "src/gen/__init__.py").write_text("def broken(:\n", encoding="utf-8")
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    reporter = testutils.GenericTestReporter()
++    run = lint.Run(
++        [
++            "src/",
++            "--recursive=y",
++            "--ignore-paths=^src/gen/.*$",
++            "--disable=all",
++            "--enable=syntax-error,missing-module-docstring",
++            "--score=n",
++            "--persistent=n",
++        ],
++        reporter=reporter,
++        exit=False,
++    )
++    assert run.linter.msg_status == 16
++    assert {
++        Path(msg.abspath).relative_to(tmp_path).as_posix() for msg in reporter.messages
++    } == expected
++    assert all(msg.symbol == "missing-module-docstring" for msg in reporter.messages)
++
++
+ def test_import_sibling_module_from_namespace(initialized_linter: PyLinter) -> None:
+     """If the parent directory above `namespace` is on sys.path, ensure that
+     modules under `namespace` can import each other without raising `import-error`."""
+2026-11-25 07:37:08,812 - INFO - Eval script for pylint-dev__pylint-7080 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pylint-dev__pylint-7080/eval.sh; copying to container...
+2026-11-25 07:37:27,702 - INFO - Test runtime: 18.85 seconds
+2026-11-25 07:37:27,703 - INFO - Test output for pylint-dev__pylint-7080 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pylint-dev__pylint-7080/test_output.txt
+2026-11-25 07:37:27,743 - INFO - Git diff after:
+diff --git a/doc/user_guide/usage/run.rst b/doc/user_guide/usage/run.rst
+index 9a15d04a..8a00ddc3 100755
+--- a/doc/user_guide/usage/run.rst
++++ b/doc/user_guide/usage/run.rst
+@@ -24,6 +24,18 @@ When ``--recursive=y`` option is used, modules and packages are also accepted as
+ This option makes ``pylint`` attempt to discover all modules (files ending with ``.py`` extension)
+ and all packages (all directories containing a ``__init__.py`` file).
+ 
++``ignore-paths`` uses regular expressions matched from the start of each path. Relative
++patterns match paths relative to the current working directory when Pylint is given
++relative targets. For example, to skip generated code under ``src/gen``::
++
++    [tool.pylint.MASTER]
++    ignore-paths = ["^src/gen/.*$"]
++
++Run ``pylint --recursive=y src/`` from the directory containing that configuration.
++The pattern matches the contents of the directory; ``^src/gen$`` can instead be used
++to ignore the directory itself and everything under it. For absolute targets, use a
++pattern that matches the absolute path or a pattern such as ``.*/src/gen/.*``.
++
+ Pylint **will not import** this package or module, though uses Python internals
+ to locate them and as such is subject to the same rules and configuration.
+ You should pay attention to your ``PYTHONPATH``, since it is a common error
+diff --git a/doc/whatsnew/2/2.15/index.rst b/doc/whatsnew/2/2.15/index.rst
+index e8ce1879..d5a7f1aa 100755
+--- a/doc/whatsnew/2/2.15/index.rst
++++ b/doc/whatsnew/2/2.15/index.rst
+@@ -73,6 +73,9 @@ False negatives fixed
+ Other bug fixes
+ ===============
+ 
++* Respect ``ignore-paths`` during recursive discovery when paths use mixed separators,
++  and apply directory and file exclusions consistently inside Python packages.
++
+ 
+ Other Changes
+ =============
+diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py
+index 5cacc037..7322b3ff 100755
+--- a/pylint/lint/expand_modules.py
++++ b/pylint/lint/expand_modules.py
+@@ -52,14 +52,77 @@ def _is_ignored_file(
+     ignore_list_re: list[Pattern[str]],
+     ignore_list_paths_re: list[Pattern[str]],
+ ) -> bool:
+-    basename = os.path.basename(element)
++    normalized_element = os.path.normpath(element)
++    basename = os.path.basename(normalized_element)
++    # Keep the original spelling for existing patterns, but also handle mixed
++    # separators and redundant components in paths supplied on the command line.
+     return (
+         basename in ignore_list
+         or _is_in_ignore_list_re(basename, ignore_list_re)
+         or _is_in_ignore_list_re(element, ignore_list_paths_re)
++        or _is_in_ignore_list_re(normalized_element, ignore_list_paths_re)
+     )
+ 
+ 
++def _is_ignored_file_or_directory(
++    element: str,
++    root: str,
++    ignore_list: list[str],
++    ignore_list_re: list[Pattern[str]],
++    ignore_list_paths_re: list[Pattern[str]],
++) -> bool:
++    """Check a file and its parent directories below the package root."""
++    while element != root:
++        if _is_ignored_file(element, ignore_list, ignore_list_re, ignore_list_paths_re):
++            return True
++        parent = os.path.dirname(element)
++        if parent == element:
++            break
++        element = parent
++    return False
++
++
++def _relative_if_absolute_file(filepath: str, argument: str) -> str:
++    """Make resolved module paths relative so relative ignore patterns also match."""
++    if os.path.isabs(filepath) and not os.path.isabs(argument):
++        try:
++            return os.path.relpath(filepath)
++        except ValueError:
++            # Windows cannot make a relative path across drives.
++            pass
++    return filepath
++
++
++def _is_ignored_subfile(
++    subfilepath: str,
++    package_directory: str,
++    ignore_directory: str,
++    ignore_list: list[str],
++    ignore_list_re: list[Pattern[str]],
++    ignore_list_paths_re: list[Pattern[str]],
++) -> bool:
++    """Check a discovered file and its parents in both path representations."""
++    if _is_ignored_file_or_directory(
++        subfilepath,
++        package_directory,
++        ignore_list,
++        ignore_list_re,
++        ignore_list_paths_re,
++    ):
++        return True
++    if package_directory != ignore_directory:
++        relative_path = os.path.relpath(subfilepath, package_directory)
++        relative_path = os.path.normpath(os.path.join(ignore_directory, relative_path))
++        return _is_ignored_file_or_directory(
++            relative_path,
++            ignore_directory,
++            ignore_list,
++            ignore_list_re,
++            ignore_list_paths_re,
++        )
++    return False
++
++
+ def expand_modules(
+     files_or_modules: Sequence[str],
+     ignore_list: list[str],
+@@ -108,6 +171,7 @@ def expand_modules(
+                 errors.append({"key": "fatal", "mod": modname, "ex": ex})
+                 continue
+         filepath = os.path.normpath(filepath)
++        filepath_for_ignore = _relative_if_absolute_file(filepath, something)
+         modparts = (modname or something).split(".")
+         try:
+             spec = modutils.file_info_from_modpath(
+@@ -120,7 +184,30 @@ def expand_modules(
+         else:
+             is_namespace = modutils.is_namespace(spec)
+             is_directory = modutils.is_directory(spec)
+-        if not is_namespace:
++        has_init = (
++            not (modname.endswith(".__init__") or modname == "__init__")
++            and os.path.basename(filepath) == "__init__.py"
++        )
++        package_directory = os.path.dirname(filepath)
++        package_directory_for_ignore = os.path.dirname(filepath_for_ignore)
++        if has_init or is_namespace or is_directory:
++            if _is_ignored_file(
++                package_directory, ignore_list, ignore_list_re, ignore_list_paths_re
++            ) or _is_ignored_file(
++                package_directory_for_ignore,
++                ignore_list,
++                ignore_list_re,
++                ignore_list_paths_re,
++            ):
++                continue
++        if not is_namespace and not _is_ignored_subfile(
++            filepath,
++            package_directory,
++            package_directory_for_ignore,
++            ignore_list,
++            ignore_list_re,
++            ignore_list_paths_re,
++        ):
+             result.append(
+                 {
+                     "path": filepath,
+@@ -130,19 +217,20 @@ def expand_modules(
+                     "basename": modname,
+                 }
+             )
+-        has_init = (
+-            not (modname.endswith(".__init__") or modname == "__init__")
+-            and os.path.basename(filepath) == "__init__.py"
+-        )
+         if has_init or is_namespace or is_directory:
+             for subfilepath in modutils.get_module_files(
+-                os.path.dirname(filepath), ignore_list, list_all=is_namespace
++                package_directory, ignore_list, list_all=is_namespace
+             ):
+-                if filepath == subfilepath:
++                if filepath == os.path.normpath(subfilepath):
+                     continue
+-                if _is_in_ignore_list_re(
+-                    os.path.basename(subfilepath), ignore_list_re
+-                ) or _is_in_ignore_list_re(subfilepath, ignore_list_paths_re):
++                if _is_ignored_subfile(
++                    subfilepath,
++                    package_directory,
++                    package_directory_for_ignore,
++                    ignore_list,
++                    ignore_list_re,
++                    ignore_list_paths_re,
++                ):
+                     continue
+ 
+                 modpath = _modpath_from_file(
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index e2bbf061..13090d25 100755
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -591,23 +591,19 @@ class PyLinter(
+             if os.path.isdir(something) and not os.path.isfile(
+                 os.path.join(something, "__init__.py")
+             ):
+-                skip_subtrees: list[str] = []
+-                for root, _, files in os.walk(something):
+-                    if any(root.startswith(s) for s in skip_subtrees):
+-                        # Skip subtree of already discovered package.
+-                        continue
+-
++                for root, dirs, files in os.walk(something):
+                     if _is_ignored_file(
+                         root,
+                         self.config.ignore,
+                         self.config.ignore_patterns,
+                         self.config.ignore_paths,
+                     ):
+-                        skip_subtrees.append(root)
++                        dirs[:] = []
+                         continue
+ 
+                     if "__init__.py" in files:
+-                        skip_subtrees.append(root)
++                        # The package's contents will be handled by expand_modules.
++                        dirs[:] = []
+                         yield root
+                     else:
+                         yield from (
+diff --git a/tests/lint/unittest_expand_modules.py b/tests/lint/unittest_expand_modules.py
+index 15f72d0c..55696ce6 100755
+--- a/tests/lint/unittest_expand_modules.py
++++ b/tests/lint/unittest_expand_modules.py
+@@ -4,13 +4,21 @@
+ 
+ from __future__ import annotations
+ 
++import ntpath
+ import re
+ from pathlib import Path
++from types import SimpleNamespace
+ 
+ import pytest
+ 
++import pylint.lint.expand_modules as expand_modules_module
+ from pylint.checkers import BaseChecker
+-from pylint.lint.expand_modules import _is_in_ignore_list_re, expand_modules
++from pylint.config.argument import _regexp_paths_csv_transfomer
++from pylint.lint.expand_modules import (
++    _is_ignored_file,
++    _is_in_ignore_list_re,
++    expand_modules,
++)
+ from pylint.testutils import CheckerTestCase, set_config
+ from pylint.typing import MessageDefinitionTuple
+ 
+@@ -26,6 +34,31 @@ def test__is_in_ignore_list_re_match() -> None:
+     assert _is_in_ignore_list_re("src/tests/whatever.xml", patterns)
+ 
+ 
++@pytest.mark.parametrize(
++    "path,ignored",
++    [
++        (r"src/gen\about.py", True),
++        (r"src/gen\nested\about.py", True),
++        (r"./src/gen\about.py", True),
++        (r"src\gen\about.py", True),
++        ("src/gen/about.py", True),
++        (r"src/generated\about.py", False),
++    ],
++)
++def test_is_ignored_file_with_windows_paths(
++    monkeypatch: pytest.MonkeyPatch, path: str, ignored: bool
++) -> None:
++    # os.walk("src/") on Windows can produce paths with both kinds of separator.
++    monkeypatch.setattr(expand_modules_module, "os", SimpleNamespace(path=ntpath))
++    patterns = _regexp_paths_csv_transfomer("^src/gen/.*$")
++    assert _is_ignored_file(path, [], [], patterns) is ignored
++
++
++def test_is_ignored_file_preserves_matching_unnormalized_paths() -> None:
++    patterns = [re.compile(r"^\./src/.*")]
++    assert _is_ignored_file("./src/file.py", [], [], patterns)
++
++
+ TEST_DIRECTORY = Path(__file__).parent.parent
+ INIT_PATH = str(TEST_DIRECTORY / "lint/__init__.py")
+ EXPAND_MODULES = str(TEST_DIRECTORY / "lint/unittest_expand_modules.py")
+@@ -134,12 +167,7 @@ class TestExpandModules(CheckerTestCase):
+         "files_or_modules,expected",
+         [
+             ([__file__], []),
+-            (
+-                [str(Path(__file__).parent)],
+-                [
+-                    init_of_package,
+-                ],
+-            ),
++            ([str(Path(__file__).parent)], []),
+         ],
+     )
+     @set_config(ignore_paths=".*/lint/.*")
+diff --git a/tests/lint/unittest_lint.py b/tests/lint/unittest_lint.py
+index 3dbde39c..079cd713 100755
+--- a/tests/lint/unittest_lint.py
++++ b/tests/lint/unittest_lint.py
+@@ -912,6 +912,260 @@ def test_recursive_ignore(ignore_parameter, ignore_parameter_value) -> None:
+     assert module in linted_file_paths
+ 
+ 
++def _create_recursive_ignore_project(
++    project: Path, root_package: bool, generated_package: bool
++) -> set[str]:
++    files = [
++        "src/kept.py",
++        "src/gen/ignored.py",
++        "src/gen/nested/ignored_nested.py",
++        "src/generated/__init__.py",
++        "src/generated/kept_nested.py",
++    ]
++    expected = {
++        "src/kept.py",
++        "src/generated/__init__.py",
++        "src/generated/kept_nested.py",
++    }
++    if root_package:
++        files.append("src/__init__.py")
++        expected.add("src/__init__.py")
++    if generated_package:
++        files.extend(("src/gen/__init__.py", "src/gen/nested/__init__.py"))
++    for name in files:
++        path = project / name
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_text("value = 1\n", encoding="utf-8")
++    return expected
++
++
++def _lint_recursive_ignore_project(args: list[str], project: Path) -> set[str]:
++    reporter = testutils.GenericTestReporter()
++    lint.Run(
++        [
++            "--recursive=y",
++            "--disable=all",
++            "--enable=missing-module-docstring",
++            "--score=n",
++            "--persistent=n",
++            *args,
++        ],
++        reporter=reporter,
++        exit=False,
++    )
++    assert all(msg.symbol == "missing-module-docstring" for msg in reporter.messages)
++    paths = {
++        Path(msg.abspath).resolve().relative_to(project.resolve()).as_posix()
++        for msg in reporter.messages
++    }
++    assert len(paths) == len(reporter.messages)
++    return paths
++
++
++@pytest.mark.parametrize(
++    "root_package,generated_package",
++    [(False, False), (False, True), (True, True)],
++    ids=["directories", "nested-package", "root-package"],
++)
++@pytest.mark.parametrize("pattern", ["^src/gen/.*$", "^src/gen$"])
++@pytest.mark.parametrize(
++    "config_source,target",
++    [("toml", "src/"), ("toml", "./src/"), ("command-line", "src")],
++)
++def test_recursive_ignore_paths(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    root_package: bool,
++    generated_package: bool,
++    pattern: str,
++    config_source: str,
++    target: str,
++) -> None:
++    expected = _create_recursive_ignore_project(
++        tmp_path, root_package, generated_package
++    )
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    args = [target]
++    if config_source == "toml":
++        (tmp_path / "pyproject.toml").write_text(
++            f'[tool.pylint.MASTER]\nignore-paths = ["{pattern}"]\n',
++            encoding="utf-8",
++        )
++    else:
++        args.append(f"--ignore-paths={pattern}")
++
++    assert _lint_recursive_ignore_project(args, tmp_path) == expected
++
++
++@pytest.mark.parametrize("target", ["src/", "src/gen/", "src.gen", "src/__init__.py"])
++def test_recursive_ignore_package_init_only(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
++) -> None:
++    expected = _create_recursive_ignore_project(
++        tmp_path, target in {"src.gen", "src/__init__.py"}, True
++    )
++    generated_files = {
++        "src/gen/ignored.py",
++        "src/gen/nested/__init__.py",
++        "src/gen/nested/ignored_nested.py",
++    }
++    if target == "src/__init__.py":
++        expected = {"src/__init__.py"}
++    elif target == "src/":
++        expected |= generated_files
++    else:
++        expected = generated_files
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert (
++        _lint_recursive_ignore_project(
++            [target, "--ignore-paths=^src/gen/__init__.py$"], tmp_path
++        )
++        == expected
++    )
++
++
++def test_recursive_ignore_explicit_package_directory(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _create_recursive_ignore_project(tmp_path, False, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    assert not _lint_recursive_ignore_project(
++        ["src/gen/", "--ignore-paths=^src/gen$"], tmp_path
++    )
++
++
++@pytest.mark.needs_two_cores
++def test_recursive_ignore_paths_parallel(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    (tmp_path / "pyproject.toml").write_text(
++        '[tool.pylint.MASTER]\nignore-paths = ["^src/gen/.*$"]\n',
++        encoding="utf-8",
++    )
++
++    assert _lint_recursive_ignore_project(["src/", "--jobs=2"], tmp_path) == expected
++
++
++@pytest.mark.parametrize("ignore_option", ["--ignore=gen", "--ignore-patterns=^gen$"])
++def test_recursive_ignore_package_directory_by_name(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignore_option: str
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert _lint_recursive_ignore_project(["src/", ignore_option], tmp_path) == expected
++
++
++@pytest.mark.parametrize("pattern", ["^src/gen/.*$", "^src/gen$", "^src/gen"])
++def test_recursive_ignore_package_module_argument(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
++) -> None:
++    import astroid.modutils
++
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    if pattern == "^src/gen":
++        expected -= {"src/generated/__init__.py", "src/generated/kept_nested.py"}
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    package_init = str(tmp_path / "src" / "__init__.py")
++    original_file_from_modpath = astroid.modutils.file_from_modpath
++
++    def file_from_modpath(modpath, *args, **kwargs):
++        if modpath == ["src"]:
++            return package_init
++        return original_file_from_modpath(modpath, *args, **kwargs)
++
++    # "src" is also a valid path, so force module-name resolution to test the
++    # absolute file paths that astroid returns for such arguments.
++    monkeypatch.setattr(astroid.modutils, "file_from_modpath", file_from_modpath)
++    original_exists = os.path.exists
++    monkeypatch.setattr(
++        os.path,
++        "exists",
++        lambda path: False if path == "src" else original_exists(path),
++    )
++
++    assert (
++        _lint_recursive_ignore_project(["src", f"--ignore-paths={pattern}"], tmp_path)
++        == expected
++    )
++
++
++@pytest.mark.parametrize("pattern", ["^src/gen$", "^src/gen/.*$"])
++def test_recursive_ignore_named_package_argument(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
++) -> None:
++    _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.syspath_prepend(str(tmp_path))
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    assert not _lint_recursive_ignore_project(
++        ["src.gen", f"--ignore-paths={pattern}"], tmp_path
++    )
++
++
++def test_recursive_ignore_root_package_with_different_path_spelling(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import pylint.lint.expand_modules as expand_modules_module
++
++    expected = _create_recursive_ignore_project(tmp_path, True, True)
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++    get_module_files = expand_modules_module.modutils.get_module_files
++
++    def get_files_with_dot_prefix(*args, **kwargs):
++        return ["./" + path for path in get_module_files(*args, **kwargs)]
++
++    monkeypatch.setattr(
++        expand_modules_module.modutils, "get_module_files", get_files_with_dot_prefix
++    )
++    assert (
++        _lint_recursive_ignore_project(
++            ["src/", "--ignore-paths=^src/gen/.*$"], tmp_path
++        )
++        == expected
++    )
++
++
++def test_recursive_ignore_syntax_error(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    expected = _create_recursive_ignore_project(tmp_path, False, True)
++    (tmp_path / "src/gen/__init__.py").write_text("def broken(:\n", encoding="utf-8")
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.delenv("PYLINTRC", raising=False)
++
++    reporter = testutils.GenericTestReporter()
++    run = lint.Run(
++        [
++            "src/",
++            "--recursive=y",
++            "--ignore-paths=^src/gen/.*$",
++            "--disable=all",
++            "--enable=syntax-error,missing-module-docstring",
++            "--score=n",
++            "--persistent=n",
++        ],
++        reporter=reporter,
++        exit=False,
++    )
++    assert run.linter.msg_status == 16
++    assert {
++        Path(msg.abspath).relative_to(tmp_path).as_posix() for msg in reporter.messages
++    } == expected
++    assert all(msg.symbol == "missing-module-docstring" for msg in reporter.messages)
++
++
+ def test_import_sibling_module_from_namespace(initialized_linter: PyLinter) -> None:
+     """If the parent directory above `namespace` is on sys.path, ensure that
+     modules under `namespace` can import each other without raising `import-error`."""
+2026-11-25 07:37:27,743 - INFO - Grading answer for pylint-dev__pylint-7080...
+2026-11-25 07:37:27,751 - INFO - report: {'pylint-dev__pylint-7080': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['tests/test_self.py::TestRunTC::test_ignore_path_recursive_current_dir'], 'failure': []}, 'PASS_TO_PASS': {'success': ['tests/test_self.py::TestRunTC::test_pkginfo', 'tests/test_self.py::TestRunTC::test_all', 'tests/test_self.py::TestRunTC::test_no_ext_file', 'tests/test_self.py::TestRunTC::test_w0704_ignored', 'tests/test_self.py::TestRunTC::test_exit_zero', 'tests/test_self.py::TestRunTC::test_nonexistent_config_file', 'tests/test_self.py::TestRunTC::test_error_missing_arguments', 'tests/test_self.py::TestRunTC::test_no_out_encoding', 'tests/test_self.py::TestRunTC::test_parallel_execution', 'tests/test_self.py::TestRunTC::test_parallel_execution_missing_arguments', 'tests/test_self.py::TestRunTC::test_enable_all_works', 'tests/test_self.py::TestRunTC::test_wrong_import_position_when_others_disabled', 'tests/test_self.py::TestRunTC::test_import_itself_not_accounted_for_relative_imports', 'tests/test_self.py::TestRunTC::test_reject_empty_indent_strings', 'tests/test_self.py::TestRunTC::test_json_report_when_file_has_syntax_error', 'tests/test_self.py::TestRunTC::test_json_report_when_file_is_missing', 'tests/test_self.py::TestRunTC::test_json_report_does_not_escape_quotes', 'tests/test_self.py::TestRunTC::test_information_category_disabled_by_default', 'tests/test_self.py::TestRunTC::test_error_mode_shows_no_score', 'tests/test_self.py::TestRunTC::test_evaluation_score_shown_by_default', 'tests/test_self.py::TestRunTC::test_confidence_levels', 'tests/test_self.py::TestRunTC::test_bom_marker', 'tests/test_self.py::TestRunTC::test_pylintrc_plugin_duplicate_options', 'tests/test_self.py::TestRunTC::test_pylintrc_comments_in_values', 'tests/test_self.py::TestRunTC::test_no_crash_with_formatting_regex_defaults', 'tests/test_self.py::TestRunTC::test_getdefaultencoding_crashes_with_lc_ctype_utf8', 'tests/test_self.py::TestRunTC::test_parseable_file_path', 'tests/test_self.py::TestRunTC::test_stdin[/mymodule.py]', 'tests/test_self.py::TestRunTC::test_stdin[mymodule.py-mymodule-mymodule.py]', 'tests/test_self.py::TestRunTC::test_stdin_missing_modulename', 'tests/test_self.py::TestRunTC::test_relative_imports[False]', 'tests/test_self.py::TestRunTC::test_relative_imports[True]', 'tests/test_self.py::TestRunTC::test_stdin_syntaxerror', 'tests/test_self.py::TestRunTC::test_version', 'tests/test_self.py::TestRunTC::test_fail_under', 'tests/test_self.py::TestRunTC::test_fail_on[-10-missing-function-docstring-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[6-missing-function-docstring-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[7.5-missing-function-docstring-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[7.6-missing-function-docstring-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[-11-missing-function-docstring-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-missing-function-docstring-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-9-missing-function-docstring-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-5-missing-function-docstring-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-broad-except-fail_under_plus7_5.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on[6-broad-except-fail_under_plus7_5.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on[7.5-broad-except-fail_under_plus7_5.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on[7.6-broad-except-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[-11-broad-except-fail_under_minus10.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-broad-except-fail_under_minus10.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on[-9-broad-except-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-5-broad-except-fail_under_minus10.py-22]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-C0116-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-C-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-fake1,C,fake2-fail_under_plus7_5.py-16]', 'tests/test_self.py::TestRunTC::test_fail_on[-10-C0115-fail_under_plus7_5.py-0]', 'tests/test_self.py::TestRunTC::test_fail_on_edge_case[opts0-0]', 'tests/test_self.py::TestRunTC::test_fail_on_edge_case[opts1-0]', 'tests/test_self.py::TestRunTC::test_fail_on_edge_case[opts2-16]', 'tests/test_self.py::TestRunTC::test_fail_on_edge_case[opts3-16]', 'tests/test_self.py::TestRunTC::test_modify_sys_path', 'tests/test_self.py::TestRunTC::test_do_not_import_files_from_local_directory', 'tests/test_self.py::TestRunTC::test_do_not_import_files_from_local_directory_with_pythonpath', 'tests/test_self.py::TestRunTC::test_import_plugin_from_local_directory_if_pythonpath_cwd', 'tests/test_self.py::TestRunTC::test_allow_import_of_files_found_in_modules_during_parallel_check', 'tests/test_self.py::TestRunTC::test_can_list_directories_without_dunder_init', 'tests/test_self.py::TestRunTC::test_regression_parallel_mode_without_filepath', 'tests/test_self.py::TestRunTC::test_output_file_valid_path', 'tests/test_self.py::TestRunTC::test_output_file_invalid_path_exits_with_code_32', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args0-0]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args1-0]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args2-0]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args3-6]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args4-6]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args5-22]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args6-22]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args7-6]', 'tests/test_self.py::TestRunTC::test_fail_on_exit_code[args8-22]', 'tests/test_self.py::TestRunTC::test_one_module_fatal_error', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args0-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args1-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args2-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args3-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args4-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args5-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args6-0]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args7-1]', 'tests/test_self.py::TestRunTC::test_fail_on_info_only_exit_code[args8-1]', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_output_format_option[text-tests/regrtest_data/unused_variable.py:4:4:', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_output_format_option[parseable-tests/regrtest_data/unused_variable.py:4:', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_output_format_option[msvs-tests/regrtest_data/unused_variable.py(4):', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_output_format_option[colorized-tests/regrtest_data/unused_variable.py:4:4:', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_output_format_option[json-"message":', 'tests/test_self.py::TestRunTC::test_output_file_can_be_combined_with_custom_reporter', 'tests/test_self.py::TestRunTC::test_output_file_specified_in_rcfile', 'tests/test_self.py::TestRunTC::test_load_text_repoter_if_not_provided', 'tests/test_self.py::TestRunTC::test_regex_paths_csv_validator', 'tests/test_self.py::TestRunTC::test_max_inferred_for_complicated_class_hierarchy', 'tests/test_self.py::TestRunTC::test_regression_recursive', 'tests/test_self.py::TestRunTC::test_recursive', 'tests/test_self.py::TestRunTC::test_ignore_recursive', 'tests/test_self.py::TestRunTC::test_ignore_pattern_recursive', 'tests/test_self.py::TestRunTC::test_ignore_path_recursive', 'tests/test_self.py::TestRunTC::test_recursive_current_dir', 'tests/test_self.py::TestRunTC::test_regression_recursive_current_dir', 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command0-Emittable', 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command1-Enabled', 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command2-nonascii-checker]', "tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command3-Confidence(name='HIGH',", 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command4-pylint.extensions.empty_comment]', 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command5-Pylint', 'tests/test_self.py::TestCallbackOptions::test_output_of_callback_options[command6-Environment', 'tests/test_self.py::TestCallbackOptions::test_help_msg[args0-:unreachable', 'tests/test_self.py::TestCallbackOptions::test_help_msg[args1-No', 'tests/test_self.py::TestCallbackOptions::test_help_msg[args2---help-msg:', 'tests/test_self.py::TestCallbackOptions::test_generate_rcfile', 'tests/test_self.py::TestCallbackOptions::test_generate_config_disable_symbolic_names', 'tests/test_self.py::TestCallbackOptions::test_errors_only', 'tests/test_self.py::TestCallbackOptions::test_errors_only_functions_as_disable', 'tests/test_self.py::TestCallbackOptions::test_verbose', 'tests/test_self.py::TestCallbackOptions::test_enable_all_extensions'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for pylint-dev__pylint-7080: resolved: True
+2026-11-25 07:37:27,751 - INFO - Attempting to stop container sweb.eval.pylint-dev__pylint-7080.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:43,127 - INFO - Container sweb.eval.pylint-dev__pylint-7080.gpt-6.1-terra-native-tools-max stopped successfully.
+2026-11-25 07:37:43,127 - INFO - Attempting to remove container sweb.eval.pylint-dev__pylint-7080.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:43,170 - INFO - Container sweb.eval.pylint-dev__pylint-7080.gpt-6.1-terra-native-tools-max removed successfully.

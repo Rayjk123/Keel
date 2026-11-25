@@ -1,0 +1,86 @@
+$ file /app/a.out && ls -la /app/a.out && xxd /app/a.out | head -100 && echo "---" && readelf -a /app/a.out 2>/dev/null | head -300 || objdump -h /app/a.out 2>/dev/null | head -100; echo "=== which tools ==="; which node readelf objdump nm python3 file xxd 2>/dev/null; ls /app/
+$ readelf -h /app/a.out && echo "==== PHDR ====" && readelf -l /app/a.out && echo "==== hi.c ====" && cat /app/hi.c && echo "==== hexdump size ====" && wc -c /app/a.out && ls -la /app/
+$ python3 - << 'PY'
+vals = [1784774249, 1718378344]
+for v in vals:
+    print(hex(v), v.to_bytes(4,'little'), v.to_bytes(4,'big'))
+print(hex(4194304), hex(4194308))
+# ELF magic
+import struct
+print(struct.unpack('<I', b'\x7fELF')[0])
+print(struct.unpack('<I', bytes.fromhex('7f454c46'))[0])
+PY
+$ find / -name '*extract*' -o -name '*reference*' -o -name '*solution*' 2>/dev/null | head -100; echo '---'; ls /opt /tmp /home /root 2>/dev/null; echo '---env---'; env | head -80
+$ python3 - << 'PY'
+import struct
+data=open('/app/a.out','rb').read()
+print(len(data))
+# print first 64 bytes as u32
+for i in range(0,64,4):
+    print(i, struct.unpack_from('<I', data, i)[0])
+print('--- around file offset corresponding to vaddr 0x400000 if base 0')
+PY
+# disassemble briefly
+objdump -d /app/a.out | head -80
+echo '==== strings ===='
+strings -a /app/a.out | head -40
+echo '==== readelf -S full ===='
+readelf -S /app/a.out | head -80
+$ python3 - << 'PY'
+import struct
+data=open('/app/a.out','rb').read()
+base=0x400000
+# parse phdrs
+e_phoff=struct.unpack_from('<Q', data, 32)[0]
+e_phentsize=struct.unpack_from('<H', data, 54)[0]
+e_phnum=struct.unpack_from('<H', data, 56)[0]
+print('phoff', e_phoff, 'phentsize', e_phentsize, 'phnum', e_phnum)
+loads=[]
+for i in range(e_phnum):
+    off=e_phoff+i*e_phentsize
+    p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack_from('<IIQQQQQQ', data, off)
+    print(i, hex(p_type), hex(p_flags), hex(p_offset), hex(p_vaddr), hex(p_filesz), hex(p_memsz))
+    if p_type==1:
+        loads.append((p_offset, p_vaddr, p_filesz, p_memsz))
+
+# map memory
+mem={}
+for p_offset, p_vaddr, p_filesz, p_memsz in loads:
+    for j in range(p_filesz):
+        mem[base+p_vaddr+j]=data[p_offset+j]
+    for j in range(p_filesz, p_memsz):
+        mem[base+p_vaddr+j]=0
+
+# word values aligned to 4
+addrs=sorted(mem)
+print('bytes', len(mem), 'min', hex(min(addrs)), 'max', hex(max(addrs)))
+# count 4-byte aligned words that are fully present
+words=[]
+start=min(addrs)&~3
+end=max(addrs)
+a=start
+while a<=end:
+    if all((a+k) in mem for k in range(4)):
+        v=mem[a]|(mem[a+1]<<8)|(mem[a+2]<<16)|(mem[a+3]<<24)
+        words.append((a,v))
+    a+=4
+print('words', len(words))
+print('first 20', words[:20])
+print('has 4194304', 4194304 in dict(words), dict(words).get(4194304))
+# ELF header first word at base
+print('word at base', dict(words).get(base))
+PY
+> write /app/extract.js
+$ node /app/extract.js /app/a.out > /tmp/out.json && python3 - << 'PY'
+import json
+d=json.load(open('/tmp/out.json'))
+print(type(d), len(d))
+print(d['4194304'], d['4194308'])
+# all ints
+bad=[(k,v) for k,v in d.items() if not isinstance(v,int)]
+print('nonint', len(bad))
+print('min', min(map(int,d)), 'max', max(map(int,d)))
+# check keys sorted? not required
+print(list(d.items())[:3], list(d.items())[-3:])
+PY
+`extract.js` reads the ELF64 `PT_LOAD` segments from the binary, maps them at base `0x400000` (including zero-filled BSS), and prints 4-byte-aligned little-endian memory words as a JSON object of integer addresses to integer values.

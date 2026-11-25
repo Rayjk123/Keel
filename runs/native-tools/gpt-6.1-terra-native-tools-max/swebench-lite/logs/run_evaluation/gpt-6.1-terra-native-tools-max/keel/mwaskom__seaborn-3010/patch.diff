@@ -1,0 +1,372 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 2ac220b..e73aaa0 100755
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -1365,7 +1365,7 @@ class Plotter:
+         for view in subplots:
+             view_df = self._filter_subplot_data(df, view)
+             axes_df = view_df[coord_cols]
+-            with pd.option_context("mode.use_inf_as_null", True):
++            with pd.option_context("mode.use_inf_as_na", True):
+                 axes_df = axes_df.dropna()
+             for var, values in axes_df.items():
+                 scale = view[f"{var[0]}scale"]
+@@ -1491,7 +1491,7 @@ class Plotter:
+ 
+                 axes_df = self._filter_subplot_data(df, view)
+ 
+-                with pd.option_context("mode.use_inf_as_null", True):
++                with pd.option_context("mode.use_inf_as_na", True):
+                     if keep_na:
+                         # The simpler thing to do would be x.dropna().reindex(x.index).
+                         # But that doesn't work with the way that the subset iteration
+diff --git a/seaborn/_core/rules.py b/seaborn/_core/rules.py
+index d378fb2..143eeb5 100755
+--- a/seaborn/_core/rules.py
++++ b/seaborn/_core/rules.py
+@@ -66,8 +66,12 @@ def variable_type(
+     if pd.api.types.is_categorical_dtype(vector):
+         return VarType("categorical")
+ 
++    # Missing values should not affect type inference, including object and
++    # nullable dtypes where comparing pd.NA with a scalar can be ambiguous.
++    vector = pd.Series(vector).dropna()
++
+     # Special-case all-na data, which is always "numeric"
+-    if pd.isna(vector).all():
++    if vector.empty:
+         return VarType("numeric")
+ 
+     # Special-case binary/boolean data, allow caller to determine
+diff --git a/seaborn/_stats/regression.py b/seaborn/_stats/regression.py
+index 7b7ddc8..afaccd6 100755
+--- a/seaborn/_stats/regression.py
++++ b/seaborn/_stats/regression.py
+@@ -11,6 +11,10 @@ from seaborn._stats.base import Stat
+ class PolyFit(Stat):
+     """
+     Fit a polynomial of the given order and resample data onto predicted curve.
++
++    Rows with missing or infinite x or y values are excluded from each fit.
++    Groups without enough distinct x values to fit the requested order produce
++    no curve.
+     """
+     # This is a provisional class that is useful for building out functionality.
+     # It may or may not change substantially in form or dissappear as we think
+@@ -21,8 +25,13 @@ class PolyFit(Stat):
+ 
+     def _fit_predict(self, data):
+ 
+-        x = data["x"]
+-        y = data["y"]
++        # Drop observations as pairs, before checking whether a fit is possible or
++        # determining the prediction range. Other columns are not used in the fit.
++        data = data.dropna(subset=["x", "y"])
++        x = data["x"].astype(float)
++        y = data["y"].astype(float)
++        finite = np.isfinite(x) & np.isfinite(y)
++        x, y = x[finite], y[finite]
+         if x.nunique() <= self.order:
+             # TODO warn?
+             xx = yy = []
+@@ -38,6 +47,12 @@ class PolyFit(Stat):
+ 
+     def __call__(self, data, groupby, orient, scales):
+ 
++        # Avoid GroupBy.apply's concatenation when there are no observed groups.
++        grouping_vars = [var for var in groupby.order if var in data]
++        if grouping_vars and data[grouping_vars].dropna().empty:
++            cols = [var for var in data if var in ["x", "y", *grouping_vars]]
++            return data[cols].iloc[:0].reset_index(drop=True)
++
+         return groupby.apply(data, self._fit_predict)
+ 
+ 
+diff --git a/tests/_core/test_rules.py b/tests/_core/test_rules.py
+index 655840a..7c9ffdd 100755
+--- a/tests/_core/test_rules.py
++++ b/tests/_core/test_rules.py
+@@ -57,6 +57,21 @@ def test_variable_type():
+     assert variable_type(s.to_list()) == "datetime"
+ 
+ 
++@pytest.mark.parametrize("missing", [None, np.nan, getattr(pd, "NA", np.nan)])
++@pytest.mark.parametrize(
++    "values,expected", [
++        ([1, 2, 3], "numeric"),
++        ([0, 1, 1], "categorical"),
++        (["a", "b", "c"], "categorical"),
++        ([pd.Timestamp(1), pd.Timestamp(2)], "datetime"),
++    ],
++)
++def test_variable_type_ignores_missing_values(values, expected, missing):
++
++    s = pd.Series([*values, missing], dtype=object)
++    assert variable_type(s, boolean_type="categorical") == expected
++
++
+ def test_categorical_order():
+ 
+     x = pd.Series(["a", "c", "c", "b", "a", "d"])
+diff --git a/tests/_marks/test_line.py b/tests/_marks/test_line.py
+index 4157f82..1ff0aae 100755
+--- a/tests/_marks/test_line.py
++++ b/tests/_marks/test_line.py
+@@ -24,6 +24,13 @@ class TestPath:
+         assert_array_equal(line2.get_xdata(), [5, 2])
+         assert_array_equal(line2.get_ydata(), [4, 3])
+ 
++    def test_infinite_coordinates(self):
++
++        p = Plot(x=[1, np.inf, 3, -np.inf], y=[1, 2, np.inf, 4]).add(Path()).plot()
++        line, = p._figure.axes[0].get_lines()
++        assert_array_equal(line.get_xdata(), [1, np.nan, np.nan, np.nan])
++        assert_array_equal(line.get_ydata(), [1, np.nan, np.nan, np.nan])
++
+     def test_shared_colors_direct(self):
+ 
+         x = y = [1, 2, 3]
+@@ -149,6 +156,13 @@ class TestLine:
+         assert_array_equal(line2.get_xdata(), [2, 5])
+         assert_array_equal(line2.get_ydata(), [3, 4])
+ 
++    def test_infinite_coordinates(self):
++
++        p = Plot(x=[1, np.inf, 3, -np.inf], y=[1, 2, np.inf, 4]).add(Line()).plot()
++        line, = p._figure.axes[0].get_lines()
++        assert_array_equal(line.get_xdata(), [1])
++        assert_array_equal(line.get_ydata(), [1])
++
+ 
+ class TestPaths:
+ 
+diff --git a/tests/_stats/test_regression.py b/tests/_stats/test_regression.py
+index 7facf75..3b6c5e5 100755
+--- a/tests/_stats/test_regression.py
++++ b/tests/_stats/test_regression.py
+@@ -4,9 +4,12 @@ import pandas as pd
+ 
+ import pytest
+ from numpy.testing import assert_array_equal, assert_array_almost_equal
++from pandas.testing import assert_frame_equal
+ 
++import seaborn.objects as so
+ from seaborn._core.groupby import GroupBy
+ from seaborn._stats.regression import PolyFit
++from seaborn.external.version import Version
+ 
+ 
+ class TestPolyFit:
+@@ -50,3 +53,212 @@ class TestPolyFit:
+             grid = np.linspace(part["x"].min(), part["x"].max(), gridsize)
+             assert_array_equal(part["x"], grid)
+             assert part["y"].diff().diff().dropna().abs().gt(0).all()
++
++    @pytest.mark.parametrize("order", [1, 2])
++    @pytest.mark.parametrize("missing", [None, np.nan, getattr(pd, "NA", np.nan)])
++    @pytest.mark.parametrize("coords", [("x",), ("y",), ("x", "y")])
++    def test_missing_observations(self, order, missing, coords):
++
++        df = pd.DataFrame({
++            "x": pd.Series([1, 2, 3, 4, 5, 6], dtype=object),
++            "y": pd.Series([1, 4, 8, 17, 26, 37], dtype=object),
++        })
++        for i, coord in enumerate(coords):
++            df.loc[0 if coord == "y" else 1 + i, coord] = missing
++
++        original = df.copy(deep=True)
++        clean = df.dropna(subset=["x", "y"]).astype(float)
++        stat = PolyFit(order=order, gridsize=13)
++        res = stat(df, GroupBy(["group"]), "x", {})
++        grid = np.linspace(clean["x"].min(), clean["x"].max(), stat.gridsize)
++        expected = np.polyval(np.polyfit(clean["x"], clean["y"], order), grid)
++
++        assert_array_equal(res["x"], grid)
++        assert_array_almost_equal(res["y"], expected)
++        assert_frame_equal(df, original)
++
++    @pytest.mark.skipif(Version(pd.__version__) < Version("1.2"), reason="pandas dtype")
++    @pytest.mark.parametrize("dtype", ["Int64", "Float64"])
++    def test_nullable_numeric_coordinates(self, dtype):
++
++        df = pd.DataFrame({
++            "x": pd.Series([1, 2, 3, 4, 5, 6], dtype=dtype),
++            "y": pd.Series([2, 4, 6, 8, 10, 12], dtype=dtype),
++        })
++        df.loc[1, "x"] = pd.NA
++        df.loc[4, "y"] = pd.NA
++        res = PolyFit(order=1, gridsize=5)(df, GroupBy(["group"]), "x", {})
++
++        assert_array_equal(res["x"], np.linspace(1, 6, 5))
++        assert_array_almost_equal(res["y"], 2 * res["x"])
++
++    def test_nonfinite_coordinates(self):
++
++        df = pd.DataFrame({
++            "x": [1, 2, 3, 4, 5, np.inf, -np.inf, -100, 100],
++            "y": [2, 4, 6, 8, 10, 12, 14, np.inf, -np.inf],
++        })
++        res = PolyFit(order=1, gridsize=5)(df, GroupBy(["group"]), "x", {})
++        assert_array_equal(res["x"], [1, 2, 3, 4, 5])
++        assert_array_almost_equal(res["y"], [2, 4, 6, 8, 10])
++
++    def test_constant_fit_with_missing_values(self):
++
++        df = pd.DataFrame({"x": [1, 2, None, 4], "y": [3, None, 5, 9]})
++        res = PolyFit(order=0, gridsize=4)(df, GroupBy(["group"]), "x", {})
++        assert_array_equal(res["x"], [1, 2, 3, 4])
++        assert_array_almost_equal(res["y"], [6, 6, 6, 6])
++
++    @pytest.mark.parametrize("invalid", ["x", "y", "both", "insufficient"])
++    def test_no_fit_with_missing_data(self, invalid):
++
++        df = pd.DataFrame({"x": [1, 2, 3, 4], "y": [1, 2, 3, 4]})
++        if invalid == "both":
++            df.loc[::2, "x"] = np.nan
++            df.loc[1::2, "y"] = np.nan
++        elif invalid == "insufficient":
++            df.loc[:1, "y"] = np.nan
++        else:
++            df[invalid] = np.nan
++
++        res = PolyFit(order=2)(df, GroupBy(["group"]), "x", {})
++        assert res.empty
++        assert_array_equal(res.columns, ["x", "y"])
++
++    def test_missing_data_by_group(self):
++
++        df = pd.DataFrame({
++            "x": [1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 1, 2, 3, 4],
++            "y": [1, None, 9, 16, 25, 1, 4, 9, 16, 25,
++                  None, None, None, None, None, 9, 16],
++            "group": ["a"] * 5 + ["b"] * 5 + ["empty"] * 3 + ["small"] * 4,
++        })
++        df.loc[6, "x"] = np.nan
++        df["unused"] = None
++        original = df.copy(deep=True)
++        stat = PolyFit(order=2, gridsize=9)
++        res = stat(df, GroupBy(["group"]), "x", {})
++
++        assert_array_equal(res.columns, ["x", "y", "group"])
++        assert set(res["group"]) == {"a", "b"}
++        assert_array_equal(res.index, np.arange(stat.gridsize * 2))
++        for group in ["a", "b"]:
++            clean = df.loc[df["group"] == group].dropna(subset=["x", "y"])
++            part = res[res["group"] == group]
++            grid = np.linspace(clean["x"].min(), clean["x"].max(), stat.gridsize)
++            expected = np.polyval(np.polyfit(clean["x"], clean["y"], 2), grid)
++            assert_array_equal(part["x"], grid)
++            assert_array_almost_equal(part["y"], expected)
++        assert_frame_equal(df, original)
++
++    def test_missing_unused_column(self):
++
++        df = pd.DataFrame({"x": [1, 2, 3], "y": [1, 4, 9], "unused": [None] * 3})
++        stat = PolyFit()
++        groupby = GroupBy(["group"])
++        res = stat(df, groupby, "x", {})
++        expected = stat(df[["x", "y"]], groupby, "x", {})
++        assert_frame_equal(res, expected)
++
++    @pytest.mark.parametrize("scenario", ["empty", "all_missing", "no_joint_groups"])
++    def test_no_observed_groups(self, scenario):
++
++        df = pd.DataFrame({
++            "color": ["a", "b", "c"], "y": [1, 2, 3],
++            "x": [1, 2, 3], "group": ["x", "y", "z"],
++            "unused": [1, 2, 3],
++        })
++        if scenario == "empty":
++            df = df.iloc[:0]
++        elif scenario == "all_missing":
++            df["color"] = None
++        else:
++            df.loc[[0, 2], "color"] = None
++            df.loc[1, "group"] = None
++
++        res = PolyFit()(df, GroupBy(["group", "color"]), "x", {})
++        assert res.empty
++        assert_array_equal(res.columns, ["color", "y", "x", "group"])
++
++    def test_empty_ungrouped_data(self):
++
++        df = pd.DataFrame({"y": [], "x": [], "unused": []})
++        res = PolyFit()(df, GroupBy(["group"]), "x", {})
++        assert res.empty
++        assert_array_equal(res.columns, ["y", "x"])
++
++    @pytest.mark.parametrize("coord", ["x", "y"])
++    def test_plot_with_missing_values(self, coord):
++
++        x, y = [1, 2, 3, 4, 5], [1, 2, 3, 4, 5]
++        if coord == "x":
++            x[3:] = [None, 4]
++        else:
++            y[3] = None
++        plotter = so.Plot(x, y).add(so.Line(), so.PolyFit()).plot()
++        line, = plotter._figure.axes[0].lines
++        clean = pd.DataFrame({"x": x, "y": y}).dropna()
++        grid = np.linspace(clean["x"].min(), clean["x"].max(), 100)
++        expected = np.polyval(np.polyfit(clean["x"], clean["y"], 2), grid)
++        assert_array_equal(line.get_xdata(), grid)
++        assert_array_almost_equal(line.get_ydata(), expected)
++
++    @pytest.mark.parametrize("coord", ["x", "y"])
++    def test_plot_with_all_missing_values(self, coord):
++
++        data = {"x": [1, 2, 3], "y": [1, 2, 3]}
++        data[coord] = [None, None, None]
++        plotter = so.Plot(**data).add(so.Line(), so.PolyFit()).plot()
++        line, = plotter._figure.axes[0].lines
++        assert_array_equal(line.get_xdata(), [])
++        assert_array_equal(line.get_ydata(), [])
++
++    @pytest.mark.skipif(Version(pd.__version__) < Version("1.2"), reason="pandas dtype")
++    def test_plot_with_nullable_coordinates(self):
++
++        x = pd.Series([1, 2, 3, None, 4], dtype="Float64")
++        y = pd.Series([1, 2, 3, 4, 5], dtype="Int64")
++        plotter = so.Plot(x, y).add(so.Line(), so.PolyFit()).plot()
++        line, = plotter._figure.axes[0].lines
++        clean = pd.DataFrame({"x": x, "y": y}).dropna().astype(float)
++        grid = np.linspace(clean["x"].min(), clean["x"].max(), 100)
++        expected = np.polyval(np.polyfit(clean["x"], clean["y"], 2), grid)
++        assert_array_equal(line.get_xdata(), grid)
++        assert_array_almost_equal(line.get_ydata(), expected)
++
++    def test_plot_with_missing_data_in_groups(self):
++
++        df = pd.DataFrame({
++            "x": [1, 2, 3, 4] * 3,
++            "y": [1, None, 9, 16, 1, 4, 9, 16, None, None, None, None],
++            "color": ["a"] * 4 + ["b"] * 4 + ["empty"] * 4,
++        })
++        plotter = so.Plot(df, x="x", y="y", color="color").add(
++            so.Line(), so.PolyFit()
++        ).plot()
++        lines = plotter._figure.axes[0].lines
++        assert len(lines) == 2
++        for line, group in zip(lines, ["a", "b"]):
++            clean = df[df["color"] == group].dropna(subset=["x", "y"])
++            grid = np.linspace(clean["x"].min(), clean["x"].max(), 100)
++            expected = np.polyval(np.polyfit(clean["x"], clean["y"], 2), grid)
++            assert_array_equal(line.get_xdata(), grid)
++            assert_array_almost_equal(line.get_ydata(), expected)
++
++    def test_plot_without_observed_groups(self):
++
++        plotter = (
++            so.Plot([1, 2, 3], [1, 2, 3], group=[None, None, None])
++            .add(so.Line(), so.PolyFit())
++            .plot()
++        )
++        assert plotter._layers[0]["data"].frame.empty
++
++    def test_plot_with_log_transform(self):
++
++        x = [0, 1, 2, 4, 8, 16]
++        y = [4, 5, None, 7, 8, 9]
++        plotter = so.Plot(x, y).scale(x="log").add(so.Line(), so.PolyFit()).plot()
++        line, = plotter._figure.axes[0].lines
++        assert_array_almost_equal(line.get_xdata(), np.geomspace(1, 16, 100))
++        assert_array_almost_equal(line.get_ydata(), 5 + np.log2(line.get_xdata()))

@@ -1,0 +1,154 @@
+$ cd /app && ls -la && echo "---SRC---" && ls -la src && echo "---DATA---" && ls -la data 2>/dev/null; echo "---"; find /app -maxdepth 3 -type f | head -100
+> read /app/src/program.cbl
+$ cd /app && echo "--- INPUT.DAT (raw) ---" && xxd src/INPUT.DAT && echo "--- ACCOUNTS.DAT ---" && xxd data/ACCOUNTS.DAT && echo "--- BOOKS.DAT ---" && xxd data/BOOKS.DAT && echo "--- TRANSACTIONS.DAT ---" && xxd data/TRANSACTIONS.DAT
+$ cd /app && echo "--- as text ---" && cat -A src/INPUT.DAT; echo; echo "--- ACCOUNTS ---"; cat -A data/ACCOUNTS.DAT; echo; echo "--- BOOKS ---"; cat -A data/BOOKS.DAT; echo; echo "--- TRANS ---"; cat -A data/TRANSACTIONS.DAT; echo
+$ which cobc cobcrun 2>/dev/null; cobc --version 2>/dev/null | head -3; python3 --version; ls /usr/lib | grep -i cob; ls /usr/local/lib 2>/dev/null | grep -i cob; find / -name "libcob*" 2>/dev/null | head
+$ cd /app && python3 - <<'EOF'
+import os
+for p in ["src/INPUT.DAT","data/ACCOUNTS.DAT","data/BOOKS.DAT","data/TRANSACTIONS.DAT"]:
+    b = open(p,"rb").read()
+    print(p, "size=", len(b), "repr=", repr(b))
+print("INPUT fields:")
+b = open("src/INPUT.DAT","rb").read()
+print(" buyer=",repr(b[0:4])," seller=",repr(b[4:8])," book=",repr(b[8:12])," amount-bytes=",repr(b[12:]))
+print("expected record size for INPUT = 4+4+4+10 =", 4+4+4+10)
+print("ACCOUNT rec size =", 4+20+10, " BOOK rec size =", 4+20+4, " TRANS rec size =", 4+10+4+4)
+EOF
+ls -la /app/data /app/src; stat -c '%n %s' /app/data/* /app/src/*
+$ set -e
+rm -rf /tmp/orig_backup && mkdir -p /tmp/orig_backup && cp -a /app/src /app/data /tmp/orig_backup/
+cd /tmp/orig_backup && find . -type f -exec sha256sum {} \; | sort -k2 > /tmp/orig_checksums.txt
+cat /tmp/orig_checksums.txt
+echo "--- build sandbox ---"
+rm -rf /tmp/sb && mkdir -p /tmp/sb && cp -a /app/src /app/data /tmp/sb/
+cd /tmp/sb && cobc -x -o /tmp/sb/prog_ref src/program.cbl; echo "cobc exit=$?"; ls -la /tmp/sb
+$ cd /tmp/sb && ./prog_ref; echo "exit=$?"; echo "--- after run ---"; for f in data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do echo "== $f"; python3 -c "import sys;print(repr(open('$f','rb').read()))"; done; echo "--- diffs vs original ---"; for f in data/ACCOUNTS.DAT data/BOOKS.DAT data/TRANSACTIONS.DAT; do cmp -s "$f" "/tmp/orig_backup/$f" && echo "$f UNCHANGED" || echo "$f CHANGED"; done
+$ mkdir -p /tmp/exp && cat > /tmp/exp/harness.py <<'EOF'
+import os, shutil, subprocess, sys, tempfile
+
+ORIG_DATA = {
+    "ACCOUNTS.DAT": open("/tmp/orig_backup/data/ACCOUNTS.DAT","rb").read(),
+    "BOOKS.DAT": open("/tmp/orig_backup/data/BOOKS.DAT","rb").read(),
+    "TRANSACTIONS.DAT": open("/tmp/orig_backup/data/TRANSACTIONS.DAT","rb").read(),
+}
+
+def make_dir(input_bytes, accounts=None, books=None, trans=None):
+    d = tempfile.mkdtemp(prefix="cbl_", dir="/tmp/exp")
+    os.makedirs(os.path.join(d, "src"))
+    os.makedirs(os.path.join(d, "data"))
+    with open(os.path.join(d, "src", "INPUT.DAT"), "wb") as f:
+        f.write(input_bytes)
+    vals = {"ACCOUNTS.DAT": accounts, "BOOKS.DAT": books, "TRANSACTIONS.DAT": trans}
+    for name, content in vals.items():
+        if content is None:
+            content = ORIG_DATA[name]
+        with open(os.path.join(d, "data", name), "wb") as f:
+            f.write(content)
+    return d
+
+def run_cobol(d, binary="/tmp/sb/prog_ref"):
+    p = subprocess.run([binary], cwd=d, capture_output=True, timeout=30)
+    out = {}
+    for name in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        path = os.path.join(d, "data", name)
+        out[name] = open(path,"rb").read() if os.path.exists(path) else None
+    return p.returncode, p.stdout, p.stderr, out
+
+def show(title, inp, accounts=None, books=None, trans=None):
+    d = make_dir(inp, accounts, books, trans)
+    rc, so, se, out = run_cobol(d)
+    print("=== ", title)
+    print("  input:", repr(inp))
+    print("  rc:", rc, " stdout:", repr(so), " stderr:", repr(se))
+    for k,v in out.items():
+        print("  ", k, repr(v))
+    shutil.rmtree(d)
+EOF
+cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+# E2: well-formed 22-byte record, amount 200, book B001 owned by U002 -> should transfer
+show("E2 well-formed amount 200 (B001 owned by U002)", b"U001U002B0010000000200")
+# E1: short 15-byte record, amount '200' only
+show("E1 short 15-byte record, book B001", b"U001U002B001200")
+EOF
+$ cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+# Books with a 4-char id made of spaces / NULs, to see what a short alnum field is padded with.
+books_sp = b"B0  Python Basics       U002"      # book id "B0  " (spaces), owner U002
+books_nul = b"B0\x00\x00Python Basics       U002"  # book id "B0\0\0"
+# Input is only 10 bytes: buyer U001, seller U002, book "B0" + 2 unknown bytes
+show("A1 short book id, book ID B0<spaces> exists", b"U001U002B0", books=books_sp)
+show("A2 short book id, book ID B0<NUL> exists", b"U001U002B0", books=books_nul)
+EOF
+$ cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+ACC = b"U001John Doe            0000001180U002Jane Smith          0000001800U003Bob Wilson          0000001520"
+BKS = b"B001Python Basics       U002B002COBOL Guide         U002B003Java Tutorial       U002"
+TRN = ORIG_DATA["TRANSACTIONS.DAT"]
+
+# X1 empty input file
+show("X1 empty INPUT.DAT", b"")
+# X2 seller balance overflow on ADD: 9999999999 + 10 (expect mod 10^10 -> 0000000009)
+acc = b"U001John Doe            0000001180U002Jane Smith          9999999999U003Bob Wilson          0000001520"
+show("X2 ADD overflow seller 9999999999+10", b"U001U002B0010000000010", accounts=acc, books=BKS)
+# X3 exact boundary: 9999999999 + 1
+show("X3 ADD overflow seller 9999999999+1", b"U001U002B0010000000001", accounts=acc, books=BKS)
+# X4 insufficient funds: buyer 1180 - 2000 (expect abs -> 0000000820)
+show("X4 buyer underflow 1180-2000", b"U001U002B0010000002000", books=BKS)
+EOF
+$ cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+BKS = b"B001Python Basics       U002B002COBOL Guide         U002B003Java Tutorial       U002"
+full = b"U001U002B0010000000010"  # 22 bytes, amount 10
+def trans_of(inp, label):
+    d = make_dir(inp, books=BKS)
+    rc, so, se, out = run_cobol(d)
+    t = out["TRANSACTIONS.DAT"]
+    added = t[66:]
+    acc = out["ACCOUNTS.DAT"]
+    print(f"{label:28s} len={len(inp):2d} stdout={so.decode().strip()!r:45s} appended={added!r}  accts_changed={acc!=ORIG_DATA['ACCOUNTS.DAT']}")
+    shutil.rmtree(d)
+# vary input length; all have buyer U001 seller U002 book B001
+for n in [1,4,5,8,9,11,12,13,14,15,20,21,22,23,44]:
+    trans_of(full[:n] if n<=22 else full+b"U003U001B001", f"prefix {n}")
+EOF
+$ cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+ACC = ORIG_DATA["ACCOUNTS.DAT"]; BKS = ORIG_DATA["BOOKS.DAT"]
+# D1: buyer == seller (self-trade), amount 200 on balance 1180 (U001 is buyer and seller), book B001 owned by U001
+BKS_self = b"B001Python Basics       U001B002COBOL Guide         U002B003Java Tutorial       U002"
+show("D1 self-trade U001->U001 amt 200", b"U001U001B0010000000200", books=BKS_self)
+# D2: self-trade with amount larger than balance: 1180 - 2000 -> 820 ; +2000 -> 2820
+show("D2 self-trade U001->U001 amt 2000", b"U001U001B0010000002000", books=BKS_self)
+# D3: duplicate account record for buyer U001 (two records) -> both debited?
+acc_dup = b"U001John Doe            0000001180U002Jane Smith          0000001800U001John Doe again      0000000500"
+show("D3 dup buyer account records", b"U001U002B0010000000100", accounts=acc_dup, books=BKS)
+# D4: duplicate book records B001 owners U003 and U002 (seller U002) -> valid owner via any match; both owners -> buyer
+bks_dup = b"B001Python Basics       U003B001Python Basics       U002B003Java Tutorial       U002"
+show("D4 dup book B001 owners U003,U002 seller U002", b"U001U002B0010000000100", books=bks_dup)
+EOF
+$ cd /tmp/exp && python3 - <<'EOF'
+import sys; sys.path.insert(0,'/tmp/exp')
+from harness import *
+BKS_self = b"B001Python Basics       U001B002COBOL Guide         U002B003Java Tutorial       U002"
+# (a) self-trade where the U001 record is 3rd of 4 accounts; records after it must stay untouched
+acc4 = (b"U009Zed                 0000000100"
+        b"U002Jane Smith          0000001800"
+        b"U001John Doe            0000001180"
+        b"U001John Doe dup        0000000500")
+show("A-self 3rd record, dup after", b"U001U001B0010000000200", accounts=acc4, books=BKS_self)
+# (b) self-trade, first match is record 1, a duplicate later; seller U001 must not be credited on dup
+acc2 = (b"U001John Doe            0000001180"
+        b"U001John Doe dup        0000000500")
+show("B-self dup first", b"U001U001B0010000000200", accounts=acc2, books=BKS_self)
+# (c) non-digit characters in amount field: 'A' (0x41), space, letter 'z'
+show("C-amount 'A' then NULs", b"U001U002B001A")
+show("C-amount ' ' then NULs ", b"U001U002B001 ")
+show("C-amount 'Z' then NULs ", b"U001U002B001Z")
+EOF
+> bash

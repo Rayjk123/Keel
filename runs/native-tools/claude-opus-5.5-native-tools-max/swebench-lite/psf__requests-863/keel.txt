@@ -1,0 +1,243 @@
+$ cd . && git log --oneline -5 && git status && ls -la
+$ ls -la requests/ tests/ 2>/dev/null; cat setup.py | head -50
+> read requests/models.py
+> read requests/hooks.py
+> read requests/sessions.py
+$ cd . && grep -rn "hook" --include=*.py requests/ tests/ | grep -v "packages/"
+$ cd . && sed -n 1,80p tests/test_requests.py
+$ cd . && sed -n 680,830p tests/test_requests.py
+$ cd . && which python python3; python --version; cat .env; cat requirements.txt; cat .travis.yml; cat Makefile | head -30
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import requests
+from requests.models import Request
+
+def hook_a(r):
+    print("hook_a called")
+    return r
+
+def hook_b(r):
+    print("hook_b called")
+    return r
+
+# Case 1: A list passed to Request.__init__
+r = Request(url='http://example.com', method='GET', hooks={'response': [hook_a, hook_b]})
+print("Case 1 hooks['response']:", r.hooks['response'])
+
+# Case 2: A single callable
+r = Request(url='http://example.com', method='GET', hooks={'response': hook_a})
+print("Case 2 hooks['response']:", r.hooks['response'])
+
+# Dispatch to show the failure
+from requests.hooks import dispatch_hook
+r = Request(url='http://example.com', method='GET', hooks={'response': [hook_a, hook_b]})
+try:
+    dispatch_hook('response', r.hooks, "data")
+except TypeError as e:
+    print("Case 1 dispatch failed:", e)
+EOF
+python /tmp/repro.py
+$ cd . && sed -n 220,265p requests/auth.py && echo ---- && sed -n 360,390p requests/auth.py
+$ cd . && grep -n "def from_key_val_list" -A 25 requests/utils.py; grep -rn "callable\|__call__" --include=*.py requests/ | grep -v packages/
+$ cd . && grep -rn -i "hook" docs/ HISTORY.rst README.rst | grep -v "_build"
+$ cd . && sed -n 155,240p docs/user/advanced.rst; sed -n 1,30p HISTORY.rst
+$ cd . && cat requests/api.py | sed -n 1,50p; echo ----; cat requests/compat.py; echo ----; sed -n 50,80p setup.py
+$ cd . && cat requests/__init__.py | sed -n 1,40p; pip list 2>/dev/null | grep -i -E "nose|pytest|requests"
+$ cd . && timeout 20 python -c "
+import socket
+try:
+    socket.create_connection(('httpbin.org', 80), timeout=5); print('network OK')
+except Exception as e:
+    print('no network:', e)
+"
+$ cd . && timeout 120 python -m pytest tests/test_requests.py -k "hook" -x -q 2>&1 | tail -20
+$ cd . && env | grep -i -E "httpbin|proxy"; timeout 30 python -c "
+import requests
+r = requests.get('http://httpbin.org/get')
+print(r.status_code, r.text[:300])
+"
+$ cd . && cat > /tmp/repro2.py << 'EOF'
+import requests
+
+calls = []
+def hook_a(r):
+    calls.append('a')
+    return r
+
+def hook_b(r):
+    calls.append('b')
+    return r
+
+# 1. Per-request list of response hooks
+try:
+    requests.get('http://httpbin.org/get', hooks={'response': [hook_a, hook_b]})
+    print("1. per-request list OK:", calls)
+except Exception as e:
+    print("1. per-request list FAILED:", type(e).__name__, e)
+
+# 2. Session-level list of response hooks
+calls[:] = []
+s = requests.session(hooks={'response': [hook_a, hook_b]})
+try:
+    s.get('http://httpbin.org/get')
+    print("2. session list OK:", calls)
+except Exception as e:
+    print("2. session list FAILED:", type(e).__name__, e)
+
+# 3. pre_request list
+calls[:] = []
+try:
+    requests.get('http://httpbin.org/get', hooks={'pre_request': [hook_a, hook_b]})
+    print("3. pre_request list OK:", calls)
+except Exception as e:
+    print("3. pre_request list FAILED:", type(e).__name__, e)
+EOF
+timeout 60 python /tmp/repro2.py
+> edit requests/models.py
+$ cd . && sed -n 140,156p requests/models.py && echo ---- && sed -n 460,490p requests/models.py
+$ cd . && python /tmp/repro.py && echo ---- && timeout 60 python /tmp/repro2.py
+$ cd /tmp && python -c "import requests; print(requests.__file__)"; cd - >/dev/null; python -c "import requests; print(requests.__file__)"; pip show -f requests 2>/dev/null | head -20; ls build/
+$ cd . && PYTHONPATH=$(pwd) python /tmp/repro.py && echo ---- && PYTHONPATH=$(pwd) timeout 60 python /tmp/repro2.py; echo ----; python -m pytest --co -q tests/test_requests.py -k single_hook 2>&1 | head -3; python - << 'EOF'
+import subprocess, sys
+out = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-s', '-p', 'no:cacheprovider', '-k', 'test_entry_points', 'tests/test_requests.py', '--override-ini=addopts=', ], capture_output=True, text=True)
+EOF
+python -m pytest -q -s tests/test_requests.py -k test_entry_points 2>&1 | tail -1; python -c "
+import sys; sys.argv=['x']
+import pytest
+" ; cat > /tmp/whichreq_test.py << 'EOF'
+def test_which():
+    import requests
+    print("\nrequests imported from:", requests.__file__)
+EOF
+python -m pytest -q -s /tmp/whichreq_test.py 2>&1 | grep "imported from"
+$ cd . && PYTHONPATH=$(pwd) python - << 'EOF'
+import requests
+from requests.models import Request
+
+def a(x): return x
+def b(x): return x
+def c(x): return x
+
+# empty Request() is constructible
+r = Request()
+print("empty:", r.hooks)
+
+# tuple / generator / set
+print("tuple:", Request(hooks={'response': (a, b)}).hooks['response'] == [a, b])
+print("generator:", Request(hooks={'response': (h for h in [a, b])}).hooks['response'] == [a, b])
+print("set:", sorted(map(id, Request(hooks={'response': {a, b}}).hooks['response'])) == sorted([id(a), id(b)]))
+
+# non-callable items are dropped; order preserved
+print("filtered:", Request(hooks={'response': [a, 'nope', None, 42, b]}).hooks['response'] == [a, b])
+
+# single callable still works and register_hook keeps appending after a list
+r = Request(hooks={'response': a})
+r.register_hook('response', [b, c])
+r.register_hook('response', a)
+print("mixed:", r.hooks['response'] == [a, b, c, a])
+
+# deregister still works on flattened lists
+print("deregister:", r.deregister_hook('response', b), r.hooks['response'] == [a, c, a])
+
+# Callable instances (e.g. auth-style objects) are registered as single hooks
+class CallableIterable(object):
+    def __call__(self, x): return x
+    def __iter__(self): return iter([a, b])
+ci = CallableIterable()
+print("callable+iterable treated as single hook:", Request(hooks={'response': ci}).hooks['response'] == [ci])
+
+# Session: list values, and the session's own list must not be mutated
+hooks_list = [a, b]
+s = requests.session(hooks={'response': hooks_list})
+req = s.get('http://example.invalid/', return_response=False)
+print("session:", req.hooks['response'] == [a, b], "session list untouched:", s.hooks['response'] is hooks_list and hooks_list == [a, b])
+req2 = s.get('http://example.invalid/', return_response=False)
+print("second session request not accumulating:", req2.hooks['response'] == [a, b])
+
+# per-request list overrides session hooks for same event (existing semantics)
+req3 = s.get('http://example.invalid/', hooks={'response': [c]}, return_response=False)
+print("per-request override:", req3.hooks['response'] == [c])
+EOF
+$ cd . && git log --stat -15 --format="%h %s" -- HISTORY.rst docs/user/advanced.rst | head -60
+$ cd . && grep -n "def test_\|Request(" tests/test_requests.py | head -100
+> edit tests/test_requests.py
+> read tests/test_requests.py
+> edit tests/test_requests.py
+$ cd . && timeout 120 python -m pytest tests/test_requests.py -k "hook" -v 2>&1 | tail -15
+$ cd . && git stash push requests/models.py -q && timeout 120 python -m pytest tests/test_requests.py -k "hook" -q 2>&1 | grep -E "passed|failed|FAILED|Error" | head -20; git stash pop -q && git diff --stat
+$ cd . && timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -x -p no:cacheprovider 2>&1 | tail -15
+$ cd . && timeout 120 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k test_DIGESTAUTH_HTTP_200_OK_GET 2>&1 | grep -E "^E |Error|cookiejar|models.py|auth.py" | head -20; echo "======== ORIGINAL CODE ========"; git stash push requests/models.py -q && timeout 120 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k test_DIGESTAUTH_HTTP_200_OK_GET 2>&1 | tail -2; git stash pop -q; git diff --stat
+$ cd . && run() { timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -p no:cacheprovider -rf 2>&1 | grep -E "^FAILED|passed|failed" | sed -E 's/ in [0-9.]+s.*//' | sort; }
+echo "===== WITH FIX ====="; run > /tmp/after.txt; cat /tmp/after.txt | tail -3
+git stash push requests/models.py -q
+echo "===== ORIGINAL models.py (new tests included) ====="; run > /tmp/before.txt; cat /tmp/before.txt | tail -3
+git stash pop -q
+echo "===== DIFF (before -> after) ====="; diff /tmp/before.txt /tmp/after.txt; git diff --stat
+$ cd . && T="test_urlencoded_post_data or test_urlencoded_post_query_and_data or test_urlencoded_post_query_multivalued_and_data or test_file_post_data or test_POSTBIN_GET_POST_FILES_WITH_HEADERS or test_post_fields_with_multiple_values_and_files_as_tuples or test_unpickled_session_requests"
+for v in fix orig; do
+  if [ $v = orig ]; then git stash push requests/models.py -q; fi
+  for i in 1 2 3; do
+    echo "[$v run $i] $(timeout 200 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k "$T" 2>&1 | tail -1 | sed -E 's/ in [0-9.]+s.*//')"
+  done
+  if [ $v = orig ]; then git stash pop -q; fi
+done; git diff --stat
+$ cd . && timeout 200 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k "test_urlencoded_post_data or test_file_post_data or test_unpickled_session_requests or test_POSTBIN_GET_POST_FILES_WITH_HEADERS" 2>&1 | grep -E "^E " | sort | uniq -c | head -20
+$ cd . && for i in 1 2 3 4 5 6; do timeout 30 python -c "
+import requests
+r = requests.post('http://httpbin.org/post', data={'a':'b'})
+print(r.status_code, r.headers.get('set-cookie'), r.headers.get('server'))
+" 2>&1 | tail -1; done
+$ cd . && T="test_urlencoded_post_data or test_urlencoded_post_query_and_data or test_urlencoded_post_query_multivalued_and_data or test_file_post_data or test_POSTBIN_GET_POST_FILES_WITH_HEADERS or test_post_fields_with_multiple_values_and_files_as_tuples or test_unpickled_session_requests"
+for i in 1 2 3; do timeout 200 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k "$T" 2>&1 | grep -E "^E  " ; done | sed -E 's/0x[0-9a-f]+//g' | cut -c1-160 | sort | uniq -c | sort -rn | head; echo; grep -n "unverifiable\|class MockRequest" requests/cookies.py
+$ cd . && pip list 2>/dev/null | grep -i -E "httpbin|flask|werkzeug|gunicorn"; python -c "import httpbin" 2>&1
+> read tests/test_requests.py
+> edit tests/test_requests.py
+$ cd . && python -c "import requests; print(requests.hooks)"; for i in 1 2 3; do timeout 120 python -m pytest tests/test_requests.py -k "hook" -q -p no:cacheprovider 2>&1 | tail -1; done
+$ cd . && git stash push requests/models.py -q && timeout 120 python -m pytest tests/test_requests.py -k "hook" -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed"; git stash pop -q; git diff --stat
+> read docs/user/advanced.rst
+> edit docs/user/advanced.rst
+$ cd . && grep -rn "Session" docs/api.rst docs/user/advanced.rst | head; python -c "import requests; print(requests.Session)"
+$ cd . && run() { timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -p no:cacheprovider 2>&1 | grep -E "^E  " | sed -E 's/0x[0-9a-f]+//g' | cut -c1-110 | sort | uniq -c | sort -rn; }
+echo "== error kinds WITH FIX (full suite) =="; run
+$ cd . && failed() { timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -p no:cacheprovider -rf 2>&1 | grep -E "^FAILED" | awk '{print $2}' | sort; }
+always() { failed > /tmp/r1; failed > /tmp/r2; failed > /tmp/r3; comm -12 /tmp/r1 /tmp/r2 | comm -12 - /tmp/r3; }
+always > /tmp/always_fix.txt
+git stash push requests/models.py -q; always > /tmp/always_orig.txt; git stash pop -q
+echo "always-failing WITH fix: $(wc -l < /tmp/always_fix.txt)   always-failing ORIGINAL: $(wc -l < /tmp/always_orig.txt)"
+echo "== consistently failing only WITH the fix (regressions) =="; comm -23 /tmp/always_fix.txt /tmp/always_orig.txt
+echo "== consistently failing only in ORIGINAL (fixed) =="; comm -13 /tmp/always_fix.txt /tmp/always_orig.txt
+git diff --stat
+$ cd . && T="test_file_post_data or test_none_vals_in_data_are_deleted or test_nonurlencoded_post_data or test_nonurlencoded_postdata or test_post_fields_with_multiple_values_and_files or test_urlencoded_post_data or test_urlencoded_post_querystring"
+timeout 300 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k "$T" 2>&1 | grep -E "^E  |^FAILED|passed|failed" | sed -E 's/0x[0-9a-f]+//g' | cut -c1-140
+$ cd . && T="test_file_post_data or test_none_vals_in_data_are_deleted or test_nonurlencoded_post_data or test_nonurlencoded_postdata or test_post_fields_with_multiple_values_and_files or test_urlencoded_post_data or test_urlencoded_post_querystring"
+for i in 1 2 3; do echo "[fix run $i] $(timeout 300 python -m pytest tests/test_requests.py -q -p no:cacheprovider -k "$T" 2>&1 | tail -1 | sed -E 's/ in [0-9.]+s.*//')"; sleep 2; done
+echo; echo "hook usage in those tests:"; for t in test_file_post_data test_none_vals_in_data_are_deleted test_nonurlencoded_post_data test_nonurlencoded_postdata test_post_fields_with_multiple_values_and_files test_urlencoded_post_data test_urlencoded_post_querystring; do awk "/def $t\(/{f=1;next} f&&/    def test_/{f=0} f" tests/test_requests.py | grep -c -i hook | sed "s/^/  $t: /"; done
+> read docs/user/advanced.rst
+$ cd . && (python -m pyflakes requests/models.py 2>/dev/null || python -m pyflakes --version 2>&1 | head -1); python -m py_compile requests/models.py tests/test_requests.py && echo "compile OK"; git diff requests/ docs/
+$ cd . && timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -p no:cacheprovider -rf 2>&1 > /tmp/full.txt; tail -1 /tmp/full.txt
+for t in test_file_post_data test_none_vals_in_data_are_deleted test_nonurlencoded_post_data test_nonurlencoded_postdata test_post_fields_with_multiple_values_and_files test_urlencoded_post_data test_urlencoded_post_querystring; do
+  line=$(grep -E "^FAILED .*::$t( |$)" /tmp/full.txt | sed -E 's/0x[0-9a-f]+//g' | cut -c1-150)
+  echo "$t -> ${line:-passed}"
+done
+$ cd . && timeout 500 python -m pytest tests/test_requests.py tests/test_cookies.py tests/test_proxies.py -q -p no:cacheprovider -k "test_none_vals_in_data_are_deleted or test_nonurlencoded_post_data or test_nonurlencoded_postdata or test_post_fields_with_multiple_values_and_files or test_urlencoded_post_data or test_session_persistent_cookies or test_POSTBIN_GET_POST_FILES or test_HTTP_200_OK_GET" 2>&1 | grep -E "^E   |^____" | sed -E 's/0x[0-9a-f]+//g' | cut -c1-150 | head -40
+$ cd . && timeout 60 python - << 'EOF'
+import requests
+
+def print_url(args):
+    print(args['url'])
+
+def hack_headers(args):
+    if args.get('headers') is None:
+        args['headers'] = dict()
+    args['headers'].update({'X-Testing': 'True'})
+    return args
+
+hooks = dict(args=[print_url, hack_headers])
+
+r = requests.get('http://httpbin.org/headers', hooks=hooks)
+print(r, 'X-Testing' in r.text)
+
+s = requests.session(hooks=hooks)
+r = s.get('http://httpbin.org/headers')
+print(r, 'X-Testing' in r.text)
+EOF
+stopped: step limit reached

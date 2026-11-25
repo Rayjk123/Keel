@@ -1,0 +1,76 @@
+diff --git a/doc/whats-new.rst b/doc/whats-new.rst
+index c1440ec1..91bdc97c 100755
+--- a/doc/whats-new.rst
++++ b/doc/whats-new.rst
+@@ -162,6 +162,10 @@ Bug fixes
+   By `Benoit Bovy <https://github.com/benbovy>`_.
+ - Fix :py:func:`open_rasterio` for ``WarpedVRT`` with specified ``src_crs``. (:pull:`4104`)
+   By `Dave Cole <https://github.com/dtpc>`_.
++- Fix :py:meth:`DataArray.to_unstacked_dataset` raising a ``MergeError`` when the
++  stacked variables only have the sample dimensions, i.e. when the stacked
++  coordinate created by :py:meth:`Dataset.to_stacked_array` has a single
++  level, so that the round trip now works for single-dimension variables.
+ 
+ Documentation
+ ~~~~~~~~~~~~~
+diff --git a/xarray/core/dataarray.py b/xarray/core/dataarray.py
+index b0df8749..7081f272 100755
+--- a/xarray/core/dataarray.py
++++ b/xarray/core/dataarray.py
+@@ -1961,7 +1961,12 @@ class DataArray(AbstractArray, DataWithCoords):
+         # pull variables out of datarray
+         data_dict = {}
+         for k in variables:
+-            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
++            # ``drop=True`` discards the scalar stacked coordinate that is left
++            # behind when the MultiIndex only has a single level (i.e., when the
++            # variables have no dimensions other than the sample dimensions).
++            # Its value differs between variables, so keeping it would lead to
++            # a conflict when merging the variables into a Dataset below.
++            data_dict[k] = self.sel({variable_dim: k}, drop=True).squeeze(drop=True)
+ 
+         # unstacked dataset
+         return Dataset(data_dict)
+diff --git a/xarray/tests/test_dataset.py b/xarray/tests/test_dataset.py
+index 9c8d4072..f7a17e5b 100755
+--- a/xarray/tests/test_dataset.py
++++ b/xarray/tests/test_dataset.py
+@@ -3055,6 +3055,38 @@ class TestDataset:
+         x = y.to_unstacked_dataset("features")
+         assert_identical(D, x)
+ 
++    def test_to_stacked_array_to_unstacked_dataset_single_dim(self):
++        # test when variables have only the sample dimensions, so that the
++        # stacked MultiIndex has a single level
++        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
++        D = xr.Dataset({"a": arr, "b": arr * 2})
++        sample_dims = ["x"]
++
++        y = D.to_stacked_array("features", sample_dims)
++        assert y.indexes["features"].nlevels == 1
++        x = y.to_unstacked_dataset("features")
++        assert_identical(D, x)
++
++        # test on just one sample
++        x0 = y[0].to_unstacked_dataset("features")
++        d0 = D.isel(x=0)
++        assert_identical(d0, x0)
++
++        # the level can be given by name or by position
++        y = D.to_stacked_array("features", sample_dims, variable_dim="var")
++        assert_identical(D, y.to_unstacked_dataset("features", level="var"))
++        assert_identical(D, y.to_unstacked_dataset("features", level=0))
++
++    def test_to_stacked_array_to_unstacked_dataset_single_dim_scalar_coord(self):
++        # scalar coordinates unrelated to the stacked dimension must survive
++        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])], name="a")
++        arr = arr.assign_coords(t=5)
++        D = xr.Dataset({"a": arr, "b": arr * 2})
++
++        y = D.to_stacked_array("features", ["x"])
++        x = y.to_unstacked_dataset("features")
++        assert_identical(D, x)
++
+     def test_update(self):
+         data = create_test_data(seed=0)
+         expected = data.copy()

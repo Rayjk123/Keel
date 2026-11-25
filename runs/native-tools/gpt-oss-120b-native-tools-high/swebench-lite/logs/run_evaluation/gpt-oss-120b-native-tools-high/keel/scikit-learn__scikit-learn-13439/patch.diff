@@ -1,0 +1,76 @@
+diff --git a/sklearn/discriminant_analysis.py b/sklearn/discriminant_analysis.py
+index e710bc504..5215f4c73 100755
+--- a/sklearn/discriminant_analysis.py
++++ b/sklearn/discriminant_analysis.py
+@@ -13,7 +13,7 @@ import warnings
+ import numpy as np
+ from .exceptions import ChangedBehaviorWarning
+ from scipy import linalg
+-from scipy.special import expit
++from scipy.special import expit, logsumexp
+ 
+ from .base import BaseEstimator, TransformerMixin, ClassifierMixin
+ from .linear_model.base import LinearClassifierMixin
+@@ -541,7 +541,14 @@ class LinearDiscriminantAnalysis(BaseEstimator, LinearClassifierMixin,
+             return softmax(decision)
+ 
+     def predict_log_proba(self, X):
+-        """Estimate log probability.
++        """Estimate log-probability.
++
++        This implementation improves numerical stability compared to the
++        naive ``np.log(self.predict_proba(X))`` used previously. For binary
++        classification we compute the log‑sigmoid directly using
++        ``logaddexp`` which avoids loss of precision when the decision values
++        are large in magnitude. For the multiclass case we compute a stable
++        ``log‑softmax`` using ``scipy.special.logsumexp``.
+ 
+         Parameters
+         ----------
+@@ -553,7 +560,22 @@ class LinearDiscriminantAnalysis(BaseEstimator, LinearClassifierMixin,
+         C : array, shape (n_samples, n_classes)
+             Estimated log probabilities.
+         """
+-        return np.log(self.predict_proba(X))
++        # Ensure the estimator is fitted.
++        check_is_fitted(self, 'classes_')
++
++        decision = self.decision_function(X)
++        if self.classes_.size == 2:
++            # ``decision`` is shape (n_samples,). For numerical stability we
++            # use the identity ``log(sigmoid(x)) = -logaddexp(0, -x)`` and
++            # ``log(1 - sigmoid(x)) = -logaddexp(0, x)``.
++            log_proba_pos = -np.logaddexp(0, -decision)   # log P(class 1)
++            log_proba_neg = -np.logaddexp(0, decision)    # log P(class 0)
++            return np.vstack([log_proba_neg, log_proba_pos]).T
++        else:
++            # Multiclass case: use stable log‑softmax.
++            # ``log_softmax_i = decision_i - logsumexp(decision)``
++            lse = logsumexp(decision, axis=1)
++            return decision - lse[:, np.newaxis]
+ 
+ 
+ class QuadraticDiscriminantAnalysis(BaseEstimator, ClassifierMixin):
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 7eaf9a46f..9d81da944 100755
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -219,6 +219,18 @@ class Pipeline(_BaseComposition):
+             return self.named_steps[ind]
+         return est
+ 
++    def __len__(self):
++        """Return the number of steps in the pipeline.
++
++        ``Pipeline`` behaves like a sequence of estimators, where each step
++        corresponds to a ``(name, estimator)`` tuple stored in ``self.steps``.
++        Implementing ``__len__`` enables the use of ``len(pipeline)`` and
++        makes slicing operations such as ``pipeline[:len(pipeline)]`` work as
++        expected. This method simply returns ``len(self.steps)`` which
++        includes the final estimator.
++        """
++        return len(self.steps)
++
+     @property
+     def _estimator_type(self):
+         return self.steps[-1][1]._estimator_type

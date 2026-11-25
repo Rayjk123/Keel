@@ -1,0 +1,147 @@
+$ mkdir -p /app/ssl && \
+openssl genrsa -out /app/ssl/server.key 2048 && \
+chmod 600 /app/ssl/server.key && \
+openssl req -new -x509 -key /app/ssl/server.key -out /app/ssl/server.crt -days 365 \
+  -subj "/O=DevOps Team/CN=dev-internal.company.local" && \
+cat /app/ssl/server.key /app/ssl/server.crt > /app/ssl/server.pem && \
+chmod 600 /app/ssl/server.pem && \
+{
+  echo "Subject:"
+  openssl x509 -in /app/ssl/server.crt -noout -subject
+  echo "Validity:"
+  openssl x509 -in /app/ssl/server.crt -noout -dates
+  echo "SHA-256 Fingerprint:"
+  openssl x509 -in /app/ssl/server.crt -noout -fingerprint -sha256
+} > /app/ssl/verification.txt && \
+python3 - << 'PY'
+from pathlib import Path
+Path("/app/check_cert.py").write_text('''#!/usr/bin/env python3
+"""Verify the internal development server self-signed certificate."""
+
+import os
+import re
+import sys
+from datetime import datetime
+
+CERT_PATH = "/app/ssl/server.crt"
+EXPECTED_CN = "dev-internal.company.local"
+
+
+def load_with_cryptography(data: bytes):
+    from cryptography import x509
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    try:
+        cert = x509.load_pem_x509_certificate(data)
+    except TypeError:
+        from cryptography.hazmat.backends import default_backend
+        cert = x509.load_pem_x509_certificate(data, default_backend())
+
+    cn = None
+    for attr in cert.subject:
+        if attr.oid == x509.NameOID.COMMON_NAME:
+            cn = attr.value
+            break
+
+    if hasattr(cert, "not_valid_after_utc"):
+        expires = cert.not_valid_after_utc
+    else:
+        expires = cert.not_valid_after
+
+    # Ensure the key material is actually usable (certificate loaded fully).
+    public_key = cert.public_key()
+    if not isinstance(public_key, rsa.RSAPublicKey):
+        raise ValueError("Certificate does not contain an RSA public key")
+    if public_key.key_size != 2048:
+        raise ValueError(f"Unexpected RSA key size: {public_key.key_size}")
+
+    return cn, expires.strftime("%Y-%m-%d")
+
+
+def load_with_openssl():
+    import subprocess
+
+    result = subprocess.run(
+        ["openssl", "x509", "-in", CERT_PATH, "-noout", "-subject", "-enddate"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "openssl failed to load certificate")
+
+    output = result.stdout
+    cn_match = re.search(r"CN\\s*=\\s*([^,/\\n]+)", output)
+    if not cn_match:
+        raise RuntimeError("Common Name not found in certificate subject")
+    cn = cn_match.group(1).strip()
+
+    end_match = re.search(r"notAfter=(.+)", output)
+    if not end_match:
+        raise RuntimeError("Expiration date not found")
+    end_str = end_match.group(1).strip()
+    parsed = None
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y GMT", "%Y%m%d%H%M%SZ"):
+        try:
+            token = end_str
+            if fmt.endswith("GMT") and token.endswith(" GMT"):
+                parsed = datetime.strptime(token, fmt)
+                break
+            if "%Z" in fmt:
+                parsed = datetime.strptime(token, fmt)
+                break
+            parsed = datetime.strptime(token, fmt)
+            break
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        # Fallback: drop trailing timezone token (e.g. GMT)
+        parts = end_str.split()
+        if len(parts) >= 4:
+            parsed = datetime.strptime(" ".join(parts[:4]), "%b %d %H:%M:%S %Y")
+        else:
+            raise RuntimeError(f"Unrecognized expiration date format: {end_str}")
+    return cn, parsed.strftime("%Y-%m-%d")
+
+
+def main() -> int:
+    if not os.path.isfile(CERT_PATH):
+        print(f"Certificate not found: {CERT_PATH}", file=sys.stderr)
+        return 1
+
+    try:
+        with open(CERT_PATH, "rb") as cert_file:
+            data = cert_file.read()
+        if b"BEGIN CERTIFICATE" not in data:
+            print("Certificate file is not a PEM certificate", file=sys.stderr)
+            return 1
+        try:
+            cn, expiration = load_with_cryptography(data)
+        except ImportError:
+            cn, expiration = load_with_openssl()
+    except Exception as exc:
+        print(f"Failed to load certificate: {exc}", file=sys.stderr)
+        return 1
+
+    if cn != EXPECTED_CN:
+        print(f"Unexpected Common Name: {cn}", file=sys.stderr)
+        return 1
+
+    print(f"Common Name: {cn}")
+    print(f"Expiration Date: {expiration}")
+    print("Certificate verification successful")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+''')
+PY
+chmod 755 /app/check_cert.py && \
+echo "===== verification.txt =====" && cat /app/ssl/verification.txt && \
+echo "===== permissions =====" && ls -l /app/ssl && \
+echo "===== key bits =====" && openssl rsa -in /app/ssl/server.key -noout -text | head -n 1 && \
+echo "===== python check =====" && python3 /app/check_cert.py && \
+echo "===== pem structure =====" && grep -E "BEGIN|END" /app/ssl/server.pem
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+All required TLS files were created and checked: a 2048-bit key, a one-year self-signed certificate, a combined PEM, verification output, and a Python checker that reports the Common Name and expiration.

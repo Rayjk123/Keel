@@ -1,0 +1,392 @@
+$ cd . && git status && git log --oneline | head -5 && ls && grep -rn "to_unstacked_dataset\|def to_stacked_array" --include=*.py . | head -50
+$ cd . && sed -n 1895,1990p xarray/core/dataarray.py
+$ cd . && sed -n 3360,3450p xarray/core/dataset.py
+$ cd . && sed -n 3450,3480p xarray/core/dataset.py
+$ cd . && sed -n 3020,3070p xarray/tests/test_dataset.py
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked)
+print(stacked.indexes['y'])
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+EOF
+python /tmp/repro.py 2>&1 | tail -40
+$ cd . && cat > /tmp/debug.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(repr(stacked.indexes['y']))
+print("levels:", stacked.indexes['y'].levels)
+for k in stacked.indexes['y'].levels[0]:
+    s = stacked.sel({'variable': k})
+    print("--- sel only, k=", k)
+    print(s)
+    s2 = stacked.sel({'variable': k}).squeeze(drop=True)
+    print("--- sel+squeeze(drop=True), k=", k)
+    print(s2)
+    print("coords:", {n: (c.dims, c.values) for n, c in s2.coords.items()})
+EOF
+python /tmp/debug.py 2>&1 | head -120
+$ cd . && grep -n "def sel\b\|def sel(" -A 12 xarray/core/dataarray.py | head -40; echo ----; grep -n "def isel(" -A 3 xarray/core/dataset.py; grep -n "drop and var_value.ndim == 0\|drop: bool" xarray/core/dataset.py | head; echo ----; python -c "import pandas, numpy, xarray; print(pandas.__version__, numpy.__version__, xarray.__version__)"
+$ cd . && sed -n 1940,1985p xarray/core/dataset.py
+$ cd . && grep -n "def sel(" -A 3 xarray/core/dataset.py | head; grep -n "drop" xarray/core/dataset.py | sed -n 1,80p | grep -n "sel\|isel\|drop" | head -60
+$ cd . && sed -n 290,350p xarray/core/dataset.py
+$ cd . && grep -n "def convert_label_indexer" -A 75 xarray/core/indexing.py | sed -n 1,90p
+$ cd . && sed -n 2085,2115p xarray/core/dataset.py; echo -----; sed -n 183,200p xarray/core/indexing.py; echo -----; grep -n "def remap_label_indexers" -A 40 xarray/core/coordinates.py xarray/core/indexing.py xarray/core/utils.py 2>/dev/null | head -5
+$ cd . && sed -n 370,420p xarray/core/coordinates.py; echo ----; grep -n "def _overwrite_indexes" -A 40 xarray/core/dataset.py | head -60
+$ cd . && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -k "stack" 2>&1 | tail -15
+$ cd . && cat > /tmp/exp.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("stacked coord names:", set(stacked.coords), "| _level_coords-ish:", getattr(stacked, '_level_coords', None))
+for k in ['a', 'b']:
+    s = stacked.sel({'variable': k}, drop=True)
+    print(f"--- sel(drop=True) {k}: dims={s.dims} coords={list(s.coords)}")
+    s = s.squeeze(drop=True)
+    print(f"    after squeeze: dims={s.dims} coords={list(s.coords)}")
+unstacked = xr.Dataset({k: stacked.sel({'variable': k}, drop=True).squeeze(drop=True) for k in ['a', 'b']})
+print(unstacked)
+print("identical to input:", data.identical(unstacked))
+EOF
+python /tmp/exp.py 2>&1 | tail -40
+$ cd . && timeout 550 python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -p no:warnings 2>&1 | tail -15
+$ cd . && sed -n 1,60p doc/whats-new.rst
+$ cd . && cat > /tmp/multi.py << 'EOF'
+import numpy as np
+import xarray as xr
+from xarray.tests import create_test_stacked_array
+
+a, b = create_test_stacked_array()
+D = xr.Dataset({"a": a, "b": b.isel(y=0)})
+y = D.to_stacked_array("features", ["x"])
+print(y)
+print()
+for k in y.indexes["features"].levels[0]:
+    s = y.sel({"variable": k})
+    print(f"sel {k!r} coords:", {n: (c.dims, c.shape) for n, c in s.coords.items()}, "dims", s.dims)
+    s2 = y.sel({"variable": k}, drop=True)
+    print(f"sel(drop) {k!r} coords:", {n: (c.dims, c.shape) for n, c in s2.coords.items()}, "dims", s2.dims)
+EOF
+python /tmp/multi.py 2>&1 | tail -60
+$ cd . && grep -n "def create_test_stacked_array" -A 8 xarray/tests/test_dataset.py
+$ cd . && cat > /tmp/multi.py << 'EOF'
+import numpy as np
+import pandas as pd
+import xarray as xr
+from xarray import DataArray
+
+x = DataArray(pd.Index(np.r_[:10], name="x"))
+y_ = DataArray(pd.Index(np.r_[:20], name="y"))
+a = x * y_
+b = x * y_ * y_
+D = xr.Dataset({"a": a, "b": b.isel(y=0)})
+y = D.to_stacked_array("features", ["x"])
+print(y.indexes["features"])
+print()
+for k in y.indexes["features"].levels[0]:
+    s = y.sel({"variable": k})
+    print(f"sel {k!r} coords:", {n: (c.dims, c.shape) for n, c in s.coords.items()}, "dims", s.dims)
+    s2 = y.sel({"variable": k}, drop=True)
+    print(f"sel(drop) {k!r} coords:", {n: (c.dims, c.shape) for n, c in s2.coords.items()}, "dims", s2.dims)
+EOF
+python /tmp/multi.py 2>&1 | tail -60
+$ cd . && grep -n "    def sel(" -A 75 xarray/core/dataarray.py | grep -n "drop\|return\|isel\|sel(" | head -20; echo ----; git log --oneline -S "squeeze(drop=True)" -- xarray/core/dataarray.py | head; echo ----; cat > /tmp/size1.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(np.arange(1), coords=[("x", [0])])
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("stacked dims:", stacked.dims)
+try:
+    unstacked = stacked.to_unstacked_dataset('y')
+    print(unstacked)
+    print("identical:", data.identical(unstacked))
+except Exception as e:
+    print(type(e).__name__, e)
+EOF
+python /tmp/size1.py 2>&1 | tail -20
+$ cd . && cat > /tmp/scenarios.py << 'EOF'
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+import xarray as xr
+from xarray import DataArray, Dataset
+
+def check(name, fn):
+    try:
+        out = fn()
+        print(f"[{name}] -> {out}")
+    except Exception as e:
+        print(f"[{name}] -> {type(e).__name__}: {str(e)[:90]}")
+
+def roundtrip(data, sample_dims, dim="y", **kw):
+    stacked = data.to_stacked_array(dim, sample_dims=sample_dims)
+    unstacked = stacked.to_unstacked_dataset(dim, **kw)
+    ok = data.identical(unstacked)
+    return f"identical={ok} dims={dict(unstacked.dims)}"
+
+# A. MCVE: single-dim variables, 3 samples
+arr = DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+A = Dataset({"a": arr, "b": arr})
+check("A single-dim x=3", lambda: roundtrip(A, ["x"]))
+
+# B. single-dim variables, size-1 sample dim
+arr1 = DataArray(np.arange(1), coords=[("x", [0])])
+B = Dataset({"a": arr1, "b": arr1})
+check("B single-dim x=1", lambda: roundtrip(B, ["x"]))
+
+# D. multi-dim variables, size-1 sample dim
+a = DataArray(np.arange(3).reshape(1, 3), coords=[("x", [0]), ("y", [0, 1, 2])])
+b = DataArray(np.arange(1), coords=[("x", [0])])
+D = Dataset({"a": a, "b": b})
+check("D multi-dim x=1", lambda: roundtrip(D, ["x"]))
+
+# F. 3-level stacking: a has (x, y, w), b has (x,)
+x = DataArray(np.arange(2), coords=[("x", [0, 1])])
+yy = DataArray(np.arange(3), coords=[("y", [0, 1, 2])])
+ww = DataArray(np.arange(2), coords=[("w", [0, 1])])
+F = Dataset({"a": x * yy * ww, "b": x})
+check("F 3-level", lambda: roundtrip(F, ["x"]))
+
+# G. dask-backed single-dim
+try:
+    import dask.array as da
+    G = Dataset({"a": arr.copy(data=da.from_array(np.arange(3), chunks=2)), "b": arr})
+    check("G dask single-dim", lambda: roundtrip(G, ["x"]))
+except ImportError:
+    print("[G] dask not installed")
+
+# E. level=1 on a 2-level stack (variables + y)
+a2 = DataArray(np.arange(6).reshape(2, 3), coords=[("x", [0, 1]), ("y", [0, 1, 2])])
+b2 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+E = Dataset({"a": a2, "b": b2})
+st = E.to_stacked_array("z", ["x"])
+check("E level=0 (default)", lambda: roundtrip(E, ["x"], dim="z"))
+check("E level=1", lambda: st.to_unstacked_dataset("z", level=1).dims)
+EOF
+python /tmp/scenarios.py 2>&1
+$ cd . && cat > /tmp/scenarios2.py << 'EOF'
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import xarray as xr
+from xarray import DataArray, Dataset
+
+def check(name, fn):
+    try:
+        print(f"[{name}] -> {fn()}")
+    except Exception as e:
+        print(f"[{name}] -> {type(e).__name__}: {str(e)[:100]}")
+
+def roundtrip(data, sample_dims, dim="z", **kw):
+    stacked = data.to_stacked_array(dim, sample_dims=sample_dims)
+    unstacked = stacked.to_unstacked_dataset(dim, **kw)
+    return f"identical={data.identical(unstacked)} dims={dict(unstacked.dims)}"
+
+# D. multi-dim a (x,y) with size-1 x, plus b (x,) -- sample dim size 1
+a = DataArray(np.arange(3).reshape(1, 3), coords=[("x", [0]), ("y", [0, 1, 2])])
+b = DataArray(np.arange(1), coords=[("x", [0])])
+check("D multi-dim, x=1", lambda: roundtrip(Dataset({"a": a, "b": b}), ["x"]))
+
+# F. 3 variables with mixed dims, 3-level stacking
+x = DataArray(np.arange(2), coords=[("x", [0, 1])])
+yy = DataArray(np.arange(3), coords=[("y", [0, 1, 2])])
+ww = DataArray(np.arange(2), coords=[("w", [0, 1])])
+F = Dataset({"a": x * yy * ww, "b": x})
+check("F mixed 3-dim", lambda: roundtrip(F, ["x"]))
+
+# H. single-dim variables, mixed with a 2-dim variable
+a2 = DataArray(np.arange(6).reshape(2, 3), coords=[("x", [0, 1]), ("y", [0, 1, 2])])
+b2 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+c2 = DataArray(np.arange(2) * 10, coords=[("x", [0, 1])])
+H = Dataset({"a": a2, "b": b2, "c": c2})
+check("H two single-dim + one 2-dim", lambda: roundtrip(H, ["x"]))
+
+# I. no coordinates on the sample dim (no index on x)
+arr_nc = DataArray(np.arange(3), dims=["x"])
+I = Dataset({"a": arr_nc, "b": arr_nc})
+check("I no coords on x", lambda: roundtrip(I, ["x"]))
+EOF
+python /tmp/scenarios2.py 2>&1
+$ cd . && cat > /tmp/naive.py << 'EOF'
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import xarray as xr
+from xarray import DataArray, Dataset
+
+def roundtrip(data, sample_dims, dim="y"):
+    stacked = data.to_stacked_array(dim, sample_dims=sample_dims)
+    unstacked = stacked.to_unstacked_dataset(dim)
+    return unstacked
+
+# B: single-dim variables (only sample dim x), x has length 1
+arr1 = DataArray(np.arange(1), coords=[("x", [0])])
+B = Dataset({"a": arr1, "b": arr1})
+# Show what the naive `sel(drop=True)` variant does for B by replicating the loop
+stacked = B.to_stacked_array("y", ["x"])
+for k in stacked.indexes["y"].levels[0]:
+    naive = stacked.sel({"variable": k}, drop=True).squeeze(drop=True)
+    print("naive", k, "dims:", dict(naive.sizes), "coords:", list(naive.coords))
+print("naive identical to input:", Dataset({k: stacked.sel({"variable": k}, drop=True).squeeze(drop=True) for k in ["a", "b"]}).identical(B))
+EOF
+python /tmp/naive.py 2>&1 | tail -20
+$ cd . && grep -n "def get_squeeze_dims" -A 22 xarray/core/common.py; echo ----; grep -n "    def squeeze" -A 3 xarray/core/dataarray.py | head -8; echo ----; sed -n 3478,3500p xarray/tests/test_units.py
+$ cd . && cat > /tmp/edge.py << 'EOF'
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+import xarray as xr
+from xarray import DataArray, Dataset
+
+def check(name, fn):
+    try:
+        print(f"[{name}] -> {fn()}")
+    except Exception as e:
+        print(f"[{name}] -> {type(e).__name__}: {str(e)[:100]}")
+
+def roundtrip(data, sample_dims, dim="z", **kw):
+    stacked = data.to_stacked_array(dim, sample_dims=sample_dims)
+    unstacked = stacked.to_unstacked_dataset(dim, **kw)
+    return f"identical={data.identical(unstacked)} dims={dict(unstacked.sizes)}"
+
+# J. a has exactly one stacked entry (y size 1), b has y size 3
+a = DataArray(np.arange(2).reshape(2, 1), coords=[("x", [0, 1]), ("y", [7])])
+b = DataArray(np.arange(6).reshape(2, 3), coords=[("x", [0, 1]), ("y", [0, 1, 2])])
+check("J a(x,y:1) b(x,y:3)", lambda: roundtrip(Dataset({"a": a, "b": b}), ["x"]))
+
+# K. single-dim var b (one stacked entry, NaN) + two-dim a (y:3)
+a3 = DataArray(np.arange(6).reshape(2, 3), coords=[("x", [0, 1]), ("y", [0, 1, 2])])
+b3 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+check("K a(x,y:3) b(x)", lambda: roundtrip(Dataset({"a": a3, "b": b3}), ["x"]))
+
+# L. stacked array where size-1 stacked dim is shared by all vars
+a4 = DataArray(np.arange(2).reshape(2, 1), coords=[("x", [0, 1]), ("y", [7])])
+b4 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+check("L a(x,y:1) b(x) (stacking dim size 1)", lambda: roundtrip(Dataset({"a": a4, "b": b4}), ["x"]))
+
+# M. Scalar-coordinate present on the stacked array
+arr = DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+M = Dataset({"a": arr, "b": arr}, coords={"s": 5})
+check("M with scalar coord", lambda: roundtrip(M, ["x"]))
+
+# N. the docstring example
+arr_d = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+N = xr.Dataset({"a": arr_d, "b": arr_d.isel(y=0)})
+check("N docstring example", lambda: roundtrip(N, ["x"], dim="z"))
+EOF
+python /tmp/edge.py 2>&1
+$ cd . && sed -n 1140,1160p xarray/core/dataarray.py; echo ----; sed -n 324,335p xarray/core/common.py; echo ----; python - << 'EOF'
+import warnings; warnings.filterwarnings("ignore")
+import numpy as np, xarray as xr
+da = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+print(da.squeeze([], drop=True).identical(da))
+EOF
+$ cd . && grep -n "    def squeeze" -A 4 xarray/core/dataarray.py xarray/core/dataset.py | head -20; echo ----; grep -n "Bug fixes" -A 12 doc/whats-new.rst | head -30
+$ cd . && cat > /tmp/battery.py << 'EOF'
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+import pandas as pd
+import xarray as xr
+from xarray import DataArray, Dataset
+
+def run(name, data, sample_dims, dim="z", level=0):
+    try:
+        stacked = data.to_stacked_array(dim, sample_dims=sample_dims)
+        out = stacked.to_unstacked_dataset(dim, level=level)
+        same = data.identical(out)
+        print(f"{name}: identical={same} dims={dict(out.sizes)} coords={sorted(map(str, out.coords))}")
+    except Exception as e:
+        print(f"{name}: ERROR {type(e).__name__}: {str(e)[:80]}")
+
+# 1. MCVE: single-dim variables, 3 samples
+arr = DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+run("1 MCVE single-dim x=3", Dataset({"a": arr, "b": arr}), ["x"], dim="y")
+
+# 2. single-dim variables, sample dim of length 1
+arr1 = DataArray(np.arange(1), coords=[("x", [0])])
+run("2 single-dim x=1", Dataset({"a": arr1, "b": arr1}), ["x"], dim="y")
+
+# 3. single-dim with an extra scalar coordinate
+run("3 single-dim + scalar coord", Dataset({"a": arr, "b": arr}, coords={"s": 5}), ["x"], dim="y")
+
+# 4. single-dim variables without coords on the sample dim
+nc = DataArray(np.arange(3), dims=["x"])
+run("4 single-dim no sample coords", Dataset({"a": nc, "b": nc}), ["x"], dim="y")
+
+# 5. dask-backed single-dim
+import dask.array as da
+run("5 dask single-dim", Dataset({"a": arr.copy(data=da.from_array(np.arange(3), chunks=2)), "b": arr}), ["x"], dim="y")
+
+# 6. existing test: 2-d + one-dim variable
+x = DataArray(pd.Index(np.r_[:10], name="x"))
+yv = DataArray(pd.Index(np.r_[:20], name="y"))
+a6 = x * yv
+b6 = x * yv * yv
+run("6 2-d a + b.isel(y=0)", Dataset({"a": a6, "b": b6.isel(y=0)}), ["x"], dim="features")
+
+# 7. single-dim variables created by isel (scalar y coord left over)
+run("7 a.isel(y=0), b.isel(y=0) scalar y", Dataset({"a": a6.isel(y=0), "b": b6.isel(y=0)}), ["x"], dim="features")
+
+# 8. docstring example
+arr8 = DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+run("8 docstring 2-d + single-dim", Dataset({"a": arr8, "b": arr8.isel(y=0)}), ["x"], dim="z")
+
+# 9. multi-dim variables, sample dim of length 1
+a9 = DataArray(np.arange(3).reshape(1, 3), coords=[("x", [0]), ("y", [0, 1, 2])])
+b9 = DataArray(np.arange(1), coords=[("x", [0])])
+run("9 2-d + single-dim, x=1", Dataset({"a": a9, "b": b9}), ["x"], dim="z")
+
+# 10. stacked dim of length 1 that genuinely belongs to one variable
+a10 = DataArray(np.arange(2).reshape(2, 1), coords=[("x", [0, 1]), ("y", [7])])
+b10 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+run("10 genuine size-1 stacked dim", Dataset({"a": a10, "b": b10}), ["x"], dim="z")
+
+# 11. three stacked dims
+x11 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+y11 = DataArray(np.arange(3), coords=[("y", [0, 1, 2])])
+w11 = DataArray(np.arange(2), coords=[("w", [0, 1])])
+run("11 3-level mixed", Dataset({"a": x11 * y11 * w11, "b": x11}), ["x"], dim="z")
+
+# 12. two-level, scalar coord present
+a12 = DataArray(np.arange(6).reshape(2, 3), coords=[("x", [0, 1]), ("y", [0, 1, 2])])
+b12 = DataArray(np.arange(2), coords=[("x", [0, 1])])
+run("12 2-level + scalar coord", Dataset({"a": a12, "b": b12}, coords={"s": 5}), ["x"], dim="z")
+
+# 13. single-dim variables, one sample (x selected away)
+run("13 single-dim, sample dim removed", Dataset({"a": arr, "b": arr}).isel(x=0), [], dim="y")
+
+# 14. the level=1 selection on a 2-level stack
+st = Dataset({"a": a12, "b": b12}).to_stacked_array("z", ["x"])
+try:
+    print("14 level=1 dims:", dict(st.to_unstacked_dataset("z", level=1).sizes))
+except Exception as e:
+    print("14 level=1 ERROR", type(e).__name__, str(e)[:80])
+
+# 15. not-a-stacked-coordinate error
+try:
+    arr.to_unstacked_dataset("x")
+except Exception as e:
+    print("15 error:", type(e).__name__, str(e)[:80])
+EOF
+python /tmp/battery.py 2>&1 | tee /tmp/baseline.txt
+finished without a summary

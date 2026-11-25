@@ -1,0 +1,229 @@
+$ pwd && ls -la && ls -la /app 2>/dev/null
+$ cd /app && head -50 graphene.dat && echo "..." && tail -20 graphene.dat && echo && wc -l graphene.dat && file graphene.dat
+$ cd /app && which python3 python; python3 --version; python3 -c "import numpy, scipy; print('numpy', numpy.__version__, 'scipy', scipy.__version__)"; python3 -c "import matplotlib; print('mpl', matplotlib.__version__)"; python3 -c "import lmfit; print('lmfit', lmfit.__version__)"; pip list 2>/dev/null | head -50
+$ cd /app && timeout 180 pip install numpy scipy 2>&1 | tail -5
+$ cd /app && python3 -c "
+import numpy as np
+raw = open('graphene.dat').read()
+print('tabs:', raw.count('\t'), 'commas:', raw.count(','), 'lines:', raw.count('\n'))
+print('non-standard chars:', set(c for c in raw if not (c.isdigit() or c in ',\t\n-.')))
+lines = [l for l in raw.splitlines() if l.strip()]
+data = np.array([[float(v.replace(',', '.')) for v in l.split('\t')] for l in lines])
+x, y = data[:,0], data[:,1]
+print('N =', len(x))
+print('x range:', x.min(), x.max(), 'monotonic decreasing:', np.all(np.diff(x) < 0))
+print('y range:', y.min(), y.max())
+dx = -np.diff(x)
+for i in [0,1,2,10,100,500,1000,1500,2000,2500,3000,3500,3562]:
+    print(f'i={i:5d} x={x[i]:12.4f} dx={dx[i]:10.5f}  y={y[i]:10.2f}')
+"
+
+$ cd /app && python3 -c "
+import numpy as np
+from scipy.signal import find_peaks, savgol_filter
+data = np.loadtxt('graphene.dat', converters=lambda s: float(s.replace(',', '.')) if isinstance(s,str) else float(s.decode().replace(',', '.')))
+x, y = data[:,0], data[:,1]
+# sort ascending
+o = np.argsort(x); x, y = x[o], y[o]
+ys = savgol_filter(y, 21, 3)
+pk, props = find_peaks(ys, prominence=1500)
+print('Prominent peaks (smoothed):')
+for p, pr in sorted(zip(pk, props['prominences']), key=lambda t: -t[1])[:15]:
+    print(f'  idx={p:5d} x={x[p]:10.3f} y={y[p]:10.1f} ys={ys[p]:10.1f} prominence={pr:9.1f}')
+print('Global max:', x[np.argmax(y)], y.max())
+"
+
+$ cd /app && python3 -c "
+import numpy as np
+lines = [l for l in open('graphene.dat').read().splitlines() if l.strip()]
+d = np.array([[float(v.replace(',', '.')) for v in l.split('\t')] for l in lines])
+x, y = d[:,0], d[:,1]
+nu = 1e7/x   # hypothesised Raman shift in cm^-1
+print('Raman shift range: %.2f .. %.2f cm^-1' % (nu.min(), nu.max()))
+dnu = np.diff(nu)
+print('d(nu) per pixel: first %.4f, middle %.4f, last %.4f' % (dnu[0], dnu[len(dnu)//2], dnu[-1]))
+# A grating CCD is ~linear in absolute wavelength. If nu = nuL - 1e7/lambda with lambda linear in pixel,
+# then 1/(nuL - nu) should be linear in pixel index for the right laser wavenumber nuL.
+i = np.arange(len(nu))
+best=None
+for lamL in np.arange(400, 800, 0.5):
+    nuL = 1e7/lamL
+    if np.any(nuL - nu <= 0): continue
+    lam = 1e7/(nuL - nu)
+    c = np.polyfit(i, lam, 1); r = lam - np.polyval(c, i)
+    rms = np.sqrt(np.mean(r**2))
+    if best is None or rms < best[0]: best=(rms, lamL, c)
+print('Best laser wavelength for linear-in-lambda pixel axis: %.1f nm (rms dev %.4f nm, dispersion %.5f nm/px)' % (best[1], best[0], best[2][0]))
+# Also check: is the d(nu) jumpy (stitching)?
+dd = np.diff(dnu)
+print('max relative jump in spacing:', np.max(np.abs(dd/dnu[1:])))
+"
+
+$ mkdir -p /tmp/work && cat > /tmp/work/load.py << 'EOF'
+import numpy as np
+
+def load(path='/app/graphene.dat'):
+    """Load the Raman file: tab-separated, comma decimal separator.
+    Column 0 is 1e7/(Raman shift) -> convert to Raman shift in cm^-1."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            a, b = line.split('\t')
+            rows.append((float(a.replace(',', '.')), float(b.replace(',', '.'))))
+    d = np.array(rows)
+    shift = 1e7 / d[:, 0]
+    inten = d[:, 1]
+    o = np.argsort(shift)
+    return shift[o], inten[o]
+EOF
+cd /tmp/work && python3 -c "
+from load import load
+import numpy as np
+x, y = load()
+def show(lo, hi, step=1):
+    m = (x>=lo)&(x<=hi)
+    idx = np.where(m)[0]
+    for i in idx[::step]:
+        bar = '#'*int(max(0,(y[i]-0))/400)
+        print(f'{x[i]:9.2f} {y[i]:9.1f} {bar}')
+print('=== 1200-1800 (every 4th pt) ===')
+show(1200, 1800, 4)
+"
+
+$ cd /tmp/work && python3 -c "
+from load import load
+import numpy as np
+x, y = load()
+def show(lo, hi, step=1, scale=400):
+    m = (x>=lo)&(x<=hi)
+    idx = np.where(m)[0]
+    for i in idx[::step]:
+        bar = '#'*int(max(0,y[i])/scale)
+        print(f'{x[i]:9.2f} {y[i]:9.1f} {bar}')
+print('=== 2300-3100 (every 6th pt) ===')
+show(2300, 3100, 6)
+"
+
+$ cd /tmp/work && python3 -c "
+from load import load
+import numpy as np
+x, y = load()
+print('Coarse overview of whole spectrum (binned means):')
+edges = np.arange(200, 6100, 150)
+for lo in edges:
+    m = (x>=lo)&(x<lo+150)
+    if m.sum()==0: continue
+    print(f'{lo:6.0f}-{lo+150:6.0f}  n={m.sum():4d}  mean={y[m].mean():9.1f}  max={y[m].max():9.1f}  ' + '#'*int(y[m].mean()/600))
+# Noise estimate in a flat-ish region via point-to-point differences
+for lo,hi in [(1400,1520),(1650,1800),(2400,2580),(2800,2950)]:
+    m=(x>=lo)&(x<=hi)
+    d=np.diff(y[m]); print(f'noise est {lo}-{hi}: sigma ~ {np.std(d)/np.sqrt(2):.1f}, pt spacing ~ {np.mean(np.diff(x[m])):.3f} cm^-1')
+"
+
+> write /tmp/work/fit.py
+$ cd /tmp/work && python3 fit.py
+$ cd /tmp/work && python3 -c "
+from load import load
+from fit import lorentzian, fit_peak
+import numpy as np
+x, y = load()
+for name, lo, hi, g in [('G', 1500, 1700, 1580), ('2D', 2550, 2800, 2670)]:
+    popt, perr, resid, xs, ys = fit_peak(x, y, lo, hi, g)
+    print(f'=== {name} residuals (data - fit), every point; scale 1 char = 100 counts ===')
+    for xi, yi, ri in zip(xs, ys, resid):
+        if abs(xi-popt[0]) < 80:
+            bar = ('+'*int(ri/100)) if ri>0 else ('-'*int(-ri/100))
+            print(f'{xi:9.2f} y={yi:9.1f} fit={yi-ri:9.1f} res={ri:8.1f} {bar}')
+" 2>&1 | head -120
+
+$ cd /tmp/work && python3 -c "
+from load import load
+from fit import lorentzian
+import numpy as np
+from scipy.optimize import curve_fit
+x, y = load()
+def fit(lo, hi, x0g):
+    m=(x>=lo)&(x<=hi); xs, ys = x[m], y[m]
+    off0=np.median(np.r_[ys[:8], ys[-8:]]); 
+    p,c=curve_fit(lorentzian, xs, ys, p0=[x0g, 10, ys.max()-off0, off0], maxfev=20000)
+    p[1]=abs(p[1]); return p, np.sqrt(np.diag(c)), m.sum()
+print('G peak: Lorentzian + constant, symmetric windows around 1580')
+for hw in [30,40,50,60,80,100,120,150,200]:
+    p,e,n=fit(1580-hw,1580+hw,1580)
+    print(f'  +/-{hw:3d}: n={n:3d} x0={p[0]:8.3f} gamma={p[1]:6.3f} amp={p[2]:8.1f} off={p[3]:7.1f}')
+print('2D peak: Lorentzian + constant, symmetric windows around 2670')
+for hw in [50,70,100,130,150,200,250,300]:
+    p,e,n=fit(2670-hw,2670+hw,2670)
+    print(f'  +/-{hw:3d}: n={n:3d} x0={p[0]:8.3f} gamma={p[1]:6.3f} amp={p[2]:8.1f} off={p[3]:7.1f}')
+"
+
+$ cd /tmp/work && python3 -c "
+from load import load
+from fit import lorentzian
+import numpy as np
+from scipy.optimize import curve_fit
+x, y = load()
+m=(x>=470)&(x<=570); xs,ys=x[m],y[m]
+p,c=curve_fit(lorentzian, xs, ys, p0=[520,4,60000,15000])
+print('Si peak: x0=%.2f cm^-1, HWHM=%.2f (literature: 520.7 cm^-1) -> axis conversion 1e7/x confirmed' % (p[0], abs(p[1])))
+m=(x>=900)&(x<=1050); i=np.argmax(y[m]); print('Si 2nd-order (2TO) max near %.1f cm^-1 (literature ~960-980)' % x[m][i])
+# D-peak (~1340) and D' (~1620) check: compare local means with neighbouring baseline
+def mean(lo,hi): mm=(x>=lo)&(x<=hi); return y[mm].mean()
+print('D region  1320-1360 mean %.0f vs neighbours 1280-1310 %.0f / 1370-1400 %.0f' % (mean(1320,1360), mean(1280,1310), mean(1370,1400)))
+print(\"D' region 1610-1630 mean %.0f vs neighbours 1600-1608 %.0f / 1635-1660 %.0f\" % (mean(1610,1630), mean(1600,1608), mean(1635,1660)))
+"
+
+$ cd /tmp/work && python3 -c "
+from load import load
+from fit import lorentzian
+import numpy as np
+from scipy.optimize import curve_fit
+x, y = load()
+def fit(lo, hi, x0g):
+    m=(x>=lo)&(x<=hi); xs, ys = x[m], y[m]
+    off0=np.median(np.r_[ys[:8], ys[-8:]])
+    p,c=curve_fit(lorentzian, xs, ys, p0=[x0g, 10, ys.max()-off0, off0], maxfev=20000)
+    p[1]=abs(p[1]); return p
+print('G: constant-offset Lorentzian, many plausible windows')
+res=[]
+for lo in [1450,1480,1500,1520,1530,1550]:
+    for hi in [1610,1630,1650,1680,1700,1750]:
+        p=fit(lo,hi,1580); res.append(p)
+        print(f'  [{lo},{hi}] x0={p[0]:8.3f} g={p[1]:6.3f} A={p[2]:8.1f} off={p[3]:7.1f}')
+r=np.array(res); print('  median:', np.round(np.median(r,0),3), ' min:', np.round(r.min(0),3), ' max:', np.round(r.max(0),3))
+print('2D: constant-offset Lorentzian, many plausible windows')
+res=[]
+for lo in [2450,2500,2550,2580,2600,2620]:
+    for hi in [2720,2750,2780,2800,2850,2900]:
+        p=fit(lo,hi,2670); res.append(p)
+        print(f'  [{lo},{hi}] x0={p[0]:8.3f} g={p[1]:6.3f} A={p[2]:8.1f} off={p[3]:7.1f}')
+r=np.array(res); print('  median:', np.round(np.median(r,0),3), ' min:', np.round(r.min(0),3), ' max:', np.round(r.max(0),3))
+"
+
+$ cd /tmp/work && python3 -c "
+from load import load
+import numpy as np
+from scipy.optimize import curve_fit
+x, y = load()
+def lor_lin(x, x0, g, A, c0, c1, xc):
+    return A*g**2/((x-x0)**2+g**2) + c0 + c1*(x-xc)
+def fit_lin(lo, hi, x0g):
+    m=(x>=lo)&(x<=hi); xs, ys = x[m], y[m]
+    f=lambda xx,x0,g,A,c0,c1: lor_lin(xx,x0,g,A,c0,c1,x0g)
+    p,c=curve_fit(f, xs, ys, p0=[x0g,10,ys.max()-ys.min(),ys.min(),0], maxfev=20000)
+    p[1]=abs(p[1])
+    r = ys - f(xs,*p)
+    # background evaluated at fitted x0
+    bg = p[3] + p[4]*(p[0]-x0g)
+    return p, bg, r.std(), m.sum()
+print('Lorentzian + LINEAR background (offset reported as background level at x0):')
+for name, g, wins in [('G',1580,[(1450,1700),(1480,1680),(1500,1700),(1500,1650),(1520,1640),(1400,1750)]),
+                      ('2D',2670,[(2500,2900),(2550,2800),(2600,2800),(2450,2850),(2400,2950),(2580,2760)])]:
+    for lo,hi in wins:
+        p,bg,rs,n=fit_lin(lo,hi,g)
+        print(f'  {name:2s} [{lo},{hi}] n={n:3d} x0={p[0]:8.3f} gamma={p[1]:6.3f} amp={p[2]:8.1f} bg@x0={bg:7.1f} slope={p[4]:7.3f} resid_rms={rs:6.1f}')
+"
+

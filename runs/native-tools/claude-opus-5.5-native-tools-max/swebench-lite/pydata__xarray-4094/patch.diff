@@ -1,0 +1,59 @@
+diff --git a/doc/whats-new.rst b/doc/whats-new.rst
+index c1440ec1..9de0fb3d 100755
+--- a/doc/whats-new.rst
++++ b/doc/whats-new.rst
+@@ -116,6 +116,8 @@ New Features
+ 
+ Bug fixes
+ ~~~~~~~~~
++- Fix :py:meth:`DataArray.to_unstacked_dataset` for single-dimension variables,
++  i.e. when the stacked coordinate is a single-level MultiIndex. (:issue:`4049`)
+ - Fix errors combining attrs in :py:func:`open_mfdataset` (:issue:`4009`, :pull:`4173`)
+   By `John Omotani <https://github.com/johnomotani>`_
+ - If groupby receives a ``DataArray`` with name=None, assign a default name (:issue:`158`)
+diff --git a/xarray/core/dataarray.py b/xarray/core/dataarray.py
+index b0df8749..b2d88b77 100755
+--- a/xarray/core/dataarray.py
++++ b/xarray/core/dataarray.py
+@@ -1961,7 +1961,12 @@ class DataArray(AbstractArray, DataWithCoords):
+         # pull variables out of datarray
+         data_dict = {}
+         for k in variables:
+-            data_dict[k] = self.sel({variable_dim: k}).squeeze(drop=True)
++            # drop=True is needed for single-level MultiIndexes (i.e. when all
++            # stacked variables only had the sample dims): selecting a label
++            # then results in a scalar indexer, and the leftover scalar ``dim``
++            # coordinate would differ between variables and conflict when
++            # merging them into a Dataset (GH4049)
++            data_dict[k] = self.sel({variable_dim: k}, drop=True).squeeze(drop=True)
+ 
+         # unstacked dataset
+         return Dataset(data_dict)
+diff --git a/xarray/tests/test_dataset.py b/xarray/tests/test_dataset.py
+index 9c8d4072..9f37d6f3 100755
+--- a/xarray/tests/test_dataset.py
++++ b/xarray/tests/test_dataset.py
+@@ -3045,6 +3045,23 @@ class TestDataset:
+         d0 = D.isel(x=0)
+         assert_identical(d0, x0)
+ 
++    def test_to_stacked_array_to_unstacked_dataset_single_dim(self):
++        # GH4049: roundtrip when all variables only have the sample dims,
++        # i.e. the stacked coordinate is a single-level MultiIndex
++        arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
++        D = xr.Dataset({"a": arr, "b": arr * 2})
++        sample_dims = ["x"]
++        y = D.to_stacked_array("features", sample_dims)
++        assert y.indexes["features"].nlevels == 1
++
++        x = y.to_unstacked_dataset("features")
++        assert_identical(D, x)
++
++        # test on just one sample
++        x0 = y[0].to_unstacked_dataset("features")
++        d0 = D.isel(x=0)
++        assert_identical(d0, x0)
++
+     def test_to_stacked_array_to_unstacked_dataset_different_dimension(self):
+         # test when variables have different dimensionality
+         a, b = create_test_stacked_array()

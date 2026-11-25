@@ -1,0 +1,287 @@
+$ cd /app 2>/dev/null && pwd; echo "---"; ls -la /app 2>/dev/null; echo "---"; ls -la; echo "---"; find / -xdev \( -iname "*raman*" -o -iname "*graphene*" -o -iname "*.txt" -o -iname "*.csv" -o -iname "*.dat" \) 2>/dev/null | grep -v -E "^/(proc|sys|usr/share|usr/lib|etc)" | head -100
+$ cd /app && file graphene.dat; echo "---HEAD---"; head -n 60 graphene.dat; echo "---TAIL---"; tail -n 30 graphene.dat; echo "---LINES---"; wc -l graphene.dat
+$ cd /app && python3 -c "
+import numpy as np
+rows=[]
+bad=0
+with open('graphene.dat') as f:
+    for i,line in enumerate(f):
+        line=line.strip()
+        if not line: continue
+        parts=line.split('\t')
+        if len(parts)!=2:
+            bad+=1
+            if bad<10: print('BAD line',i+1,repr(line))
+            continue
+        try:
+            x=float(parts[0].replace(',','.')); y=float(parts[1].replace(',','.'))
+            rows.append((x,y))
+        except Exception as e:
+            bad+=1
+            if bad<10: print('ERR',i+1,repr(line),e)
+a=np.array(rows)
+print('parsed',a.shape,'bad',bad)
+x,y=a[:,0],a[:,1]
+print('x min/max',x.min(),x.max())
+print('y min/max',y.min(),y.max())
+d=np.diff(x)
+print('diff: min',d.min(),'max',d.max(),'n_pos',(d>0).sum(),'n_neg',(d<0).sum())
+# find sign changes in diff to detect segments
+s=np.sign(d)
+changes=np.where(np.diff(s)!=0)[0]
+print('num sign changes in x-diff',len(changes))
+for c in changes[:20]: print(c, x[c], x[c+1], x[c+2])
+"
+
+$ cd /app && which python3 pip pip3; python3 --version; python3 -c "import scipy" 2>&1; python3 -c "import matplotlib" 2>&1; pip3 list 2>/dev/null | head -50; echo "---try install---"; timeout 170 pip3 install numpy scipy 2>&1 | tail -5
+$ cd /app && cat > /tmp/load.py << 'EOF'
+import numpy as np
+
+def load(path='/app/graphene.dat'):
+    rows = []
+    bad = []
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for i, line in enumerate(f, 1):
+            s = line.strip()
+            if not s:
+                continue
+            parts = s.split('\t')
+            if len(parts) != 2:
+                bad.append((i, s))
+                continue
+            try:
+                x = float(parts[0].replace(',', '.'))
+                y = float(parts[1].replace(',', '.'))
+                rows.append((x, y))
+            except ValueError:
+                bad.append((i, s))
+    return np.array(rows), bad
+EOF
+python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+a,bad=load()
+print('parsed',a.shape,'bad',len(bad))
+for b in bad[:10]: print('BAD',b)
+x,y=a[:,0],a[:,1]
+print('x min/max',x.min(),x.max())
+print('y min/max',y.min(),y.max())
+d=np.diff(x)
+print('diff: min',d.min(),'max',d.max(),'n_pos',(d>0).sum(),'n_neg',(d<0).sum(),'n_zero',(d==0).sum())
+s=np.sign(d)
+changes=np.where(np.diff(s)!=0)[0]
+print('num sign changes in x-diff',len(changes))
+for c in changes[:20]: print(c, x[c], x[c+1], x[c+2])
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+a,_=load()
+x,y=a[:,0],a[:,1]
+d=-np.diff(x)  # positive spacing
+idx=np.arange(len(x))
+# spacing vs index
+for i in [0,1,2,5,10,50,100,200,400,800,1200,1600,2000,2400,2800,3000,3200,3400,3500,3563]:
+    if i<len(d): print('idx',i,'x',round(x[i],3),'spacing',round(d[i],4))
+print()
+# is spacing smooth? check against polynomial fits of x vs index
+for deg in [1,2,3,4,5,6]:
+    p=np.polyfit(idx,x,deg)
+    r=x-np.polyval(p,idx)
+    print('deg',deg,'rms resid',np.sqrt(np.mean(r**2)).round(4),'max',np.abs(r).max().round(4))
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+from scipy.signal import find_peaks
+a,_=load()
+x,y=a[:,0],a[:,1]
+# sort ascending by x for peak finding
+o=np.argsort(x); xs=x[o]; ys=y[o]
+print('ascending x range',xs[0],xs[-1])
+pk,props=find_peaks(ys,prominence=200)
+print('num peaks prominence>200:',len(pk))
+for p,pr in zip(pk,props['prominences']):
+    print('x=%.3f  y=%.3f  prom=%.1f' % (xs[p],ys[p],pr))
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+a,_=load()
+o=np.argsort(a[:,0]); x=a[o,0]; y=a[o,1]
+# ascii plot: log-spaced x bins
+edges=np.geomspace(x.min(), x.max(), 81)
+H=20
+cols=[]
+for i in range(80):
+    m=(x>=edges[i])&(x<edges[i+1])
+    cols.append(np.median(y[m]) if m.any() else np.nan)
+cols=np.array(cols)
+mx=np.nanmax(cols)
+for r in range(H,0,-1):
+    thr=mx*r/H
+    line=''.join('#' if (not np.isnan(c) and c>=thr) else ' ' for c in cols)
+    print('%6d |%s' % (int(thr), line))
+print('       +'+'-'*80)
+ticks=''
+print('x from %.0f to %.0f (log bins)' % (x.min(), x.max()))
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+from scipy.optimize import brentq
+a,_=load()
+x=a[:,0]; n=np.arange(len(x))
+# test: is 1/(x-c) linear in index for some c?  (uniform wavelength sampling -> wavenumber)
+def r2_lin(v):
+    p=np.polyfit(n,v,1); r=v-np.polyval(p,n)
+    return 1-np.sum(r**2)/np.sum((v-v.mean())**2)
+print('R2 of x linear in index:', round(r2_lin(x),6))
+print('R2 of 1/x linear in index:', round(r2_lin(1/x),8))
+best=None
+for c in np.linspace(-20000,1600,400):
+    if np.any(x-c==0): continue
+    r=r2_lin(1/(x-c))
+    if best is None or r>best[1]: best=(c,r)
+print('best c for 1/(x-c) linear:',best)
+# test: log(x) linear in index (geometric sampling)
+print('R2 of log x linear in index:', round(r2_lin(np.log(x)),8))
+# spacing vs x power law
+o=np.argsort(x); xs=x[o]; d=np.gradient(xs)
+m=(xs>3000)&(xs<40000)
+p=np.polyfit(np.log(xs[m]),np.log(np.abs(d[m])),1)
+print('spacing ~ x^%.3f'%p[0])
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+from scipy.optimize import minimize_scalar
+a,_=load()
+x=a[:,0]; n=np.arange(len(x)).astype(float)
+def r2_lin(v):
+    p=np.polyfit(n,v,1); r=v-np.polyval(p,n)
+    return 1-np.sum(r**2)/np.sum((v-v.mean())**2)
+# broad scan over c
+cs=np.concatenate([np.linspace(-200000,-20000,2000),np.linspace(-20000,1648,20000),np.linspace(1649.5,60000,20000),np.linspace(60000,200000,2000)])
+best=(None,-1)
+vals=[]
+for c in cs:
+    d=x-c
+    if np.any(d==0): continue
+    r=r2_lin(1/d)
+    vals.append((r,c))
+    if r>best[1]: best=(c,r)
+print('coarse best c',best)
+vals.sort(reverse=True)
+print('top 10 candidates (R2, c):')
+for v in vals[:10]: print('  %.10f  %.3f'%(v[0],v[1]))
+"
+
+$ cd /app && python3 -c "
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+a,_=load()
+o=np.argsort(a[:,0]); x=a[o,0]; y=a[o,1]
+for c in [3745.053, 6329.372, 10289.94, 16245.58, 19139.54, 33244.97]:
+    i=np.argmin(np.abs(x-c))
+    lo=max(0,i-12); hi=min(len(x),i+13)
+    print('--- around x=%.1f (idx %d) ---'%(c,i))
+    for j in range(lo,hi):
+        print('  %5d  x=%12.3f  dx=%9.4f  y=%12.3f'%(j,x[j],(x[j]-x[j-1]) if j>0 else 0,y[j]))
+"
+
+$ cd /app && cat > /tmp/axis_test.py << 'EOF'
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+from scipy.optimize import least_squares
+a,_=load()
+x=a[:,0]; n=np.arange(len(x)).astype(float)
+N=len(x)
+
+def rep(name, res):
+    rms=np.sqrt(np.mean(res**2))
+    print('%-45s rms=%.6g max=%.6g' % (name, rms, np.max(np.abs(res))))
+
+# 1) x = c + 1/(a + b*i)
+def f1(p,i): return p[0] + 1.0/(p[1]+p[2]*i)
+r=least_squares(lambda p: f1(p,n)-x, [679,1e-3,1e-6], x_scale='jac', max_nfev=20000)
+rep('x = c + 1/(a+b*i)', r.fun); print('   params',r.x)
+
+# 2) x = c + 1/(a + b*i + d*i^2)
+def f2(p,i): return p[0] + 1.0/(p[1]+p[2]*i+p[3]*i*i)
+p0=[r.x[0], r.x[1], r.x[2], 0.0]
+r2=least_squares(lambda p: f2(p,n)-x, p0, x_scale='jac', max_nfev=50000)
+rep('x = c + 1/(a+b*i+d*i^2)', r2.fun); print('   params',r2.x)
+
+# 3) x = c + a*exp(b*i)
+def f3(p,i): return p[0] + p[1]*np.exp(p[2]*i)
+r3=least_squares(lambda p: f3(p,n)-x, [0, x[0]/np.exp(0)*0+1, -0.002], x_scale='jac', max_nfev=50000)
+rep('x = c + a*exp(b*i)', r3.fun); print('   params',r3.x)
+
+# 4) log-linear in index after subtracting offset
+for c in [0, 679.2, -1000]:
+    v=np.log(x-c)
+    p=np.polyfit(n,v,1); res=v-np.polyval(p,n)
+    rep('log(x-%g) linear in i' % c, res*np.exp(0))
+EOF
+python3 /tmp/axis_test.py
+$ cd /app && cat > /tmp/analyze.py << 'EOF'
+import sys; sys.path.insert(0,'/tmp')
+from load import load
+import numpy as np
+from scipy.signal import find_peaks, peak_widths
+a,_=load()
+o=np.argsort(a[:,0]); x=a[o,0]; y=a[o,1]
+idx=np.arange(len(x))
+
+def noise_at(i0,i1):
+    d2=np.diff(y[i0:i1],2)
+    return np.median(np.abs(d2))/0.6745/np.sqrt(6)
+
+print('local noise estimates (sigma from 2nd differences):')
+for lo,hi in [(0,300),(300,1000),(1000,2000),(2000,3000),(3000,3500),(3500,3565)]:
+    print('  idx %5d-%5d  x %9.1f..%9.1f  sigma~%.1f' % (lo,hi,x[lo],x[hi-1],noise_at(lo,hi)))
+
+pk,pr=find_peaks(y,prominence=800)
+w=peak_widths(y,pk,rel_height=0.5)
+print('\npeaks with prominence>=800 (FWHM via peak_widths, mapped to x):')
+for k,p in enumerate(pk):
+    xl=np.interp(w[2][k],idx,x); xr=np.interp(w[3][k],idx,x)
+    print('x=%10.2f  y=%10.1f  prom=%9.1f  FWHM=%9.2f  bases x=[%.1f, %.1f]' % (
+        x[p], y[p], pr['prominences'][k], abs(xr-xl),
+        x[pr['left_bases'][k]], x[pr['right_bases'][k]]))
+
+def ascii_plot(lo,hi,ncol=100,H=18):
+    m=(x>=lo)&(x<=hi)
+    edges=np.linspace(lo,hi,ncol+1)
+    cols=[]
+    for i in range(ncol):
+        mm=m&(x>=edges[i])&(x<edges[i+1])
+        cols.append(np.max(y[mm]) if mm.any() else np.nan)
+    cols=np.array(cols)
+    vmin=np.nanmin(cols); vmax=np.nanmax(cols)
+    print('\nlinear-x plot  x in [%.0f, %.0f], column max, y in [%.0f, %.0f]' % (lo,hi,vmin,vmax))
+    for r in range(H,0,-1):
+        thr=vmin+(vmax-vmin)*(r-0.5)/H
+        line=''.join('#' if (not np.isnan(c) and c>=thr) else ' ' for c in cols)
+        print('%7d |%s' % (int(thr), line))
+    print('        +'+'-'*ncol)
+
+ascii_plot(1600, 8000)
+ascii_plot(8000, 48000)
+EOF
+python3 /tmp/analyze.py
+finished without a summary

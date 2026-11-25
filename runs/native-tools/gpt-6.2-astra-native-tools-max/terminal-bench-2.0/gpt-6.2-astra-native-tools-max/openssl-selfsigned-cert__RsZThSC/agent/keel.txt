@@ -1,0 +1,53 @@
+$ pwd && ls -la && ls -ld /app /app/ssl /app/check_cert.py 2>/dev/null; if [ -d /app/ssl ]; then ls -la /app/ssl; fi
+$ command -v openssl && openssl version && command -v python3 && python3 --version && id
+$ set -eu
+umask 077
+install -d -m 0755 /app/ssl
+cd /app/ssl
+openssl genrsa -out server.key 2048
+openssl req -new -x509 -config /dev/null -sha256 -days 365 -key server.key \
+  -subj '/O=DevOps Team/CN=dev-internal.company.local' \
+  -addext 'subjectAltName=DNS:dev-internal.company.local' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth' \
+  -out server.crt
+cat server.key server.crt > server.pem
+openssl x509 -in server.crt -noout -subject -nameopt RFC2253 -dates -sha256 -fingerprint > verification.txt
+chmod 0600 server.key server.pem
+chmod 0644 server.crt verification.txt
+cat verification.txt
+$ openssl x509 -in /app/ssl/server.crt -noout -subject -nameopt sep_multiline,sname,utf8,esc_ctrl -enddate -dateopt iso_8601 && openssl verify -check_ss_sig -purpose sslserver -verify_hostname dev-internal.company.local -CAfile /app/ssl/server.crt /app/ssl/server.crt
+$ python3 -c 'import importlib.util; print(importlib.util.find_spec("cryptography"))' && date -u
+> write /app/check_cert.py
+$ set -eu
+chmod 0755 /app/check_cert.py
+cd / && /app/check_cert.py
+stat -c '%a %n' /app/ssl /app/ssl/* /app/check_cert.py
+$ set -eu
+cd /app/ssl
+openssl rsa -in server.key -check -noout
+openssl x509 -in server.crt -noout -text | grep -E 'Public Key Algorithm|Public-Key:|Issuer:|Subject:|DNS:'
+cmp <(openssl pkey -in server.key -pubout) <(openssl x509 -in server.crt -pubkey -noout)
+cmp server.pem <(cat server.key server.crt)
+cmp verification.txt <(openssl x509 -in server.crt -noout -subject -nameopt RFC2253 -dates -sha256 -fingerprint)
+python3 - <<'PY'
+from pathlib import Path
+from ssl import cert_time_to_seconds
+fields = dict(line.split('=', 1) for line in Path('verification.txt').read_text().splitlines())
+assert cert_time_to_seconds(fields['notAfter']) - cert_time_to_seconds(fields['notBefore']) == 365 * 86400
+print('Key, certificate, validity period, bundle and verification report checked.')
+PY
+$ set -eu
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cp /app/check_cert.py "$tmp/"
+mkdir "$tmp/ssl"
+if python3 "$tmp/check_cert.py" >"$tmp/output" 2>&1; then exit 1; fi
+grep -F 'Certificate not found' "$tmp/output"
+printf '%s\n' 'not a certificate' > "$tmp/ssl/server.crt"
+if python3 "$tmp/check_cert.py" >"$tmp/output" 2>&1; then exit 1; fi
+grep -F 'Certificate verification failed' "$tmp/output"
+Created and verified a 365-day self-signed TLS certificate for `dev-internal.company.local`. The certificate, 2048-bit RSA key, combined PEM, and verification report are in `/app/ssl/`. Both files containing the private key have `0600` permissions.
+
+`/app/check_cert.py` reported `Certificate verification successful` and confirmed the expiration date is `2027-11-25`.

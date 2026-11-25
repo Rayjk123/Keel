@@ -1,0 +1,240 @@
+$ cd . && pwd && ls && git log --oneline | head -5 && git status | head -20
+$ cd . && python --version && cat sympy/release.py
+$ cd . && cat sympy/core/sympify.py
+> read /testbed/sympy/core/sympify.py
+$ cd /testbed && grep -n "_sympify\|sympify" sympy/core/basic.py | head -50
+$ cd /testbed && grep -n "def __eq__\|def __ne__" -r sympy --include=*.py | grep -v "/tests/" | head -100
+$ cd /testbed && sed -n 285,365p sympy/core/basic.py
+$ cd /testbed && sed -n 100,170p sympy/core/expr.py
+$ cd /testbed && cat > /tmp/repro.py <<'EOF'
+import sympy
+
+class C:
+    def __repr__(self):
+        return 'x.y'
+
+try:
+    r = sympy.Symbol('x') == C()
+    print("Case 1 (x.y): result =", r)
+except Exception as e:
+    print("Case 1 (x.y): raised", type(e).__name__, e)
+
+class D:
+    def __repr__(self):
+        return 'x'
+
+print("Case 2 (x): Symbol('x') == D() ->", sympy.Symbol('x') == D())
+print("Case 2 (x): Symbol('x') != D() ->", sympy.Symbol('x') != D())
+EOF
+python /tmp/repro.py
+$ cd /testbed && sed -n 760,780p sympy/core/numbers.py; echo -----; sed -n 1385,1425p sympy/core/numbers.py; echo -----; sed -n 1860,1920p sympy/core/numbers.py
+$ cd /testbed && sed -n 2235,2260p sympy/core/numbers.py; echo -----; sed -n 2940,2955p sympy/core/numbers.py; echo -----; sed -n 3100,3115p sympy/core/numbers.py; echo -----; sed -n 3232,3250p sympy/core/numbers.py; echo -----; sed -n 3355,3380p sympy/core/numbers.py
+$ cd /testbed && python - <<'EOF'
+import ast, sys, os
+
+# Find every __eq__/__ne__ (and rich comparison) method which calls sympify (non-strict) or S()/parse_expr
+targets = {'__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__'}
+hits = []
+for root, dirs, files in os.walk('sympy'):
+    for f in files:
+        if not f.endswith('.py'):
+            continue
+        p = os.path.join(root, f)
+        try:
+            src = open(p).read()
+            tree = ast.parse(src)
+        except Exception as e:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in targets:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Call):
+                        fn = sub.func
+                        name = None
+                        if isinstance(fn, ast.Name):
+                            name = fn.id
+                        elif isinstance(fn, ast.Attribute):
+                            name = fn.attr
+                        if name in ('sympify', 'S', 'parse_expr', 'eval', 'simplify', 'Rational', 'Integer', 'Float', 'nsimplify'):
+                            hits.append((p, node.lineno, node.name, name, sub.lineno))
+for h in hits:
+    print(h)
+EOF
+$ cd /testbed && sed -n 30,75p sympy/matrices/dense.py
+$ cd /testbed && sed -n 85,125p sympy/core/containers.py; echo ------; sed -n 270,300p sympy/core/containers.py
+$ cd /testbed && sed -n 170,225p sympy/combinatorics/partitions.py
+$ cd /testbed && nproc && python -c "import pytest; print('pytest', pytest.__version__)"; python -c "import xdist; print('xdist', xdist.__version__)" 2>&1 | tail -1; python -c "import numpy; print('numpy', numpy.__version__)" 2>&1 | tail -1; python -c "import mpmath; print('mpmath', mpmath.__version__)"; cat pytest.ini; ls bin | head -30
+$ cd /testbed && grep -n "def sympify_matrix\|sympify_converter\|converter\[" -r sympy --include=*.py | grep -v "/tests/" | head -40
+$ cd /testbed && timeout 600 python bin/test sympy/core/tests/test_eq_hash.py sympy/core/tests/test_sympify.py 2>&1 | tail -30
+$ cd /testbed && python bin/test --help 2>&1 | head -60
+$ cd /testbed && cat bin/test | head -40; git status --short | head
+$ cd /testbed && mkdir -p /tmp/baseline && (time timeout 3000 python bin/test sympy/core --no-subprocess > /tmp/baseline/core.txt 2>&1; tail -15 /tmp/baseline/core.txt) 2>&1 | tail -30
+$ cd /testbed && rm -rf /tmp/testbed_base && cp -r /testbed /tmp/testbed_base && cd /tmp/testbed_base && git status --short | head -3; git log --oneline | head -1; ls /tmp/testbed_base | head -3
+$ mkdir -p /tmp/audit && cat > /tmp/audit/audit.py <<'EOF'
+"""Find sympy operations that feed repr/str of an *unknown* object to parse_expr/eval."""
+import sys, warnings, operator, traceback
+sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else '/testbed')
+warnings.simplefilter('ignore')
+import sympy
+from sympy import *
+from sympy.parsing import sympy_parser
+
+MARK = '__unknown_object_marker__'
+
+class Unknown(object):
+    def __repr__(self):
+        return MARK
+    __str__ = __repr__
+
+class Flagged(Exception):
+    pass
+
+_orig_parse_expr = sympy_parser.parse_expr
+def spy_parse_expr(s, *a, **k):
+    if isinstance(s, str) and MARK in s:
+        raise Flagged(s)
+    return _orig_parse_expr(s, *a, **k)
+sympy_parser.parse_expr = spy_parse_expr
+
+from sympy.abc import x, y, z
+from sympy.matrices import Matrix, ImmutableMatrix, SparseMatrix, ImmutableSparseMatrix, MatrixSymbol
+from sympy.physics.units import meter, Quantity
+from sympy.physics.vector import ReferenceFrame, Vector
+from sympy.geometry import Point, Line, Circle, Segment, Triangle
+from sympy.combinatorics import Permutation, Cycle, Partition
+from sympy.polys.domains import ZZ, QQ, RR, EX
+from sympy.polys.rings import ring
+from sympy.polys.fields import field
+
+R, rx, ry = ring('rx,ry', ZZ)
+F, fx, fy = field('fx,fy', ZZ)
+f = Function('f')
+
+objs = {
+ 'Symbol': x, 'Integer': Integer(3), 'Rational': Rational(1, 2), 'Float': Float(1.5),
+ 'zero': S.Zero, 'one': S.One, 'half': S.Half, 'oo': oo, '-oo': -oo, 'nan': nan, 'zoo': zoo,
+ 'pi': pi, 'E': E, 'I': I, 'EulerGamma': EulerGamma, 'GoldenRatio': GoldenRatio,
+ 'Add': x + y, 'Mul': x*y, 'Pow': x**y, 'sin': sin(x), 'f(x)': f(x), 'Function-class': f,
+ 'Abs': Abs(x), 'Piecewise': Piecewise((x, x > 0), (y, True)),
+ 'Derivative': Derivative(f(x), x), 'Integral': Integral(x, x), 'Sum': Summation(x, (x, 1, 3)),
+ 'Subs': Subs(f(x), x, 1), 'Lambda': Lambda(x, x), 'Order': O(x), 'Poly': Poly(x**2 + 1, x),
+ 'Tuple': Tuple(1, 2), 'Dict': Dict({1: 2}), 'FiniteSet': FiniteSet(1, 2), 'Interval': Interval(0, 1),
+ 'Union': Union(Interval(0, 1), Interval(2, 3)), 'EmptySet': S.EmptySet, 'Reals': S.Reals,
+ 'true': S.true, 'false': S.false, 'Eq': Eq(x, y), 'Lt': x < y, 'And': And(x > 1, y > 2),
+ 'Matrix': Matrix([[1, 2], [3, 4]]), 'ImmutableMatrix': ImmutableMatrix([[1, 2], [3, 4]]),
+ 'SparseMatrix': SparseMatrix([[1, 2], [3, 4]]), 'ImmSparse': ImmutableSparseMatrix([[1, 2], [3, 4]]),
+ 'MatrixSymbol': MatrixSymbol('A', 2, 2), 'MatAdd': MatrixSymbol('A', 2, 2) + MatrixSymbol('B', 2, 2),
+ 'Identity': Identity(2), 'ZeroMatrix': ZeroMatrix(2, 2),
+ 'Quantity': meter, 'Point': Point(1, 2), 'Line': Line(Point(0, 0), Point(1, 1)),
+ 'Segment': Segment(Point(0, 0), Point(1, 1)), 'Circle': Circle(Point(0, 0), 1),
+ 'Triangle': Triangle(Point(0, 0), Point(1, 0), Point(0, 1)),
+ 'Permutation': Permutation([1, 0, 2]), 'Cycle': Cycle(1, 2), 'Partition': Partition([1, 2], [3]),
+ 'Range': Range(3), 'Idx': Indexed('A', 1), 'IndexedBase': IndexedBase('A'),
+ 'Rel': Ne(x, y), 'Boolean-xor': Xor(x > 1, y > 2),
+ 'PolyElement': rx + ry, 'FracElement': fx/fy, 'ZZ': ZZ, 'QQ': QQ, 'RR': RR, 'EXdom': EX,
+ 'EXelem': EX(x), 'ZZelem': ZZ(3), 'QQelem': QQ(1, 2),
+ 'Quaternion': Quaternion(1, 2, 3, 4),
+ 'AccumBounds': AccumBounds(0, 1), 'UndefFunc': Function('g'), 'Wild': Wild('w'), 'Dummy': Dummy('d'),
+ 'Float-gmpy-ish': Float('1e-30'), 'ComplexRootOf': CRootOf(x**3 - x + 1, 0),
+ 'AlgebraicNumber': AlgebraicNumber(sqrt(2)),
+ 'Basic': Basic(), 'UnevaluatedExpr': UnevaluatedExpr(x),
+ 'Array': ImmutableDenseNDimArray([1, 2, 3]), 'MutArray': MutableDenseNDimArray([1, 2, 3]),
+ 'ReferenceFrame': ReferenceFrame('N'),
+ 'Vector': ReferenceFrame('M').x + ReferenceFrame('M').y,
+ 'Dimension': sympy.physics.units.length,
+}
+
+ops = [
+ ('==', operator.eq), ('!=', operator.ne),
+ ('<', operator.lt), ('<=', operator.le), ('>', operator.gt), ('>=', operator.ge),
+ ('+', operator.add), ('-', operator.sub), ('*', operator.mul), ('/', operator.truediv),
+ ('**', operator.pow), ('%', operator.mod), ('//', operator.floordiv),
+ ('&', operator.and_), ('|', operator.or_), ('^', operator.xor), ('@', operator.matmul),
+ ('<<', operator.lshift), ('>>', operator.rshift),
+]
+
+U = Unknown()
+problems = []
+for oname, obj in objs.items():
+    for sym, op in ops:
+        for order in ('obj-op-U', 'U-op-obj'):
+            try:
+                if order == 'obj-op-U':
+                    op(obj, U)
+                else:
+                    op(U, obj)
+            except Flagged as e:
+                problems.append((oname, sym, order, 'FLAGGED'))
+            except Exception as e:
+                pass
+
+# method-based comparisons
+for oname, obj in objs.items():
+    for mname in ('equals', 'dummy_eq', 'compare', 'is_same', 'has', 'contains', 'subs', 'xreplace', 'match', 'isSame'):
+        m = getattr(obj, mname, None)
+        if m is None:
+            continue
+        try:
+            m(U)
+        except Flagged:
+            problems.append((oname, '.' + mname + '(U)', '', 'FLAGGED'))
+        except Exception:
+            pass
+
+# `in` containment
+for oname, obj in objs.items():
+    try:
+        U in obj
+    except Flagged:
+        problems.append((oname, 'U in obj', '', 'FLAGGED'))
+    except Exception:
+        pass
+    try:
+        obj in [U]
+    except Flagged:
+        problems.append((oname, 'obj in [U]', '', 'FLAGGED'))
+    except Exception:
+        pass
+
+for p in problems:
+    print(p)
+print("TOTAL flagged:", len(problems))
+EOF
+cd /testbed && python /tmp/audit/audit.py /testbed 2>&1 | tail -60
+$ cd /testbed && sed -i "s/'Sum': Summation(x, (x, 1, 3))/'Sum': Sum(x, (x, 1, 3))/" /tmp/audit/audit.py && python /tmp/audit/audit.py /testbed 2>&1 | tail -80
+$ cd /testbed && python /tmp/audit/audit.py /testbed 2>&1 | grep -v "'\.\(has\|match\|equals\|subs\|xreplace\|contains\|compare\|dummy_eq\|is_same\|isSame\)(U)'" | grep -v "in \[U\]\|U in obj" | head -150
+$ cd /testbed && python /tmp/audit/audit.py /testbed 2>&1 > /tmp/audit/before.txt; python - <<'EOF'
+import ast, collections
+rows = []
+for line in open('/tmp/audit/before.txt'):
+    line = line.strip()
+    if line.startswith('(') and line.endswith(')'):
+        rows.append(ast.literal_eval(line))
+by_op = collections.defaultdict(set)
+for name, op, order, _ in rows:
+    by_op[(op, order)].add(name)
+for k in sorted(by_op):
+    print(k, '->', len(by_op[k]), sorted(by_op[k])[:60])
+    print()
+EOF
+$ cd /tmp/testbed_base && ls sympy | head -80 && ls sympy/*/tests -d | wc -l
+$ cd /testbed && grep -rn "BadRepr\|non_string_equality\|test_issue_18066\|18066" sympy doc 2>/dev/null | head -20; echo ----; python - <<'EOF'
+from sympy import *
+x = Symbol('x')
+print("x == 'x'  ->", x == 'x')
+print("x != 'x'  ->", x != 'x')
+print("Integer(1) == '1' ->", Integer(1) == '1')
+print("x + 1 == 'x + 1' ->", x + 1 == 'x + 1')
+EOF
+$ cd /testbed && grep -rn "def __eq__\|def __ne__" sympy --include=*.py | grep -v "/tests/" | sed -n 100,400p
+$ cd /testbed && free -g | head -2; echo; sed -n 55,80p sympy/matrices/common.py; echo -----; sed -n 2485,2510p sympy/matrices/common.py; echo -----; sed -n 205,230p sympy/matrices/sparse.py; echo ----; sed -n 2350,2370p sympy/matrices/matrices.py
+$ cd /testbed && sed -n 915,935p sympy/matrices/expressions/matexpr.py; echo -----; sed -n 1010,1030p sympy/matrices/expressions/matexpr.py; echo -----; sed -n 1210,1225p sympy/matrices/expressions/matexpr.py; echo ----; grep -n "__eq__\|__ne__\|sympify" sympy/matrices/immutable.py
+$ mkdir -p /tmp/baseline_full && cd /tmp/testbed_base && N=40 && for i in $(seq 1 $N); do
+  (cd /tmp/testbed_base && nohup python bin/test --no-subprocess --split=$i/$N > /tmp/baseline_full/split_$i.txt 2>&1 &) 
+done; sleep 2; ls /tmp/baseline_full | wc -l
+$ ps aux | grep "bin/test" | grep -v grep | wc -l; ls -la /tmp/baseline_full | head -5
+$ ps aux | grep "bin/test" | grep -v grep | head; echo; for i in 1 2 3 10; do echo "== split_$i"; tail -5 /tmp/baseline_full/split_$i.txt; done
+$ cd /testbed && grep -n "def test_sympify_raises" -A 12 sympy/core/tests/test_sympify.py; echo ------; grep -n "__str__\|__repr__" sympy/core/tests/test_sympify.py | head -20
+$ cd /testbed && grep -rn "SymPyDeprecationWarning" sympy/conftest.py conftest.py sympy/testing/*.py sympy/utilities/pytest.py sympy/utilities/runtests.py 2>/dev/null | head -20; ls sympy/testing 2>/dev/null
+$ cd /testbed && grep -n "non_string\|should not compare equal" -r sympy --include=*.py | head; echo ----; sed -n 195,240p sympy/utilities/pytest.py; echo ----; grep -n "^def warns\|^def raises\|^def XFAIL\|warns_deprecated_sympy" sympy/utilities/pytest.py
+$ cd /testbed && cat sympy/utilities/exceptions.py

@@ -1,0 +1,258 @@
+$ pwd; ls -la; printf '\n/app contents:\n'; if [ -d /app ]; then ls -la /app; else echo '/app does not exist'; fi; printf '\n/app/ssl contents:\n'; if [ -d /app/ssl ]; then ls -la /app/ssl; else echo '/app/ssl does not exist'; fi; printf '\nRelevant instructions:\n'; for f in /AGENTS.md /app/AGENTS.md /app/ssl/AGENTS.md; do if [ -f "$f" ]; then echo "--- $f"; cat "$f"; fi; done
+$ openssl version -a; printf '\nPython:\n'; python3 --version; printf '\nTime:\n'; date -u '+%Y-%m-%dT%H:%M:%SZ'; printf '\nUser:\n'; id
+$ printf 'OpenSSL request defaults:\n'; sed -n '1,230p' /usr/lib/ssl/openssl.cnf | grep -n -A 12 -B 8 -E '^\[ *(req|v3_ca|v3_req) *\]|^x509_extensions|^basicConstraints|^keyUsage'; printf '\nPython certificate-related modules:\n'; python3 - <<'PY'
+import importlib.util
+for name in ('cryptography', 'OpenSSL'):
+    print(f'{name}: {bool(importlib.util.find_spec(name))}')
+PY
+$ openssl req -help 2>&1 | grep -E -- '-(addext|config|days|subj|x509)' ; printf '\nOpenSSL verify options:\n'; openssl verify -help 2>&1 | grep -E -- '-(check_ss_sig|verify_hostname|purpose|CAfile)'
+$ set -euo pipefail
+mkdir -p -m 755 /app/ssl
+chmod 755 /app/ssl
+umask 077
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /app/ssl/server.key
+chmod 600 /app/ssl/server.key
+openssl req -new -x509 -sha256 -key /app/ssl/server.key \
+  -days 365 -subj '/O=DevOps Team/CN=dev-internal.company.local' \
+  -addext 'subjectAltName=DNS:dev-internal.company.local' \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
+  -addext 'extendedKeyUsage=serverAuth' \
+  -out /app/ssl/server.crt
+chmod 644 /app/ssl/server.crt
+cat /app/ssl/server.crt /app/ssl/server.key > /app/ssl/server.pem
+chmod 600 /app/ssl/server.pem
+openssl x509 -in /app/ssl/server.crt -noout -subject -dates -sha256 -fingerprint > /app/ssl/verification.txt
+chmod 644 /app/ssl/verification.txt
+printf '\nCertificate summary:\n'
+cat /app/ssl/verification.txt
+printf '\nCertificate extensions:\n'
+openssl x509 -in /app/ssl/server.crt -noout -text | sed -n '/X509v3 extensions:/,/Signature Algorithm:/p'
+printf '\nCertificate validation:\n'
+openssl verify -no-CApath -no-CAstore -CAfile /app/ssl/server.crt -check_ss_sig -purpose sslserver -verify_hostname dev-internal.company.local /app/ssl/server.crt
+printf '\nFile modes:\n'
+stat -c '%A %a %U:%G %n' /app/ssl /app/ssl/*
+$ openssl x509 -in /app/ssl/server.crt -noout -subject -nameopt multiline,utf8 -enddate; printf '\nVerify with exclusive trust:\n'; openssl verify -trusted /app/ssl/server.crt -check_ss_sig -purpose sslserver -verify_hostname dev-internal.company.local /app/ssl/server.crt
+$ python3 - <<'PY'
+import ssl
+from datetime import datetime, timezone
+s = 'Nov 25 07:00:00 2027 GMT'
+print(datetime.fromtimestamp(ssl.cert_time_to_seconds(s), tz=timezone.utc).strftime('%Y-%m-%d'))
+PY
+printf '\nSystem time source:\n'; date -u
+> write /app/check_cert.py
+$ set -euo pipefail
+chmod 755 /app/check_cert.py
+printf 'Run script directly:\n'
+/app/check_cert.py
+printf '\nRun script from another working directory:\n'
+(cd / && python3 /app/check_cert.py)
+printf '\nAudit certificate, key, combined PEM, report, and permissions:\n'
+python3 - <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import re
+import ssl
+import stat
+import subprocess
+
+root = Path('/app/ssl')
+key, crt, pem, report = (root / name for name in ('server.key', 'server.crt', 'server.pem', 'verification.txt'))
+def run(*args, input=None):
+    return subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
+
+for path, expected in ((root, 0o755), (key, 0o600), (crt, 0o644), (pem, 0o600), (report, 0o644), (Path('/app/check_cert.py'), 0o755)):
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == expected, f'{path}: {mode:o} != {expected:o}'
+    print(f'{path}: {mode:o}')
+
+assert b'RSA key ok' in run('openssl', 'rsa', '-in', str(key), '-check', '-noout')
+key_text = run('openssl', 'pkey', '-in', str(key), '-text', '-noout').decode()
+assert re.search(r'Private-Key: \(2048 bit', key_text)
+key_public = run('openssl', 'pkey', '-in', str(key), '-pubout', '-outform', 'DER')
+crt_public_pem = run('openssl', 'x509', '-in', str(crt), '-pubkey', '-noout')
+crt_public = run('openssl', 'pkey', '-pubin', '-outform', 'DER', input=crt_public_pem)
+pem_public = run('openssl', 'pkey', '-in', str(pem), '-pubout', '-outform', 'DER')
+assert key_public == crt_public == pem_public
+assert run('openssl', 'x509', '-in', str(crt), '-outform', 'DER') == run('openssl', 'x509', '-in', str(pem), '-outform', 'DER')
+assert pem.read_bytes() == crt.read_bytes() + key.read_bytes()
+print('RSA key is valid and 2048 bits; certificate and combined PEM match the key.')
+
+actual_report = run('openssl', 'x509', '-in', str(crt), '-noout', '-subject', '-dates', '-sha256', '-fingerprint')
+assert report.read_bytes() == actual_report
+text = actual_report.decode()
+assert 'O = DevOps Team' in text and 'CN = dev-internal.company.local' in text
+assert re.search(r'sha256 Fingerprint=(?:[0-9A-F]{2}:){31}[0-9A-F]{2}', text)
+dates = dict(line.split('=', 1) for line in text.splitlines() if line.startswith(('notBefore=', 'notAfter=')))
+start = datetime.fromtimestamp(ssl.cert_time_to_seconds(dates['notBefore']), tz=timezone.utc)
+end = datetime.fromtimestamp(ssl.cert_time_to_seconds(dates['notAfter']), tz=timezone.utc)
+assert (end - start).total_seconds() == 365 * 24 * 60 * 60
+print('Subject, SHA-256 fingerprint, and exact 365-day validity match the report.')
+compile(Path('/app/check_cert.py').read_text(), '/app/check_cert.py', 'exec')
+print('Python script syntax is valid.')
+PY
+$ python3 - <<'PY'
+import base64
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+import importlib.util
+import io
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import tempfile
+
+spec = importlib.util.spec_from_file_location('check_cert', '/app/check_cert.py')
+check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(check)
+
+def run(*args):
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode:
+        raise AssertionError(f'{args}: {result.stderr}')
+
+def rejected(path, message):
+    check.CERTIFICATE = path
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        status = check.main()
+    assert status == 1, (path, status, out.getvalue(), err.getvalue())
+    assert 'Certificate verification successful' not in out.getvalue()
+    assert message.lower() in err.getvalue().lower(), (path, err.getvalue())
+    print(f'Rejected {path.name}: {message}')
+
+with tempfile.TemporaryDirectory() as temp:
+    d = Path(temp)
+    rejected(d / 'missing.crt', 'certificate not found')
+    malformed = d / 'malformed.crt'
+    malformed.write_text('not a certificate\n')
+    rejected(malformed, 'could not read certificate')
+
+    original_der = ssl.PEM_cert_to_DER_cert(Path('/app/ssl/server.crt').read_text())
+    corrupted_der = bytearray(original_der)
+    corrupted_der[-1] ^= 1
+    corrupt = d / 'corrupt-signature.crt'
+    corrupt.write_text(ssl.DER_cert_to_PEM_cert(bytes(corrupted_der)))
+    rejected(corrupt, 'certificate signature failure')
+
+    def create(name, cn='dev-internal.company.local', org='DevOps Team', san='dev-internal.company.local', eku='serverAuth'):
+        dest = d / name
+        run('openssl', 'req', '-new', '-x509', '-sha256', '-key', '/app/ssl/server.key', '-days', '1',
+            '-subj', f'/O={org}/CN={cn}', '-addext', f'subjectAltName=DNS:{san}',
+            '-addext', 'basicConstraints=critical,CA:FALSE',
+            '-addext', 'keyUsage=critical,digitalSignature,keyEncipherment',
+            '-addext', f'extendedKeyUsage={eku}', '-out', str(dest))
+        return dest
+
+    rejected(create('wrong-cn.crt', cn='wrong.example'), 'common name')
+    rejected(create('wrong-org.crt', org='Wrong Team'), 'organization')
+    rejected(create('wrong-san.crt', san='wrong.example'), 'hostname mismatch')
+    rejected(create('wrong-purpose.crt', eku='clientAuth'), 'unsuitable certificate purpose')
+
+    def create_dated(name, start, end):
+        work = d / name
+        work.mkdir()
+        (work / 'index.txt').write_text('')
+        (work / 'serial').write_text('01\n')
+        config = work / 'openssl.cnf'
+        config.write_text(f'''[ ca ]
+default_ca = local_ca
+[ local_ca ]
+database = {work}/index.txt
+new_certs_dir = {work}
+serial = {work}/serial
+default_md = sha256
+private_key = /app/ssl/server.key
+certificate = /app/ssl/server.crt
+policy = policy_any
+[ policy_any ]
+organizationName = supplied
+commonName = supplied
+[ server_ext ]
+subjectAltName = DNS:dev-internal.company.local
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+''')
+        csr = work / 'request.csr'
+        dest = work / 'server.crt'
+        run('openssl', 'req', '-new', '-key', '/app/ssl/server.key', '-subj',
+            '/O=DevOps Team/CN=dev-internal.company.local', '-out', str(csr))
+        date = lambda value: value.strftime('%Y%m%d%H%M%SZ')
+        run('openssl', 'ca', '-selfsign', '-batch', '-config', str(config), '-in', str(csr),
+            '-startdate', date(start), '-enddate', date(end), '-extensions', 'server_ext',
+            '-notext', '-out', str(dest))
+        return dest
+
+    now = datetime.now(timezone.utc)
+    rejected(create_dated('expired', now - timedelta(days=3), now - timedelta(days=2)), 'certificate has expired')
+    rejected(create_dated('not-yet-valid', now + timedelta(days=2), now + timedelta(days=3)), 'certificate is not yet valid')
+
+    check.CERTIFICATE = Path('/app/ssl/server.crt')
+    old_path = os.environ.get('PATH')
+    try:
+        os.environ['PATH'] = str(d)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            status = check.main()
+        assert status == 1 and 'Certificate verification failed' in err.getvalue()
+        print('Rejected check when OpenSSL is unavailable.')
+    finally:
+        if old_path is None:
+            os.environ.pop('PATH', None)
+        else:
+            os.environ['PATH'] = old_path
+print('All negative certificate checks passed.')
+PY
+$ python3 - <<'PY'
+import socket
+import ssl
+import threading
+
+server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+server_context.load_cert_chain('/app/ssl/server.pem')
+trusted_client = ssl.create_default_context(cafile='/app/ssl/server.crt')
+untrusted_client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+def handshake(client_context, hostname, expect_success):
+    server_socket, client_socket = socket.socketpair()
+    server_socket.settimeout(5)
+    client_socket.settimeout(5)
+    server_errors = []
+    def serve():
+        try:
+            with server_context.wrap_socket(server_socket, server_side=True) as peer:
+                assert peer.recv(4) == b'ping'
+                peer.sendall(b'pong')
+        except Exception as exc:
+            server_errors.append(exc)
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        with client_context.wrap_socket(client_socket, server_hostname=hostname) as peer:
+            assert expect_success, 'unexpectedly accepted an untrusted or mismatched certificate'
+            peer.sendall(b'ping')
+            assert peer.recv(4) == b'pong'
+    except ssl.SSLCertVerificationError as exc:
+        if expect_success:
+            raise
+        print(f'Correctly rejected TLS client ({hostname}): {exc.verify_message}')
+    else:
+        assert expect_success
+        print(f'TLS handshake and data exchange succeeded: {hostname}')
+    finally:
+        client_socket.close()
+        thread.join(timeout=10)
+        server_socket.close()
+    assert not thread.is_alive()
+    if expect_success:
+        assert not server_errors, server_errors
+
+handshake(trusted_client, 'dev-internal.company.local', True)
+handshake(trusted_client, 'wrong.company.local', False)
+handshake(untrusted_client, 'dev-internal.company.local', False)
+PY
+$ printf 'Final /app tree:\n'; find /app -maxdepth 3 -printf '%M %u:%g %p\n' | sort; printf '\nFinal check output:\n'; python3 /app/check_cert.py
+$ rm -rf /app/__pycache__; printf 'Final files and permissions:\n'; find /app -maxdepth 2 -printf '%M %u:%g %p\n' | sort; printf '\nFinal verification:\n'; python3 /app/check_cert.py
+Created and verified the TLS certificate, key, combined PEM, verification report, and Python checker. The certificate expires on 2027-11-25.

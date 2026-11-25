@@ -1,0 +1,175 @@
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 2ff8b0ee26..a061f15f87 100755
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -277,7 +277,7 @@ class BoundWidget:
+ 
+     @property
+     def id_for_label(self):
+-        return 'id_%s_%s' % (self.data['name'], self.data['index'])
++        return self.data['attrs'].get('id')
+ 
+     @property
+     def choice_label(self):
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..75fcb1e808
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++"""Debug test script for the issue."""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django',
++    ],
++)
++
++django.setup()
++
++from django import forms
++from django.forms import CheckboxSelectMultiple, RadioSelect
++
++class BeatleForm(forms.Form):
++    name = forms.ChoiceField(
++        choices=[('john', 'John'), ('paul', 'Paul'), ('george', 'George'), ('ringo', 'Ringo')]
++    )
++
++# Test without auto_id - the test expects it to have id_for_label
++fields = list(BeatleForm(auto_id=False)['name'])
++print("Test: auto_id=False, default widget")
++print(f"  fields[0].data: {fields[0].data}")
++print(f"  fields[0].id_for_label: {fields[0].id_for_label!r}")
++
++# Let's check what the context is for the widget
++from django.forms.widgets import Select
++widget = Select()
++ctx = widget.get_context('name', 'john', {})
++print(f"\n  Select widget context: {ctx}")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..4795380007
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/env python
++"""Test script to reproduce the BoundWidget.id_for_label issue."""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django',
++    ],
++)
++
++django.setup()
++
++from django import forms
++from django.forms import CheckboxSelectMultiple, RadioSelect
++
++
++class MyForm(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=(('a', 'A'), ('b', 'B')),
++        widget=CheckboxSelectMultiple
++    )
++
++
++# Test with default auto_id
++form = MyForm(auto_id='id_%s')
++print("Form with auto_id='id_%s':")
++for subwidget in form['choices']:
++    print(f"  id_for_label: {subwidget.id_for_label}")
++    print(f"  data['attrs']['id']: {subwidget.data['attrs'].get('id')}")
++    print(f"  Match: {subwidget.id_for_label == subwidget.data['attrs'].get('id')}")
++
++print()
++
++# Test with custom auto_id format
++form = MyForm(auto_id='my_%s')
++print("Form with auto_id='my_%s':")
++for subwidget in form['choices']:
++    print(f"  id_for_label: {subwidget.id_for_label}")
++    print(f"  data['attrs']['id']: {subwidget.data['attrs'].get('id')}")
++    print(f"  Match: {subwidget.id_for_label == subwidget.data['attrs'].get('id')}")
++
++print()
++
++# Test with RadioSelect too
++class MyRadioForm(forms.Form):
++    choice = forms.ChoiceField(
++        choices=(('a', 'A'), ('b', 'B')),
++        widget=RadioSelect
++    )
++
++form = MyRadioForm(auto_id='my_%s')
++print("Radio form with auto_id='my_%s':")
++for subwidget in form['choice']:
++    print(f"  id_for_label: {subwidget.id_for_label}")
++    print(f"  data['attrs']['id']: {subwidget.data['attrs'].get('id')}")
++    print(f"  Match: {subwidget.id_for_label == subwidget.data['attrs'].get('id')}")
++
++print()
++
++# Test with no auto_id (should have no IDs)
++print("Form with auto_id=False:")
++form = MyForm(auto_id=False)
++for subwidget in form['choices']:
++    print(f"  id_for_label: {subwidget.id_for_label!r}")
++    print(f"  data['attrs']['id']: {subwidget.data['attrs'].get('id')!r}")
++    print()
++
++print()
++
++# Test with custom widget that has predefined id attr in attrs
++class MyCustomWidgetForm(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=(('a', 'A'), ('b', 'B')),
++        widget=CheckboxSelectMultiple(attrs={'id': 'custom_id_prefix'})
++    )
++
++form = MyCustomWidgetForm(auto_id='id_%s')
++print("Form with widget having custom id in attrs:")
++for subwidget in form['choices']:
++    print(f"  id_for_label: {subwidget.id_for_label}")
++    print(f"  data['attrs']['id']: {subwidget.data['attrs'].get('id')}")
++    print(f"  Match: {subwidget.id_for_label == subwidget.data['attrs'].get('id')}")
++
++print()
++
++# Verify the bug exists
++print("BUG VERIFICATION:")
++form = MyForm(auto_id='custom_%s')
++subwidget = form['choices'].subwidgets[0]
++id_from_method = subwidget.id_for_label
++id_from_attrs = subwidget.data['attrs'].get('id')
++print(f"  id_for_label() returns: {id_from_method}")
++print(f"  data['attrs']['id'] is: {id_from_attrs}")
++if id_from_method != id_from_attrs:
++    print("  BUG CONFIRMED: They don't match!")
++else:
++    print("  No bug: They match!")
++
++print()
++print("All tests passed!")
+diff --git a/tests/forms_tests/tests/test_forms.py b/tests/forms_tests/tests/test_forms.py
+index f3ee64ceda..f5c308143e 100755
+--- a/tests/forms_tests/tests/test_forms.py
++++ b/tests/forms_tests/tests/test_forms.py
+@@ -720,7 +720,7 @@ Java</label></li>
+         fields = list(BeatleForm(auto_id=False)['name'])
+         self.assertEqual(len(fields), 4)
+ 
+-        self.assertEqual(fields[0].id_for_label, 'id_name_0')
++        self.assertIsNone(fields[0].id_for_label)
+         self.assertEqual(fields[0].choice_label, 'John')
+         self.assertHTMLEqual(fields[0].tag(), '<option value="john">John</option>')
+         self.assertHTMLEqual(str(fields[0]), '<option value="john">John</option>')

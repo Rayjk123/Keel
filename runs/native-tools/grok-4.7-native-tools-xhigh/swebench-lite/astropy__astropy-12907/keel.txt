@@ -1,0 +1,208 @@
+$ find . -type d -name "modeling" | head -50 && find . -path "*modeling/separable*" -o -name "*separable*" | head -50 && ls
+> read /home/workdir/astropy/modeling/separable.py
+> read /home/workdir/astropy/modeling/tests/test_separable.py
+$ ls docs/changes/modeling | tail -30 && ls astropy/modeling
+$ pwd && ls astropy/modeling/separable.py && wc -l astropy/modeling/separable.py astropy/modeling/tests/test_separable.py
+> read /testbed/astropy/modeling/separable.py
+> read /testbed/astropy/modeling/tests/test_separable.py
+$ cd /testbed && git log --oneline -20 && git log -5 -- astropy/modeling/separable.py && ls docs/changes/modeling/ | head -40 && rg -n "_calculate_separability_matrix" --type py | head -40
+$ grep -n "_calculate_separability_matrix\|separable" astropy/modeling/core.py | head -80 && echo "----" && grep -n "def separable\|separability" -n astropy/modeling/*.py | head -50
+> read /testbed/astropy/modeling/core.py
+> read /testbed/astropy/modeling/core.py
+> read /testbed/docs/changes/modeling/12900.feature.rst
+$ git show ad1c98905 --stat && echo "======= DIFF =======" && git show ad1c98905 -- '*.py' | head -400
+$ python -c "
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, _separable
+import numpy as np
+
+print('TAN separable', m.Pix2Sky_TAN().separable, m.Pix2Sky_TAN().n_inputs, m.Pix2Sky_TAN().n_outputs)
+print(separability_matrix(m.Pix2Sky_TAN()))
+print('---')
+cm = m.Linear1D(10) & m.Linear1D(5)
+print(type(cm), cm.op, type(cm.left), type(cm.right))
+print(separability_matrix(cm))
+print('--- flat')
+flat = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
+print(flat.op, type(flat.left), type(flat.right), flat.left.op if hasattr(flat.left,'op') else None)
+print(separability_matrix(flat))
+print('--- nested')
+nested = m.Pix2Sky_TAN() & cm
+print(nested.op, type(nested.left), type(nested.right))
+print(separability_matrix(nested))
+print('--- other nest')
+nested2 = cm & m.Pix2Sky_TAN()
+print(separability_matrix(nested2))
+print('--- deeper')
+cm3 = m.Linear1D(1) & m.Linear1D(2) & m.Linear1D(3)
+print('cm3', separability_matrix(cm3))
+cm2 = m.Linear1D(1) & m.Linear1D(2)
+nested3 = cm2 & m.Linear1D(3)
+print('nested3', separability_matrix(nested3))
+nested4 = m.Linear1D(1) & cm2
+print('nested4', separability_matrix(nested4))
+print('--- both compound')
+a = m.Linear1D(1) & m.Linear1D(2)
+b = m.Linear1D(3) & m.Linear1D(4)
+print(separability_matrix(a & b))
+print(separability_matrix(m.Linear1D(1) & m.Linear1D(2) & m.Linear1D(3) & m.Linear1D(4)))
+"
+
+$ python - << 'PY'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import _separable, _cstack, _coord_matrix
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('sepleft of cm', _separable(cm))
+print('shape', _separable(cm).shape)
+
+tan = m.Pix2Sky_TAN()
+print('tan matrix', _separable(tan))
+
+# manually
+left = _separable(tan)
+right = _separable(cm)
+print('left', left)
+print('right', right)
+print('cstack result', _cstack(left, right))
+
+# look at right branch code
+noutp = left.shape[0] + right.shape[0]
+print('noutp', noutp)
+cright = np.zeros((noutp, right.shape[1]))
+cright[-right.shape[0]:, -right.shape[1]:] = 1
+print('cright (bug sets 1s)', cright)
+cright2 = np.zeros((noutp, right.shape[1]))
+cright2[-right.shape[0]:, -right.shape[1]:] = right
+print('cright (correct)', cright2)
+
+# left side
+cleft = np.zeros((noutp, left.shape[1]))
+cleft[: left.shape[0], : left.shape[1]] = left
+print('cleft', cleft)
+
+# Also check | composition with nested
+print('--- pipe ---')
+cm2 = m.Shift(1) & m.Shift(2)
+print('cm2', _separable(cm2))
+rot = m.Rotation2D(2)
+print('pipe nested', _separable(cm2 | rot))
+print('pipe flat', _separable(m.Shift(1) & m.Shift(2) | rot))
+
+# arithmetic of compounds?
+print('--- arith ---')
+try:
+    print(_separable((m.Shift(1)&m.Shift(2)) + (m.Scale(2)&m.Scale(3))))
+except Exception as e:
+    print(type(e), e)
+
+# Mapping nested
+print('--- mapping ---')
+from astropy.modeling.models import Mapping
+print(_separable(Mapping((0,1,0,1)) | (m.Polynomial2D(1) & m.Polynomial2D(2))))
+print(_separable((m.Shift(1)&m.Shift(2)) | Mapping((0,1,0,1))))
+
+# deeper nesting both sides
+a = (m.Linear1D(1) & m.Linear1D(2))
+b = (m.Linear1D(3) & m.Linear1D(4))
+print('a&b', _cstack(_separable(a), _separable(b)))
+
+# nonseparable right compound? 
+ns = m.Pix2Sky_TAN() & m.Linear1D(1)
+print('ns', _separable(ns))
+print('ns & linear', _cstack(_separable(ns), _separable(m.Linear1D(2))))
+print('linear & ns', _cstack(_separable(m.Linear1D(2)), _separable(ns)))
+
+# separable model that is NOT diagonal? like Mapping is handled specially
+# What about a separable model with n_inputs != n_outputs?
+print('Identity 2', m.Identity(2).separable, _separable(m.Identity(2)))
+print('Identity 1 & 2', _separable(m.Identity(1) & m.Identity(2)))
+
+# Shift & (Scale | Shift) 
+print(_separable(m.Shift(1) & (m.Scale(2) | m.Shift(3))))
+print(_separable((m.Shift(1) & m.Scale(2)) | (m.Shift(3) & m.Scale(4))))
+PY
+$ grep -n "separab" docs/modeling/*.rst | head -40; ls docs/changes/modeling/; python - << 'PY'
+# Check if left side has similar bug when left is non-model and we need alignment
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, _separable
+
+# left is compound, right is simple - left placement uses the matrix correctly
+# What if outputs of left compound don't equal rows? they should.
+
+# What about non-square matrices on the right: Mapping produces non-square
+from astropy.modeling.models import Mapping
+# Mapping as compound? Mapping is a Model not Compound
+# Suppose we have a compound that produces non-square separability matrix
+# e.g. Shift & Shift | Mapping
+left = (m.Shift(1) & m.Shift(2)) | Mapping((0, 1, 0, 1))
+print('left matrix', _separable(left), _separable(left).shape)
+print('stack with scale', separability_matrix(left & m.Scale(3)))
+print('expected: outputs 5, inputs 3')
+
+# right non-square
+right = (m.Shift(1) & m.Shift(2)) | Mapping((0, 1, 0, 1))
+print('scale & right', separability_matrix(m.Scale(3) & right))
+print(separability_matrix(right))
+
+# both non-square? 
+print('both', separability_matrix(left & right))
+
+# arithmetic with nested
+print('arith', separability_matrix((m.Shift(1)&m.Shift(2)) + (m.Scale(2)&m.Scale(3))))
+print('arith nested vs flat should be all True')
+
+# composition where right is nested compound with different structure
+# (A & B) | (C & D) where C&D is nested
+inner = m.Shift(1) & m.Scale(2)
+outer = (m.Polynomial1D(1) & m.Polynomial1D(1)) | inner
+print('outer', separability_matrix(outer))
+print('flat', separability_matrix((m.Polynomial1D(1) & m.Polynomial1D(1)) | (m.Shift(1) & m.Scale(2))))
+
+# rotation after nested
+print('rot', separability_matrix((m.Shift(1) & m.Shift(2)) | m.Rotation2D(5)))
+print('nested rot', separability_matrix(((m.Shift(1) & m.Shift(2))) | m.Rotation2D(5)))
+
+# More interesting: separable model whose coord matrix is NOT identity diagonal in the sense of independent 1-1
+# e.g. a custom model? Or Pix2Sky which is NOT separable.
+
+# Check _coord_matrix roll bug for separable models where n_outputs != n_inputs
+class Dummy(m.Shift):
+    pass
+
+# Mapping is separable?
+print('map separable', Mapping((0,1)).separable)
+print(separability_matrix(Mapping((1,0))))
+print(separability_matrix(m.Shift(1) & Mapping((1,0))))
+print(separability_matrix(Mapping((1,0)) & m.Shift(1)))
+PY
+> edit /testbed/astropy/modeling/separable.py
+> edit /testbed/astropy/modeling/tests/test_separable.py
+> write /testbed/docs/changes/modeling/separability_nested.bugfix.rst
+> read /testbed/astropy/modeling/tests/test_separable.py
+$ python - << 'PY'
+from astropy.modeling import models as m
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import separability_matrix, _separable
+import numpy as np
+
+sh1 = m.Shift(1)
+sh2 = m.Shift(2)
+map1 = Mapping((0, 1, 0, 1))
+right = (sh1 & sh2) | map1
+print('right matrix\n', separability_matrix(right))
+print('stacked\n', separability_matrix(sh1 & right))
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('nested\n', separability_matrix(m.Pix2Sky_TAN() & cm))
+print('flat\n', separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+print('left nested\n', separability_matrix(cm & m.Pix2Sky_TAN()))
+print('both\n', separability_matrix((m.Linear1D(1)&m.Linear1D(2)) & (m.Linear1D(3)&m.Linear1D(4))))
+print('nested4\n', separability_matrix(m.Linear1D(1) & (m.Linear1D(2)&m.Linear1D(3))))
+print('scale & right\n', separability_matrix(m.Scale(3) & right))
+print('both non square\n', separability_matrix(right & right))
+PY
+$ ls docs/changes/modeling/ | head && python -m pytest astropy/modeling/tests/test_separable.py -q --tb=short 2>&1 | tail -40
+`separability_matrix` now keeps the real right-hand separability matrix when nesting compound models with `&`, instead of treating that side as fully coupled. A regression test covers the nested cases from the report.

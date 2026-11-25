@@ -1,0 +1,61 @@
+$ cd /app 2>/dev/null && pwd; ls -la /app; echo "---"; pwd; ls -la; echo "---"; file /app/a.out 2>/dev/null; echo "---"; which node readelf objdump gcc xxd od python3 2>/dev/null; node --version 2>/dev/null
+$ cd /app && cat hi.c; echo "---"; readelf -h a.out; echo "---"; readelf -lW a.out; echo "---"; readelf -SW a.out
+$ cd /app && python3 - <<'EOF'
+import struct
+data = open('a.out','rb').read()
+print("file size", len(data))
+for v in [1784774249, 1718378344]:
+    b = struct.pack('<I', v)
+    print(v, hex(v), "LE bytes", b.hex(), "as-bytes:", b, "found at:", [hex(i) for i in range(len(data)) if data.startswith(b, i)])
+    bb = struct.pack('>I', v)
+    print("   BE found at:", [hex(i) for i in range(len(data)) if data.startswith(bb, i)])
+# first few words
+for off in range(0, 64, 4):
+    print(hex(off), struct.unpack('<I', data[off:off+4])[0], data[off:off+4].hex())
+EOF
+$ cd /app && echo "=== strings ==="; strings -a -t x a.out; echo "=== symbols ==="; readelf -sW a.out | head -80; echo "=== dynamic relocs ==="; readelf -rW a.out
+$ cd /app && python3 - <<'EOF'
+import struct
+data = open('/app/a.out','rb').read()
+T = [1784774249, 1718378344]
+le = struct.pack('<II', *T)
+be = struct.pack('>II', *T)
+print("direct LE pair:", data.find(le), " direct BE pair:", data.find(be))
+print("decimal ascii:", data.find(b"1784774249"), data.find(b"1718378344"))
+
+def hits_bytewise(tgt, name):
+    out = []
+    for k in range(256):
+        for op, f in [("xor", lambda x: x ^ k), ("file=tgt-k", lambda x: (x - k) & 0xff), ("file=tgt+k", lambda x: (x + k) & 0xff)]:
+            pat = bytes(f(x) for x in tgt)
+            i = data.find(pat)
+            if i >= 0:
+                out.append((name, op, k, hex(i)))
+    return out
+
+res = []
+for tgt, name in [(le, "LE"), (be, "BE")]:
+    res += hits_bytewise(tgt, name)
+print("single-byte transform hits:", res)
+
+# Consistent 32-bit word-level transform across the two words (xor / add / sub with same constant)
+def u32(o, endian):
+    return struct.unpack(endian + 'I', data[o:o+4])[0]
+word_hits = []
+for o in range(0, len(data) - 8, 1):
+    for endian, tag in [('<', 'LE'), ('>', 'BE')]:
+        w1, w2 = u32(o, endian), u32(o + 4, endian)
+        for name, t1, t2 in [("le", T[0], T[1]), ("be", T[0], T[1])]:
+            pass
+        x1 = w1 ^ T[0]; x2 = w2 ^ T[1]
+        if x1 == x2: word_hits.append(("xor32", tag, o, hex(x1)))
+        a1 = (T[0] - w1) & 0xffffffff; a2 = (T[1] - w2) & 0xffffffff
+        if a1 == a2: word_hits.append(("sub32", tag, o, hex(a1)))
+        a1 = (w1 - T[0]) & 0xffffffff; a2 = (w2 - T[1]) & 0xffffffff
+        if a1 == a2: word_hits.append(("add32", tag, o, hex(a1)))
+print("word-level consistent-key hits:", word_hits[:20], "count", len(word_hits))
+
+# The two example values as printable ASCII (LE and BE byte order)
+print("LE bytes:", le.decode('latin1'), " BE bytes:", be.decode('latin1'))
+EOF
+finished without a summary

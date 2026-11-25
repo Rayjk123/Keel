@@ -1,0 +1,161 @@
+$ pwd && ls -la && find . -maxdepth 3 -type f -printf '%p\n' | sort | head -200
+$ ls -la /app && find /app -maxdepth 3 -type f -printf '%p\n' | sort | head -200
+> read /app/graphene.dat
+$ file graphene.dat; wc -l graphene.dat; tail -30 graphene.dat; python - <<'PY'
+import sys
+print(sys.version)
+for name in ['numpy','scipy','matplotlib','pandas','lmfit']:
+ try:
+  m=__import__(name)
+  print(name, m.__version__)
+ except Exception as e:
+  print(name, repr(e))
+PY
+$ which -a python python3 pip pip3; ls /usr/bin/python*; python -m pip --version; env | sort | grep -E 'PYTHON|PIP|UV'
+$ python - <<'PY'
+from pathlib import Path
+D=[tuple(map(float,line.replace(',','.').split())) for line in Path('graphene.dat').read_text().splitlines()]
+print('N',len(D));print('x extent', min(r[0] for r in D),max(r[0] for r in D));print('y extent', min(r[1] for r in D),max(r[1] for r in D)); print('mean y',sum(r[1] for r in D)/len(D))
+for i in range(0,len(D),100): print(i,*D[i])
+print('\nRange aggregate:')
+for lo,hi in [(1648,1700),(1700,1750),(1750,1800),(1800,1900),(1900,2000),(2000,2100),(2100,2200),(2200,2300),(2300,2400),(2400,2500),(2500,2600),(2600,2700),(2700,2800),(2800,2900),(2900,3000),(3000,3100),(3100,3200),(3200,3500),(3500,4000),(4000,5000),(5000,10000),(10000,50000)]:
+ z=[(x,y) for x,y in D if lo<=x<hi]
+ if z:
+  print(f'{lo:5}--{hi:5} n={len(z):3} y_range {min(y for x,y in z):9.1f} - {max(y for x,y in z):9.1f} mean {sum(y for x,y in z)/len(z):10.1f} peak {max(z, key=lambda p:p[1])[0]:10.2f}')
+PY
+$ python -m pip install --quiet numpy scipy matplotlib
+$ python - <<'PY'
+from pathlib import Path
+D=[tuple(map(float,line.replace(',','.').split())) for line in Path('graphene.dat').read_text().splitlines()]
+for lo,hi in [(1200,1450),(1450,1550),(1550,1620),(1620,1700),(2400,2600),(2600,2750),(2750,2900),(100,1000)]:
+ z=[(1e7/x,y) for x,y in D if lo<=1e7/x<hi]
+ print(f'{lo:5}--{hi:5} n={len(z):3} y_range {min(y for x,y in z):9.1f} - {max(y for x,y in z):9.1f} mean {sum(y for x,y in z)/len(z):10.1f} peak {max(z, key=lambda p:p[1])[0]:10.2f}')
+ print('top 5:', sorted(z,key=lambda r:r[1], reverse=True)[:5])
+print('\nTransformed axis every 200')
+for i in range(0,len(D),200): print(i,*D[i],1e7/D[i][0])
+PY
+$ cat > /tmp/explore.py <<'PY'
+from pathlib import Path
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.special import voigt_profile
+from scipy.signal import find_peaks, savgol_filter
+D=np.loadtxt('graphene.dat', converters=lambda s: float(s.replace(b',',b'.')))
+x=1e7/D[:,0]; y=D[:,1]
+print('min max:',x.min(),x.max(), np.diff(x).min(),np.diff(x).max())
+def lorentz(x, x0, gamma, amplitude, offset):
+ return offset+amplitude*gamma**2/((x-x0)**2+gamma**2)
+def lorentzlin(x, x0, gamma, amplitude, offset, slope):
+ return offset+slope*(x-x0)+amplitude*gamma**2/((x-x0)**2+gamma**2)
+def gauss(x, x0, sigma, amplitude, offset, slope):
+ return offset+slope*(x-x0)+amplitude*np.exp(-((x-x0)/sigma)**2/2)
+def voigt(x, x0, sigma, gamma, amplitude, offset, slope):
+ return offset+slope*(x-x0)+amplitude*voigt_profile(x-x0,sigma,gamma)/voigt_profile(0,sigma,gamma)
+for label,cen,ran in [('G',1580,(1490,1675)),('2D',2670,(2540,2790))]:
+ print('\n',label)
+ mask=(x>=ran[0])&(x<=ran[1]); xx=x[mask];yy=y[mask]
+ for a,b in zip(xx,yy): print(f'{a:.3f}\t{b:.3f}')
+ for W in [20,25,30,35,40,45,50,60,70,80,90,100,120]:
+  z=(x>cen-W)&(x<cen+W); X=x[z]; Y=y[z]
+  for model in [lorentz,lorentzlin,gauss,voigt]:
+   p0=([cen,8,8000,np.median(Y)] if model==lorentz else [cen,8,8000,np.median(Y),-10] if model in [lorentzlin,gauss] else [cen,3,8,8000,np.median(Y),-10])
+   try:
+    opt,pcov=curve_fit(model,X,Y,p0=p0,maxfev=20000)
+    res=Y-model(X,*opt); rms=np.sqrt(np.mean(res**2))
+    print(' W',W,model.__name__, 'n', len(Y),'p', ','.join(f'{z:.4f}' for z in opt),'RMSE', f'{rms:.2f}',end=';')
+   except Exception as e:print(model.__name__, e,end=';')
+  print()
+PY
+python /tmp/explore.py > /tmp/explore.txt
+sed -n '1,130p' /tmp/explore.txt; tail -100 /tmp/explore.txt
+$ sed -i "s/s.replace(b',',b'.')/s.replace(',', '.')/" /tmp/explore.py; python /tmp/explore.py > /tmp/explore.txt; sed -n '1,130p' /tmp/explore.txt; tail -100 /tmp/explore.txt
+$ grep '^ W' /tmp/explore.txt | head -13; sed -n '125,190p' /tmp/explore.txt
+$ cat > /tmp/extended.py <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.special import voigt_profile
+D=np.loadtxt('/app/graphene.dat',converters=lambda s: float(s.replace(',','.')))
+x=1e7/D[:,0]; y=D[:,1]
+def lor(x,c,g,a,b,m): return b+m*(x-c)+a*g*g/((x-c)**2+g*g)
+def lor2(x,c,g,a,b,m,q): return b+m*(x-c)+q*(x-c)**2+a*g*g/((x-c)**2+g*g)
+def voi(x,c,s,g,a,b,m): return b+m*(x-c)+a*voigt_profile(x-c,s,g)/voigt_profile(0,s,g)
+for c in [1580,2670]:
+ print('\nCENTER', c)
+ for w in [80,100,120,130,140,150,160,180,200,220,250,280,300]:
+  mask=np.abs(x-c)<w; xx=x[mask];yy=y[mask]
+  print('W=',w, 'n=',len(xx),end=' ')
+  for f, p0 in [(lor,[c,10,8000,5000,-5]),(lor2,[c,10,8000,5000,-5,0]),(voi,[c,4,7,8000,5000,-5])]:
+   try:
+    op,cv=curve_fit(f,xx,yy,p0=p0,maxfev=20000)
+    err=np.sqrt(np.mean((yy-f(xx,*op))**2))
+    print(f.__name__,'[',','.join('%0.3f'%z for z in op),']',round(err,1),end=' ; ')
+   except Exception as e: print(str(e),end=' ; ')
+  print()
+PY
+python /tmp/extended.py
+$ cat > /tmp/pseudov.py <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.special import voigt_profile
+D=np.loadtxt('/app/graphene.dat',converters=lambda s: float(s.replace(',','.')))
+x=1e7/D[:,0]; y=D[:,1]
+
+def pv(x,c,g,a,b,m,eta):
+ t=((x-c)/g)**2
+ return b+m*(x-c)+a*(eta/(1+t)+(1-eta)*np.exp(-np.log(2)*t))
+def voigt(x,c,s,g,a,b,m):
+ return b+m*(x-c)+a*voigt_profile(x-c,s,g)/voigt_profile(0,s,g)
+for c in [1580,2670]:
+ print('\n',c)
+ for w in [60,80,100,120,140,160,180,200]:
+  mask=np.abs(x-c)<w; xx=x[mask]; yy=y[mask]
+  print('W=',w, end=' ')
+  op,cv=curve_fit(pv,xx,yy,p0=[c,10 if c==1580 else 19,8000 if c==1580 else 11500,5800 if c==1580 else 1600,-5,.5],bounds=([c-10,1,0,0,-100,0],[c+10,100,100000,100000,100,1]))
+  pred=pv(xx,*op); err=np.sqrt(np.mean((yy-pred)**2))
+  print('pvoigt [',', '.join(f'{z:.3f}' for z in op),'] RMSE',f'{err:.2f}',end='; ')
+  op2,cv=curve_fit(voigt,xx,yy,p0=[c,3 if c==1580 else 11,7 if c==1580 else 9,8000 if c==1580 else 11500,5800 if c==1580 else 1600,-5],bounds=([c-10,.001,.001,0,0,-100],[c+10,100,100,100000,100000,100]))
+  fwhm=0.5346*2*op2[2]+np.sqrt(.2166*(2*op2[2])**2+(2.3548*op2[1])**2)
+  err=np.sqrt(np.mean((yy-voigt(xx,*op2))**2))
+  print('voigt [',', '.join(f'{z:.3f}' for z in op2),'] HWHM',f'{fwhm/2:.3f}','RMSE',f'{err:.2f}')
+PY
+python /tmp/pseudov.py
+$ python - <<'PY'
+import numpy as np
+x,y=np.loadtxt('graphene.dat',converters=lambda s: float(s.replace(',','.'))).T
+x=1e7/x
+# close-peak-bin baseline upper and lower
+for lo,hi in [(1380,1420),(1450,1490),(1500,1530),(1530,1550),(1550,1570),(1590,1610),(1610,1630),(1650,1670),(1700,1730),(1750,1780),(2470,2510),(2510,2550),(2550,2590),(2590,2615),(2615,2640),(2700,2725),(2725,2750),(2750,2790),(2790,2830),(2830,2870)]:
+ z=(x>=lo)&(x<hi)
+ print(lo,hi,'mean x %.2f' % x[z].mean(),'n',z.sum(),'mean y %.1f' % y[z].mean(), 'med %.1f'%np.median(y[z]))
+PY
+$ python - <<'PY'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.special import voigt_profile
+x,y=np.loadtxt('graphene.dat', converters=lambda s:float(s.replace(',','.'))).T
+x=1e7/x
+
+def v(x,c,s,g,a,b,m): return b+m*(x-c)+a*voigt_profile(x-c,s,g)/voigt_profile(0,s,g)
+for c,g in [(1580,7),(2670,9)]:
+ mask=np.abs(x-c)<=100; xx=x[mask]; yy=y[mask]
+ p,cov=curve_fit(v,xx,yy,p0=(c,3 if c==1580 else 11,g,8000,6000 if c==1580 else 1500,-4),maxfev=10000)
+ pred=v(xx,*p); err=(yy-pred);print(c,p,'standard errors',np.sqrt(np.diag(cov)), 'RSS',np.sum(err**2), 'n',mask.sum())
+ for lo,hi in [(-100,-80),(-80,-60),(-60,-40),(-40,-20),(-20,0),(0,20),(20,40),(40,60),(60,80),(80,100)]:
+  z=(xx>c+lo)&(xx<c+hi);print(lo,hi,'resid',round(err[z].mean(),2),'sd',round(err[z].std(),2))
+PY
+> write /tmp/fit_graphene.py
+$ python /tmp/fit_graphene.py && cat /app/results.json && python - <<'PY'
+import json, math
+from pathlib import Path
+p = Path('/app/results.json')
+d = json.loads(p.read_text())
+assert list(d) == ['G', '2D']
+for name, band in d.items():
+    assert list(band) == ['x0', 'gamma', 'amplitude', 'offset']
+    assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in band.values())
+    assert band['gamma'] > 0 and band['amplitude'] > 0
+assert 1500 < d['G']['x0'] < 1650
+assert 2550 < d['2D']['x0'] < 2800
+print('Validated JSON structure and physically plausible peak parameters.')
+PY
+Fit the G and 2D peaks and saved the parameters to `/app/results.json`.

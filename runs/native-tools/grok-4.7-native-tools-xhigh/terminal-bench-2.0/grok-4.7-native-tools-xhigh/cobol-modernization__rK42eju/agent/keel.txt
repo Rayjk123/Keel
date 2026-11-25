@@ -1,0 +1,2173 @@
+$ ls -la /app /app/src /app/data && echo "======= PROGRAM =======" && cat -A /app/src/program.cbl && echo "======= INPUT =======" && cat -A /app/src/INPUT.DAT && echo "======= DATA FILES =======" && for f in /app/data/*; do echo "----- $f -----"; cat -A "$f"; echo; done
+$ which cobc && cobc --version && xxd /app/src/INPUT.DAT && echo "---" && xxd /app/data/ACCOUNTS.DAT && echo "---" && xxd /app/data/BOOKS.DAT && echo "---" && xxd /app/data/TRANSACTIONS.DAT && mkdir -p /tmp/cobol-backup && cp -a /app/data/*.DAT /tmp/cobol-backup/ && cp -a /app/src/INPUT.DAT /tmp/cobol-backup/ && cd /app && cobc -x -o /tmp/bookforum /app/src/program.cbl && /tmp/bookforum; echo EXIT:$?; echo "======= AFTER ======="; for f in /app/data/*; do echo "----- $f -----"; xxd "$f"; done; cp -a /tmp/cobol-backup/*.DAT /app/data/
+$ ls -la /app/data /tmp/cobol-backup /tmp/bookforum 2>&1; echo "---- hexdump ----"; python3 - << 'PY'
+import os
+for p in ["/app/src/INPUT.DAT","/app/data/ACCOUNTS.DAT","/app/data/BOOKS.DAT","/app/data/TRANSACTIONS.DAT"]:
+    print("FILE", p, "exists", os.path.exists(p), "size", os.path.getsize(p) if os.path.exists(p) else None)
+    if os.path.exists(p):
+        data=open(p,'rb').read()
+        print(data)
+PY
+$ mkdir -p /tmp/cobol-backup && cp -a /app/data/*.DAT /tmp/cobol-backup/ && cp -a /app/src/INPUT.DAT /tmp/cobol-backup/ && cd /app && cobc -x -free -o /tmp/bookforum /app/src/program.cbl; echo COMPILE:$?; ls -la /tmp/bookforum; /tmp/bookforum; echo RUN:$?; python3 - << 'PY'
+import os
+for p in ["/app/data/ACCOUNTS.DAT","/app/data/BOOKS.DAT","/app/data/TRANSACTIONS.DAT"]:
+    data=open(p,'rb').read()
+    print(p, len(data), data)
+print("--- backup compare ---")
+for name in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    a=open(f"/app/data/{name}","rb").read()
+    b=open(f"/tmp/cobol-backup/{name}","rb").read()
+    print(name, "identical" if a==b else "CHANGED")
+    if a!=b:
+        print("NEW", a)
+        print("OLD", b)
+PY
+$ python3 - << 'PY'
+import os, shutil, subprocess, tempfile, pathlib
+
+src = open("/app/src/program.cbl").read()
+# create a debug version that displays parsed fields
+dbg = src.replace(
+'''           IF WS-BUYER-FOUND = 'Y' AND WS-SELLER-FOUND = 'Y' 
+              AND WS-BOOK-FOUND = 'Y' AND WS-VALID-OWNER = 'Y'
+              PERFORM PROCESS-TRANSACTION
+           ELSE
+              DISPLAY "Transaction failed due to validation errors"
+           END-IF''',
+'''           DISPLAY "BUYER=[" WS-BUYER-ID "]"
+           DISPLAY "SELLER=[" WS-SELLER-ID "]"
+           DISPLAY "BOOK=[" WS-BOOK-ID "]"
+           DISPLAY "AMOUNT=[" WS-AMOUNT "]"
+           DISPLAY "FLAGS B=" WS-BUYER-FOUND " S=" WS-SELLER-FOUND
+                   " BK=" WS-BOOK-FOUND " OW=" WS-VALID-OWNER
+           IF WS-BUYER-FOUND = 'Y' AND WS-SELLER-FOUND = 'Y' 
+              AND WS-BOOK-FOUND = 'Y' AND WS-VALID-OWNER = 'Y'
+              PERFORM PROCESS-TRANSACTION
+           ELSE
+              DISPLAY "Transaction failed due to validation errors"
+           END-IF'''
+)
+open("/tmp/debug.cbl","w").write(dbg)
+print("wrote debug")
+PY
+cd /tmp && cobc -x -free -o /tmp/debugbook /tmp/debug.cbl && cd /app && /tmp/debugbook
+echo "----"
+# also try with padded input in a sandbox copy
+mkdir -p /tmp/work && cp -a /app/src /tmp/work/ && cp -a /app/data /tmp/work/ && cp /tmp/debug.cbl /tmp/work/src/program.cbl
+# fix assigns? program uses relative data/ and src/ so run from /tmp/work
+cd /tmp/work && cobc -x -free -o /tmp/debugbook2 src/program.cbl
+echo "=== original input ==="
+./$(true) 
+/tmp/debugbook2
+echo "=== padded amount ==="
+python3 - << 'PY'
+open("/tmp/work/src/INPUT.DAT","wb").write(b"U001U002B0010000000200")
+PY
+/tmp/debugbook2
+echo "=== files after ==="
+python3 - << 'PY'
+for p in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+    print(p, open("/tmp/work/data/"+p,"rb").read())
+PY
+$ python3 - << 'PY'
+import subprocess, os, shutil, pathlib
+
+def run_case(input_bytes, label):
+    base=pathlib.Path("/tmp/cases")/label
+    if base.exists():
+        shutil.rmtree(base)
+    (base/"src").mkdir(parents=True)
+    (base/"data").mkdir()
+    shutil.copy("/app/src/program.cbl", base/"src/program.cbl")
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        shutil.copy(f"/tmp/cobol-backup/{n}", base/"data"/n)
+    (base/"src"/"INPUT.DAT").write_bytes(input_bytes)
+    # compile once outside
+    exe="/tmp/bookforum"
+    r=subprocess.run([exe], cwd=base, capture_output=True)
+    print("CASE", label, "input", input_bytes)
+    print("STDOUT", r.stdout)
+    print("STDERR", r.stderr)
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        print(n, (base/"data"/n).read_bytes())
+    print("---")
+
+# restore original backup files still exist?
+print("backup", os.listdir("/tmp/cobol-backup"))
+run_case(b"U001U002B0010000000200", "ok")
+run_case(b"U001U002B0010000000200\n", "nl")
+run_case(b"U001U002B0070000000200", "badbook")
+run_case(b"U009U002B0010000000200", "badbuyer")
+run_case(b"U001U009B0010000000200", "badseller")
+run_case(b"U001U001B0010000000200", "sameuser")  # seller not owner of B001? B001 owner is U002
+run_case(b"U002U002B0010000000050", "self")
+run_case(b"U003U002B0030000000100", "ok2")
+run_case(b"U001U002B0010000000200XX", "extra")
+run_case(b"U001U002B00100000002", "short")
+run_case(b"", "empty")
+run_case(b"U001U002B0010000000000", "zero")
+run_case(b"U001U002B0010000012000", "over")  # buyer only has 1180
+run_case(b"u001U002B0010000000200", "case")
+PY
+$ python3 - << 'PY'
+import subprocess, os, shutil, pathlib
+
+def run_case(input_bytes, label, accounts=None, books=None, trans=None):
+    base=pathlib.Path("/tmp/cases2")/label
+    if base.exists():
+        shutil.rmtree(base)
+    (base/"src").mkdir(parents=True)
+    (base/"data").mkdir()
+    shutil.copy("/app/src/program.cbl", base/"src/program.cbl")
+    if accounts is None:
+        shutil.copy("/tmp/cobol-backup/ACCOUNTS.DAT", base/"data/ACCOUNTS.DAT")
+    else:
+        (base/"data/ACCOUNTS.DAT").write_bytes(accounts)
+    if books is None:
+        shutil.copy("/tmp/cobol-backup/BOOKS.DAT", base/"data/BOOKS.DAT")
+    else:
+        (base/"data/BOOKS.DAT").write_bytes(books)
+    if trans is None:
+        shutil.copy("/tmp/cobol-backup/TRANSACTIONS.DAT", base/"data/TRANSACTIONS.DAT")
+    else:
+        (base/"data/TRANSACTIONS.DAT").write_bytes(trans)
+    (base/"src"/"INPUT.DAT").write_bytes(input_bytes)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    print("CASE", label)
+    print("RC", r.returncode)
+    print("STDOUT", r.stdout)
+    print("STDERR", r.stderr)
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        print(n, (base/"data"/n).read_bytes())
+    print("---")
+
+# wrap underflow more carefully: buyer 0000000100 subtract 200 => ?
+run_case(b"U001U002B0010000000200", "under",
+         accounts=b"U001John Doe            0000000100U002Jane Smith          0000001800U003Bob Wilson          0000001520")
+
+# max subtract causing wrap from 0
+run_case(b"U001U002B0010000000001", "under1",
+         accounts=b"U001John Doe            0000000000U002Jane Smith          0000001800")
+
+# large add wrap seller
+run_case(b"U001U002B0019999999999", "overmax",
+         accounts=b"U001John Doe            0000001180U002Jane Smith          0000001800")
+
+# buyer and seller same record order, two updates
+run_case(b"U001U001B0020000000010", "selfowner",
+         books=b"B002COBOL Guide         U001")
+
+# spaces in ids
+run_case(b"U001U002B0010000000200", "spaces_names_ok")
+
+# record shorter than expected accounts
+run_case(b"U001U002B0010000000010", "shortacct",
+         accounts=b"U001John Doe            0000001180U002Jane")
+
+# non numeric amount
+run_case(b"U001U002B001ABCDEFGHIJ", "nonnum")
+
+# amount with spaces
+run_case(b"U001U002B001        20", "amtspace")
+
+# leading spaces amount? PIC 9
+run_case(b"U001U002B001  00000200", "amtspace2")
+
+# newline only
+run_case(b"\n", "nlonly")
+
+# multiple lines
+run_case(b"U001U002B0010000000200\nU003U002B0020000000010\n", "twolines")
+
+# book owner mismatch but book exists
+run_case(b"U001U003B0010000000200", "wrongowner")
+
+# duplicate book ids
+run_case(b"U001U002B0010000000010", "dupbook",
+         books=b"B001Python Basics       U002B001Other Title         U003")
+
+# duplicate accounts
+run_case(b"U001U002B0010000000010", "dupacct",
+         accounts=b"U001John Doe            0000001180U001John Two            0000000500U002Jane Smith          0000001800")
+
+print("DONE")
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run(inp):
+    base=pathlib.Path("/tmp/numprobe")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    shutil.copy("/app/src/program.cbl", base/"src/program.cbl")
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001John Doe            0000001000U002Jane Smith          0000001000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001Python Basics       U002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(inp)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    print("IN", inp, "RC", r.returncode)
+    print("ERR", r.stderr[:300])
+    print("ACC", (base/"data/ACCOUNTS.DAT").read_bytes())
+    print("TR ", (base/"data/TRANSACTIONS.DAT").read_bytes())
+
+for s in [
+    b"U001U002B0010000000123",
+    b"U001U002B001123",
+    b"U001U002B001",
+    b"U001U002B001000000012",
+    b"U001U002B00100000001234",  # extra digit? record is 22, extra ignored if more
+    b"U001U002B001000000012X",
+    b"U001U002B00100000001X3",
+    b"U001U002B0010000000A23",
+    b"U001U002B001ABCDEFGH12",
+    b"U001U002B00112ABCDEFGH",
+    b"U001U002B001          ",
+    b"U001U002B001         5",
+    b"U001U002B0015         ",
+    b"U001U002B0010000000123\r\n",
+    b"U001U002B0010000000123\r",
+    b"U001U002B00X0000000123",
+]:
+    run(s)
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run(inp, label=""):
+    base=pathlib.Path("/tmp/numprobe2")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    shutil.copy("/app/src/program.cbl", base/"src/program.cbl")
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001John Doe            0000001000U002Jane Smith          0000001000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001Python Basics       U002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(inp)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    # extract balances
+    def bal(rec):
+        return rec[24:34]
+    print(repr(inp), "buyer", bal(acc[0:34]), "seller", bal(acc[34:68]), "tr", (base/"data/TRANSACTIONS.DAT").read_bytes()[4:14] if (base/"data/TRANSACTIONS.DAT").read_bytes() else None)
+
+chars = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz +-/.,")
+# test each char in units place with leading zeros
+for ch in chars:
+    inp = b"U001U002B001000000000" + ch.encode()
+    run(inp)
+PY
+$ python3 - << 'PY'
+# ASCII low nibble analysis
+chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz +-/.,"
+# observed delta seller-1000 for single units digit, 0 for space and P/p
+# I'll recompute from previous printed deltas
+obs = {}
+# parse from the function by rerunning quickly
+import subprocess, shutil, pathlib
+
+def delta(ch):
+    base=pathlib.Path("/tmp/np")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA0000001000U002BBBBBBBBBBBBBBBBBBBB0000001000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001000000000"+bytes([ch]))
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    b=int(acc[24:34]); s=int(acc[58:68])
+    return b-1000, s-1000, acc[24:34], acc[58:68]
+
+for ch in range(256):
+    db, ds, bs, ss = delta(ch)
+    low = ch & 0x0F
+    high = (ch >> 4) & 0x0F
+    print(f"{ch:3d} {chr(ch) if 32<=ch<127 else '?'} low={low:X} high={high:X} db={db} ds={ds} b={bs.decode()} s={ss.decode()}")
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run(inp, balb=1000, bals=1000):
+    base=pathlib.Path("/tmp/np3")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{balb:010d}".encode(); bs=f"{bals:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bs)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(inp)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    print("IN", inp)
+    print(" ERR", r.stderr[:200])
+    print(" ACC", acc)
+    print(" TR", tr)
+    return acc, tr
+
+# two digit positions non numeric
+run(b"U001U002B00100000000A5")
+run(b"U001U002B0010000000A05")
+run(b"U001U002B001A000000005")
+run(b"U001U002B00100000A0005")
+# both non numeric
+run(b"U001U002B00100000000AB")
+# space in middle
+run(b"U001U002B00100000 0005")
+run(b"U001U002B001000000 005")
+# high digit
+run(b"U001U002B001A000000000")
+run(b"U001U002B001000000000{")  # 0x7B low B
+# check if V99 affects stored amount - WS-AMOUNT is 9(10)V99 moved to 9(10)
+# input only 10 digits so V99 is .00
+# what if we could have more? record stops at 10.
+
+# numeric non-digit in higher place with small low
+run(b"U001U002B0010000000P5")  # P is low 0?
+# P is 0x50 low 0
+run(b"U001U002B00100000000P5".replace(b'P', bytes([0x50])))
+
+# underflow display of result when subtraction goes negative - already saw size error keeps original?
+run(b"U001U002B0010000001001", balb=1000)
+run(b"U001U002B0010000001000", balb=1000)
+run(b"U001U002B0010000001001", balb=1001)
+
+# addition overflow
+run(b"U001U002B0010000000001", bals=9999999999)
+
+# both same and different: buyer id equals seller, but we saw crash. Let's see file status more carefully by instrumenting.
+print("--- size error positions ---")
+PY
+> write /app/program.py
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib, os, filecmp, tempfile
+
+def run_both(input_bytes, accounts=None, books=None, trans=None, label=""):
+    base_c=pathlib.Path("/tmp/cmp")/ (label+"_c")
+    base_p=pathlib.Path("/tmp/cmp")/ (label+"_p")
+    for base in (base_c, base_p):
+        if base.exists(): shutil.rmtree(base)
+        (base/"src").mkdir(parents=True)
+        (base/"data").mkdir(parents=True)
+        if accounts is None:
+            shutil.copy("/tmp/cobol-backup/ACCOUNTS.DAT", base/"data/ACCOUNTS.DAT")
+        else:
+            (base/"data/ACCOUNTS.DAT").write_bytes(accounts)
+        if books is None:
+            shutil.copy("/tmp/cobol-backup/BOOKS.DAT", base/"data/BOOKS.DAT")
+        else:
+            (base/"data/BOOKS.DAT").write_bytes(books)
+        if trans is None:
+            shutil.copy("/tmp/cobol-backup/TRANSACTIONS.DAT", base/"data/TRANSACTIONS.DAT")
+        else:
+            (base/"data/TRANSACTIONS.DAT").write_bytes(trans)
+        (base/"src/INPUT.DAT").write_bytes(input_bytes)
+    # cobol uses compiled binary that reads relative paths
+    rc=subprocess.run(["/tmp/bookforum"], cwd=base_c, capture_output=True)
+    rp=subprocess.run(["python3","/app/program.py"], cwd=base_p, capture_output=True)
+    ok=True
+    diffs=[]
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        a=(base_c/"data"/n).read_bytes()
+        b=(base_p/"data"/n).read_bytes()
+        if a!=b:
+            ok=False
+            diffs.append((n,a,b))
+    # stdout compare (stderr only for crash case)
+    if rc.stdout!=rp.stdout:
+        ok=False
+        diffs.append(("STDOUT", rc.stdout, rp.stdout))
+    if rc.returncode!=rp.returncode:
+        ok=False
+        diffs.append(("RC", rc.returncode, rp.returncode))
+    # stderr: python may differ in exact text; compare if both empty or both nonempty for status 43
+    if (rc.stderr==b"") != (rp.stderr==b""):
+        ok=False
+        diffs.append(("STDERR_EMPTY", rc.stderr, rp.stderr))
+    status="OK" if ok else "DIFF"
+    print(status, label, "in", input_bytes[:40])
+    if not ok:
+        for d in diffs:
+            print(" ", d[0])
+            print("   C", d[1][:200])
+            print("   P", d[2][:200])
+
+cases=[]
+orig_in=open("/tmp/cobol-backup/INPUT.DAT","rb").read()
+run_both(orig_in, label="original")
+run_both(b"U001U002B0010000000200", label="ok")
+run_both(b"U001U002B0010000000200\n", label="nl")
+run_both(b"U001U002B0070000000200", label="badbook")
+run_both(b"U009U002B0010000000200", label="badbuyer")
+run_both(b"U001U009B0010000000200", label="badseller")
+run_both(b"U001U001B0010000000200", label="sameuser_notowner")
+run_both(b"U002U002B0010000000050", label="self_not_crash? owner yes same id")
+run_both(b"U003U002B0030000000100", label="ok2")
+run_both(b"U001U002B0010000000200XX", label="extra")
+run_both(b"U001U002B00100000002", label="short")
+run_both(b"", label="empty")
+run_both(b"U001U002B0010000000000", label="zero")
+run_both(b"U001U002B0010000012000", label="over")
+run_both(b"u001U002B0010000000200", label="case")
+run_both(b"U001U002B0010000000200", label="under",
+         accounts=b"U001John Doe            0000000100U002Jane Smith          0000001800U003Bob Wilson          0000001520")
+run_both(b"U001U002B0010000000001", label="under1",
+         accounts=b"U001John Doe            0000000000U002Jane Smith          0000001800")
+run_both(b"U001U002B0019999999999", label="overmax",
+         accounts=b"U001John Doe            0000001180U002Jane Smith          0000001800")
+run_both(b"U001U001B0020000000010", label="selfowner",
+         books=b"B002COBOL Guide         U001")
+run_both(b"U001U002B001ABCDEFGHIJ", label="nonnum")
+run_both(b"U001U002B001        20", label="amtspace")
+run_both(b"U001U002B001  00000200", label="amtspace2")
+run_both(b"\n", label="nlonly")
+run_both(b"U001U002B0010000000200\nU003U002B0020000000010\n", label="twolines")
+run_both(b"U001U003B0010000000200", label="wrongowner")
+run_both(b"U001U002B0010000000010", label="dupbook",
+         books=b"B001Python Basics       U002B001Other Title         U003")
+run_both(b"U001U002B0010000000010", label="dupacct",
+         accounts=b"U001John Doe            0000001180U001John Two            0000000500U002Jane Smith          0000001800")
+run_both(b"U001U002B001123", label="shortamt")
+run_both(b"U001U002B001", label="noamt")
+run_both(b"U001U002B001000000012", label="9digits")
+run_both(b"U001U002B001000000012X", label="x")
+run_both(b"U001U002B0010000000A23", label="A")
+run_both(b"U001U002B0015         ", label="lead5")
+run_both(b"U001U002B0010000000123\r\n", label="crlf")
+run_both(b"U001U002B00X0000000123", label="badbookx")
+run_both(b"U001U002B00100000000A5", label="A5")
+run_both(b"U001U002B0010000000A05", label="A05")
+run_both(b"U001U002B001A000000005", label="Alead")
+run_both(b"U001U002B00100000000AB", label="AB")
+run_both(b"U001U002B00100000 0005", label="spmid")
+run_both(b"U001U002B001000000000{", label="brace")
+run_both(b"U001U002B0010000001001", label="exactunder",
+         accounts=b"U001AAAAAAAAAAAAAAAAAAAA0000001000U002BBBBBBBBBBBBBBBBBBBB0000001000")
+run_both(b"U001U002B0010000000001", label="addwrap",
+         accounts=b"U001AAAAAAAAAAAAAAAAAAAA0000001000U002BBBBBBBBBBBBBBBBBBBB9999999999")
+# newline separated records? our data files are concatenated without newlines. COBOL sequential default is record sequential not line sequential!
+# Important: if files have no newlines, GnuCOBOL sequential reads fixed length based on FD record size.
+# My reader splits on newlines. If a record contains no newline, whole file is one chunk then sliced to rec_len ONLY FIRST RECORD!
+print("--- check no-newline multi record is default and works for original ---")
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run_both(input_bytes, accounts=None, books=None, trans=None, label=""):
+    base_c=pathlib.Path("/tmp/cmp")/ (label+"_c")
+    base_p=pathlib.Path("/tmp/cmp")/ (label+"_p")
+    for base in (base_c, base_p):
+        if base.exists(): shutil.rmtree(base)
+        (base/"src").mkdir(parents=True)
+        (base/"data").mkdir(parents=True)
+        if accounts is None:
+            shutil.copy("/tmp/cobol-backup/ACCOUNTS.DAT", base/"data/ACCOUNTS.DAT")
+        else:
+            (base/"data/ACCOUNTS.DAT").write_bytes(accounts)
+        if books is None:
+            shutil.copy("/tmp/cobol-backup/BOOKS.DAT", base/"data/BOOKS.DAT")
+        else:
+            (base/"data/BOOKS.DAT").write_bytes(books)
+        if trans is None:
+            shutil.copy("/tmp/cobol-backup/TRANSACTIONS.DAT", base/"data/TRANSACTIONS.DAT")
+        else:
+            (base/"data/TRANSACTIONS.DAT").write_bytes(trans)
+        (base/"src/INPUT.DAT").write_bytes(input_bytes)
+    rc=subprocess.run(["/tmp/bookforum"], cwd=base_c, capture_output=True)
+    # copy program into base and run from there so relative paths match COBOL
+    shutil.copy("/app/program.py", base_p/"program.py")
+    rp=subprocess.run(["python3","program.py"], cwd=base_p, capture_output=True)
+    ok=True
+    diffs=[]
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        a=(base_c/"data"/n).read_bytes(); b=(base_p/"data"/n).read_bytes()
+        if a!=b:
+            ok=False; diffs.append((n,a,b))
+    if rc.stdout!=rp.stdout:
+        ok=False; diffs.append(("STDOUT", rc.stdout, rp.stdout))
+    if rc.returncode!=rp.returncode:
+        ok=False; diffs.append(("RC", str(rc.returncode).encode(), str(rp.returncode).encode()))
+    if (rc.stderr==b"") != (rp.stderr==b""):
+        ok=False; diffs.append(("STDERR", rc.stderr, rp.stderr))
+    print(("OK" if ok else "DIFF"), label)
+    if not ok:
+        for d in diffs:
+            print(" ", d[0]); print("   C", d[1]); print("   P", d[2])
+
+orig_in=open("/tmp/cobol-backup/INPUT.DAT","rb").read()
+run_both(orig_in, label="original")
+run_both(b"U001U002B0010000000200", label="ok")
+run_both(b"U001U002B0010000000200\n", label="nl")
+run_both(b"U002U002B0010000000050", label="self")
+run_both(b"U003U002B0030000000100", label="ok2")
+run_both(b"U001U002B00100000002", label="short")
+run_both(b"", label="empty")
+run_both(b"U001U002B0010000012000", label="over")
+run_both(b"U001U002B0010000000200", label="under",
+         accounts=b"U001John Doe            0000000100U002Jane Smith          0000001800U003Bob Wilson          0000001520")
+run_both(b"U001U002B0019999999999", label="overmax",
+         accounts=b"U001John Doe            0000001180U002Jane Smith          0000001800")
+run_both(b"U001U001B0020000000010", label="selfowner",
+         books=b"B002COBOL Guide         U001")
+run_both(b"U001U002B001ABCDEFGHIJ", label="nonnum")
+run_both(b"U001U002B001        20", label="amtspace")
+run_both(b"U001U002B0010000000123\r\n", label="crlf")
+run_both(b"U001U002B0010000000010", label="dupbook",
+         books=b"B001Python Basics       U002B001Other Title         U003")
+run_both(b"U001U002B0010000000010", label="dupacct",
+         accounts=b"U001John Doe            0000001180U001John Two            0000000500U002Jane Smith          0000001800")
+run_both(b"U001U002B001123", label="shortamt")
+run_both(b"U001U002B0015         ", label="lead5")
+run_both(b"U001U002B001A000000005", label="Alead")
+run_both(b"U001U002B001000000000{", label="brace")
+run_both(b"U001U002B0010000000001", label="addwrap",
+         accounts=b"U001AAAAAAAAAAAAAAAAAAAA0000001000U002BBBBBBBBBBBBBBBBBBBB9999999999")
+run_both(b"\n", label="nlonly")
+run_both(b"U001U002B0010000000200\nU003U002B0020000000010\n", label="twolines")
+# files that contain embedded newlines as if line sequential was used - check COBOL behavior
+run_both(b"U001U002B0010000000010", label="nl_accounts",
+         accounts=b"U001John Doe            0000001180\nU002Jane Smith          0000001800\n")
+print("done")
+PY
+> write /app/program.py
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run_both(input_bytes, accounts=None, books=None, trans=None, label=""):
+    base_c=pathlib.Path("/tmp/cmp")/ (label+"_c")
+    base_p=pathlib.Path("/tmp/cmp")/ (label+"_p")
+    for base in (base_c, base_p):
+        if base.exists(): shutil.rmtree(base)
+        (base/"src").mkdir(parents=True)
+        (base/"data").mkdir(parents=True)
+        if accounts is None:
+            shutil.copy("/tmp/cobol-backup/ACCOUNTS.DAT", base/"data/ACCOUNTS.DAT")
+        else:
+            (base/"data/ACCOUNTS.DAT").write_bytes(accounts)
+        if books is None:
+            shutil.copy("/tmp/cobol-backup/BOOKS.DAT", base/"data/BOOKS.DAT")
+        else:
+            (base/"data/BOOKS.DAT").write_bytes(books)
+        if trans is None:
+            shutil.copy("/tmp/cobol-backup/TRANSACTIONS.DAT", base/"data/TRANSACTIONS.DAT")
+        else:
+            (base/"data/TRANSACTIONS.DAT").write_bytes(trans)
+        (base/"src/INPUT.DAT").write_bytes(input_bytes)
+    rc=subprocess.run(["/tmp/bookforum"], cwd=base_c, capture_output=True)
+    shutil.copy("/app/program.py", base_p/"program.py")
+    rp=subprocess.run(["python3","program.py"], cwd=base_p, capture_output=True)
+    ok=True
+    diffs=[]
+    for n in ["ACCOUNTS.DAT","BOOKS.DAT","TRANSACTIONS.DAT"]:
+        a=(base_c/"data"/n).read_bytes(); b=(base_p/"data"/n).read_bytes()
+        if a!=b:
+            ok=False; diffs.append((n,a,b))
+    if rc.stdout!=rp.stdout:
+        ok=False; diffs.append(("STDOUT", rc.stdout, rp.stdout))
+    if rc.returncode!=rp.returncode:
+        ok=False; diffs.append(("RC", str(rc.returncode).encode(), str(rp.returncode).encode()))
+    if rc.stderr!=rp.stderr:
+        # show but maybe whitespace
+        ok=False; diffs.append(("STDERR", rc.stderr, rp.stderr))
+    print(("OK" if ok else "DIFF"), label)
+    if not ok:
+        for d in diffs:
+            print(" ", d[0]); print("   C", d[1]); print("   P", d[2])
+
+orig_in=open("/tmp/cobol-backup/INPUT.DAT","rb").read()
+run_both(orig_in, label="original")
+run_both(b"U001U002B0010000000200", label="ok")
+run_both(b"U001U002B0010000000200\n", label="nl")
+run_both(b"U002U002B0010000000050", label="self")
+run_both(b"U003U002B0030000000100", label="ok2")
+run_both(b"U001U002B00100000002", label="short")
+run_both(b"", label="empty")
+run_both(b"U001U002B0010000012000", label="over")
+run_both(b"U001U002B0010000000200", label="under",
+         accounts=b"U001John Doe            0000000100U002Jane Smith          0000001800U003Bob Wilson          0000001520")
+run_both(b"U001U002B0019999999999", label="overmax",
+         accounts=b"U001John Doe            0000001180U002Jane Smith          0000001800")
+run_both(b"U001U001B0020000000010", label="selfowner",
+         books=b"B002COBOL Guide         U001")
+run_both(b"U001U002B001ABCDEFGHIJ", label="nonnum")
+run_both(b"U001U002B001        20", label="amtspace")
+run_both(b"U001U002B0010000000123\r\n", label="crlf")
+run_both(b"U001U002B0010000000010", label="dupbook",
+         books=b"B001Python Basics       U002B001Other Title         U003")
+run_both(b"U001U002B0010000000010", label="dupacct",
+         accounts=b"U001John Doe            0000001180U001John Two            0000000500U002Jane Smith          0000001800")
+run_both(b"U001U002B001123", label="shortamt")
+run_both(b"U001U002B0015         ", label="lead5")
+run_both(b"U001U002B001A000000005", label="Alead")
+run_both(b"U001U002B001000000000{", label="brace")
+run_both(b"U001U002B0010000000001", label="addwrap",
+         accounts=b"U001AAAAAAAAAAAAAAAAAAAA0000001000U002BBBBBBBBBBBBBBBBBBBB9999999999")
+run_both(b"\n", label="nlonly")
+run_both(b"U001U002B0010000000200\nU003U002B0020000000010\n", label="twolines")
+run_both(b"U001U002B0010000000010", label="nl_accounts",
+         accounts=b"U001John Doe            0000001180\nU002Jane Smith          0000001800\n")
+run_both(b"U001U002B00100000000P5", label="P5")
+run_both(b"U001U002B00100000 0005", label="spmid")
+run_both(b"U001U002B001          ", label="spacesamt")
+run_both(b"U001U002B001000000012X", label="xdigit")
+run_both(b"U009U002B0010000000200", label="badbuyer")
+run_both(b"U001U003B0010000000200", label="wrongowner")
+# partial last account record
+run_both(b"U001U002B0010000000010", label="shortacct",
+         accounts=b"U001John Doe            0000001180U002Jane")
+# empty transactions extend
+run_both(b"U001U002B0010000000007", label="emptytrans", trans=b"")
+# missing input file?
+print("done cases")
+PY
+$ python3 - << 'PY'
+# Confirm: space low nibble 0 should be digit 0 NOT reset.
+# ' ' is 0x20 low 0. "        20" became amount 20 not wiped to something else... 
+# if space is 0, "        20" = 20. "5         " = 5000000000. "00000 0005" = 5.
+# P is 0x50 low 0. "0000000P5" amount: earlier buyer 1000 -> 995 so amount 5? Wait record was 0000000P50 because short? 
+# Case P5 input b"U001U002B00100000000P5" with full balances 1180/1800
+# COBOL result buyer 0000001175 seller 0000001805 => amount 5.
+# If P is digit 0, amount of 00000000P5 = 5. YES.
+# "0000000P50" if P resets would be 50. Earlier isolated test with fresh 1000/1000:
+# IN 0000000P5 -> I had a bug in replace and input became 0000000P50? Let's not.
+# A is 0x41 low 1. "A000000005" = 1000000005. COBOL buyer from 1180: 6999998825.
+# 1180 - 1000000005 = -999998825 mod 10**10 = 9999999999-999998824 = wait
+# (-999998825) % 10**10 = 9000001175? That doesn't match 6999998825.
+# Let me compute 1180 - X = 6999998825 mod 1e10 => X = 1180 - 6999998825 = -6999997645 mod 1e10 = 3000002355? hmm not 1000000005.
+# 1180 - 1000000005 = -999998825 ; % 10**10 = 9000001175. But COBOL gave 6999998825.
+# Difference: 9000001175 - 6999998825 = 2000002350? Not helpful.
+# Maybe high nibble zone also matters? EBCDIC vs ASCII numeric conversion in GnuCOBOL.
+# Let's look at gnucobol source behavior: numeric display is checked per digit.
+# Perhaps non-numeric digits use (byte - 0x30) or something? 
+# 'A' is 0x41, '0' is 0x30, 'A'-'0' = 17. Not 1.
+# Let's empirically fit a model by testing single position powers.
+
+import subprocess, shutil, pathlib
+
+def amount_effect(raw10):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA0000005000U002BBBBBBBBBBBBBBBBBBBB0000005000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    b=int(acc[24:34]); s=int(acc[58:68])
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return 5000-b, s-5000, tr[4:14], r.returncode, r.stderr[:80]
+
+# single char at each position
+for pos in range(10):
+    raw=bytearray(b"0000000000")
+    raw[pos]=ord('A')
+    db, ds, tr, rc, err = amount_effect(bytes(raw))
+    print("pos", pos, "A", "db", db, "ds", ds, "tr", tr)
+
+print("--- digits ---")
+for ch in b"0123456789":
+    raw=bytearray(b"0000000000"); raw[9]=ch
+    db, ds, tr, rc, err = amount_effect(bytes(raw))
+    print(chr(ch), db, ds)
+
+print("--- space positions ---")
+for pos in range(10):
+    raw=bytearray(b"0000000000")
+    raw[pos]=ord(' ')
+    db, ds, tr, rc, err = amount_effect(bytes(raw))
+    print("pos", pos, "space db", db, "ds", ds, "tr", tr)
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def effect(raw10, bal=5000):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{bal:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    b=int(acc[24:34]); s=int(acc[58:68])
+    # signed delta using seller increase if no wrap, else buyer
+    # seller new = (bal + amt) % 10**10
+    # recover amt mod 10**10 from seller
+    ds = (s - bal) % 10**10
+    return ds, acc[24:34], acc[58:68], r.stderr[:60]
+
+# Map every byte as units digit
+print("UNITS")
+for ch in range(256):
+    ds, b, s, err = effect(b"000000000"+bytes([ch]))
+    if ds != (ch & 0xF) and not ( (ch & 0xF)==0 and ds==0):
+        pass
+    print(f"{ch:3d} {ch:02x} {chr(ch) if 32<=ch<127 else '.'} ds={ds}")
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def seller_delta(raw10, bal=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{bal:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    s=int(acc[58:68])
+    return (s - bal) % 10**10
+
+# For chars whose units value > 9, check higher position scaling
+interesting = [ord(c) for c in ":;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ"] + [1,10,43,255,17]
+for ch in interesting:
+    units = seller_delta(b"000000000"+bytes([ch]))
+    tens = seller_delta(b"00000000"+bytes([ch])+b"0")
+    hundreds = seller_delta(b"0000000"+bytes([ch])+b"00")
+    print(f"{ch:3d} {chr(ch) if 32<=ch<127 else '?'} units={units} tens={tens} hund={hundreds} tens/units={tens/units if units else 'na'} h/u={hundreds/units if units else 'na'}")
+PY
+$ python3 - << 'PY'
+# Hypothesis: digit value = byte - 0x30 if byte>=0x30 else special?
+# 'A' 0x41 - 0x30 = 0x11 = 17. YES matches units=17
+# '0' 0x30 - 0x30 = 0
+# 'P' 0x50 - 0x30 = 0x20 = 32 but observed 0. NOT simply subtract.
+# space 0x20 - 0x30 = negative.
+# Observed: if (byte & 0x0F)==0: digit 0? 'P' is 0x50 low 0 -> 0. '@' 0x40 -> 0. 'p' 0x70 -> 0. '0' -> 0.
+# else digit = byte - 0x30? 
+# 'A' 0x41-0x30=17 OK
+# '9' 0x39-0x30=9 OK
+# ':' 0x3A-0x30=10 OK
+# 'a' 0x61-0x30=49 OK
+# '{' 0x7B-0x30=75 OK
+# 0xFF-0x30=207 OK
+# 0x01 - 0x30 = -47, not 737095469.
+# Maybe for byte < 0x30, value is interpreted as signed 32-bit or 64 with some formula.
+# Let's see bytes < 0x30 more carefully with small positions so no 64-bit wrap... 
+# tens of byte 1 was 737095046 not 10*units. So NOT a simple digit*place when digit would be huge
+# OR the internal representation overflows 32-bit during decimal accumulation.
+
+# GnuCOBOL often uses an int or a binary-coded structure. 737095469 looks familiar?
+print(737095469)
+print(hex(737095469))
+# 2C00000D ? 
+print(0x2C00000D)
+
+# Maybe they pack into a 32-bit binary integer incorrectly.
+# Let's compute accumulation in int32:
+def acc32(raw):
+    v = 0
+    for b in raw:
+        # try digit
+        d = (b - 0x30) & 0xFF  # unsigned byte delta?
+        v = (v * 10 + d) & 0xFFFFFFFF
+    # signed
+    if v >= 2**31:
+        v -= 2**32
+    return v
+
+def acc32b(raw):
+    v = 0
+    import ctypes
+    v = 0
+    for b in raw:
+        if (b & 0x0F)==0:
+            d=0
+        else:
+            d = b - 0x30
+        v = ctypes.c_int32(v * 10 + d).value
+    return v
+
+samples = {
+ 'A': b'000000000A',
+ 'ctrl1': bytes([1])+b'000000000'[1:] if False else b'000000000'+bytes([1]),
+ 'ctrl1full': bytes([1])*1,
+}
+raw = b'000000000'+bytes([1])
+print('acc32', acc32(raw), 'acc32b', acc32b(raw))
+raw = b'00000000'+bytes([1])+b'0'
+print('tens acc32', acc32(raw), acc32b(raw))
+raw = b'0000000'+bytes([1])+b'00'
+print('hun acc32', acc32(raw), acc32b(raw))
+
+# observed units 737095469, tens 737095046, hund 737090816
+print('obs', 737095469, 737095046, 737090816)
+
+# try digit = b if b<0x30 else b-0x30, int64 then mod 10**10 at end only
+def model(raw, digfn):
+    v=0
+    for b in raw:
+        v = v*10 + digfn(b)
+    return v
+
+def d1(b):
+    if b>=0x30:
+        return b-0x30 if (b & 0x0F)!=0 else 0
+    else:
+        return b  # ?
+print('m', model(b'000000000'+bytes([1]), d1) % 10**10)
+
+# Search small formulas for byte 0x01 units contribution stored mod 10**10
+# If only last digit and leading zeros:
+# value = f(0x01)  and then stored after add to 0 mod 10**10 = 737095469
+# so f(1) = 737095469 or 737095469 - k*something
+
+# Perhaps COBOL uses a 31-digit or 18-digit decimal and the binary is long,
+# but MOVE to PIC 9(10) truncates to 10 digits AFTER a binary conversion that overflowed 32-bit.
+# Classic COBOL binary COMP is often 32-bit? But PIC 9(10)V99 doesn't fit in 32-bit (max 2e9).
+# GnuCOBOL uses GMP or 64-bit. 10 digits + 2 decimals fits in 64-bit.
+
+# Let's look at libcob numeric get. I'll find source if installed.
+import os
+for root, dirs, files in os.walk('/usr'):
+    for f in files:
+        if 'numeric' in f and f.endswith(('.c','.h')):
+            print(os.path.join(root,f))
+PY
+find /usr -name 'numeric.c' -o -name 'move.c' -o -name 'common.c' 2>/dev/null | head -50
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def deltas(raw10):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA0000000000U002BBBBBBBBBBBBBBBBBBBB0000000000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[24:34], acc[58:68]
+
+# Compare buyer and seller for control char to see if subtract size-error'd differently
+for ch in [1, 15, 31, 32, 43, 45, 47, 48, 65, 255]:
+    b,s = deltas(b"000000000"+bytes([ch]))
+    print(ch, "buyer", b, "seller", s)
+
+print("--- two weird digits ---")
+b,s=deltas(bytes([1,2])+b"00000000")
+print("12......", b, s)
+b,s=deltas(b"00000000"+bytes([1,2]))
+print("........12", b, s)
+b,s=deltas(b"000000000"+bytes([0x2B]))  # +
+print("+", b, s)
+b,s=deltas(b"00000000"+bytes([0x2B])+b"0")
+print("+0", b, s)
+b,s=deltas(b"0000000"+bytes([0x2B])+b"00")
+print("+00", b, s)
+b,s=deltas(b"000000"+bytes([0x2B])+b"000")
+print("+000", b, s)
+b,s=deltas(b""+bytes([0x2B])+b"000000000")
+print("lead+", b, s)
+PY
+$ find /usr -iname '*cob*' -type d 2>/dev/null | head -40; ls /usr/include/libcob 2>/dev/null | head; python3 - << 'PY'
+# Analyze pattern of weird numbers as 10-digit strings
+vals = {
+1: '0737095469',
+15:'0737095483',
+31:'0737095499',
+43:'0737095511',
+45:'0737095513',
+47:'0737095515',
+}
+# difference from char
+base = None
+for ch,s in vals.items():
+    print(ch, s, int(s)-ch)
+
+# For '+' =43 at different positions the stored 10-digit:
+# pos9 (units): 0737095511
+# pos8:         0737095466
+# pos7:         0737095016
+# pos6:         0737090516
+# pos0:         5737095516
+# Let's get all 10 positions for byte 0x01 and byte 0x2B and byte 0x00 and byte 0x20 and byte 0xFF
+import subprocess, shutil, pathlib
+
+def stored(raw10):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA0000000000U002BBBBBBBBBBBBBBBBBBBB0000000000")
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return acc[58:68], tr[4:14]
+
+print("POS scan byte 1")
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=1
+    s,tr=stored(bytes(raw))
+    print(pos, s, tr)
+
+print("POS scan plus")
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=ord('+')
+    s,tr=stored(bytes(raw))
+    print(pos, s, tr)
+
+print("POS scan 0xFF")
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=255
+    s,tr=stored(bytes(raw))
+    print(pos, s, tr)
+
+print("POS scan space")
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=32
+    s,tr=stored(bytes(raw))
+    print(pos, s, tr)
+PY
+$ ls /usr/share/gnucobol /usr/share/doc/gnucobol3 /usr/include/libcob | head -100; echo '--- common.h numeric ---'; rg -n "cob_get_int|display_get|numeric" /usr/include/libcob/common.h | head -40
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def stored_seller(raw10, bal=b"0000000000"):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bal+b"U002BBBBBBBBBBBBBBBBBBBB"+bal)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[24:34], acc[58:68], (base/"data/TRANSACTIONS.DAT").read_bytes()[4:14]
+
+# What does MOVE do to TRANS-AMOUNT for spaces and short records?
+# Already know spaces become zeros in TRANS, short right-pads then numeric edit to zeros? 
+# short "123" became "1230000000" not "0000000123". So it's NOT a numeric re-edit of the value;
+# it's space->zero translation of the original bytes, preserving position!
+# "5         " -> "5000000000"
+# "        20" -> "0000000020"
+# "00000 0005" -> "0000000005"  WAIT earlier spmid input was b"U001U002B00100000 0005"
+# COBOL TR was B0010000000005  so space became 0 AND... 00000 0005 -> 0000000005. That's just space to 0. Yes 0000000005.
+# "          " -> "0000000000"
+# "00000000P5" -> need check
+# non-numeric letters preserved: ABCDEFGHIJ preserved
+# So TRANS-AMOUNT is original bytes with spaces turned into '0'. Not a numeric edit!
+
+b,s,tr=stored_seller(b"00000000P5")
+print("P5", b,s,tr)
+b,s,tr=stored_seller(b"0000000P50")
+print("P50", b,s,tr)
+b,s,tr=stored_seller(b"P000000005")
+print("Plead", b,s,tr)
+b,s,tr=stored_seller(b"000000000p")
+print("p", b,s,tr)
+b,s,tr=stored_seller(b"00000000 5")
+print("sp", b,s,tr)
+b,s,tr=stored_seller(b"\x00000000001")  # null
+print("null", b,s,tr)
+
+# Is low nibble 0 always stored as char '0' in transaction or original byte kept if not space?
+b,s,tr=stored_seller(b"000000000"+bytes([0x00]))
+print("null units tr", tr, "seller", s)
+b,s,tr=stored_seller(b"000000000"+bytes([0x10]))
+print("0x10", tr, s)
+b,s,tr=stored_seller(b"000000000"+bytes([0x40]))  # @
+print("@", tr, s)
+b,s,tr=stored_seller(b"000000000"+bytes([0x50]))  # P
+print("P", tr, s)
+b,s,tr=stored_seller(b"000000000"+bytes([0x09]))
+print("tab", tr, s)
+PY
+$ # decompile numeric conversion via a tiny COBOL program that displays computed amount and also the raw via hex? 
+cat > /tmp/numtest.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NUMTEST.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-RAW          PIC X(10).
+       01 WS-NUM          PIC 9(10)V99.
+       01 WS-OUT          PIC 9(10).
+       01 WS-DISP         PIC Z(9)9.99.
+       PROCEDURE DIVISION.
+       MAIN.
+           ACCEPT WS-RAW
+           MOVE WS-RAW TO WS-NUM
+           MOVE WS-NUM TO WS-OUT
+           DISPLAY "OUT=[" WS-OUT "]"
+           MOVE WS-NUM TO WS-DISP
+           DISPLAY "DISP=[" WS-DISP "]"
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -o /tmp/numtest /tmp/numtest.cbl
+python3 - << 'PY'
+import subprocess
+def show(b):
+    r=subprocess.run(["/tmp/numtest"], input=b, capture_output=True)
+    print(b, r.stdout, r.stderr[:150])
+for s in [b"0000000200", b"000000000A", b"000000000+", b"000000000\x01", b"5         ", b"        20", b"00000000P5", b"A000000000", b"000000000a", b"ABCDEFGHIJ", b"0000000123", b"123", b""]:
+    show(s+b"\n")
+PY
+$ cat > /tmp/numfile.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NUMFILE.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "IN.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 INPUT-AMOUNT PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-OUT PIC 9(10).
+       01 WS-X PIC X(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE
+           END-READ
+           MOVE INPUT-AMOUNT TO WS-AMOUNT
+           MOVE WS-AMOUNT TO WS-OUT
+           MOVE INPUT-AMOUNT TO WS-X
+           DISPLAY "OUT=[" WS-OUT "]"
+           DISPLAY "X=[" WS-X "]"
+           CLOSE INPUT-FILE
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -o /tmp/numfile /tmp/numfile.cbl
+python3 - << 'PY'
+import subprocess, os
+def show(b):
+    open("/tmp/IN.DAT","wb").write(b)
+    r=subprocess.run(["/tmp/numfile"], cwd="/tmp", capture_output=True)
+    print(b, r.stdout, r.stderr[:120])
+for s in [b"0000000200", b"000000000A", b"000000000+", b"000000000\x01", b"5         ", b"        20", b"00000000P5", b"A000000000", b"000000000a", b"ABCDEFGHIJ", b"123", b"", b"000000012X", b"00000 0005", b"000000000{", b"000000000"+bytes([255]), b"000000000"+bytes([1])]:
+    show(s)
+PY
+$ cat > /tmp/arith.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ARITH.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "IN.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+           SELECT ACC-FILE ASSIGN TO "ACC.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 IN-AMT PIC 9(10).
+       FD ACC-FILE.
+       01 ACC-RECORD.
+           05 ACC-BAL PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-OUT PIC 9(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           CLOSE INPUT-FILE
+           MOVE IN-AMT TO WS-AMOUNT
+           MOVE WS-AMOUNT TO WS-OUT
+           DISPLAY "MOVED=[" WS-OUT "]"
+           OPEN I-O ACC-FILE
+           READ ACC-FILE END-READ
+           SUBTRACT WS-AMOUNT FROM ACC-BAL
+           REWRITE ACC-RECORD
+           CLOSE ACC-FILE
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -o /tmp/arith /tmp/arith.cbl
+python3 - << 'PY'
+import subprocess
+def show(amt, bal=b"0000005000"):
+    open("/tmp/IN.DAT","wb").write(amt)
+    open("/tmp/ACC.DAT","wb").write(bal)
+    r=subprocess.run(["/tmp/arith"], cwd="/tmp", capture_output=True)
+    acc=open("/tmp/ACC.DAT","rb").read()
+    print("AMT", amt, "OUT", r.stdout, "BAL", acc, "ERR", r.stderr[:100])
+
+show(b"0000000200")
+show(b"000000000A")
+show(b"000000000+")
+show(b"000000000"+bytes([1]))
+show(b"5         ")
+show(b"        20")
+show(b"00000000P5")
+show(b"A000000000")
+show(b"ABCDEFGHIJ")
+show(b"123")
+show(b"000000012X")
+show(b"00000 0005")
+show(b"000000000{")
+show(b"000000000"+bytes([255]))
+show(b"00000000A5")
+show(b"0000000A00")
+PY
+$ cat > /tmp/arith2.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ARITH2.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-RAW PIC X(10).
+       01 WS-NUM PIC 9(10).
+       01 WS-BAL PIC 9(10) VALUE 5000.
+       01 WS-OUT PIC 9(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           ACCEPT WS-RAW
+           MOVE WS-RAW TO WS-NUM
+           MOVE WS-NUM TO WS-OUT
+           DISPLAY "NUM=[" WS-NUM "] OUT=[" WS-OUT "]"
+           SUBTRACT WS-NUM FROM WS-BAL
+           DISPLAY "BAL=[" WS-BAL "]"
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -o /tmp/arith2 /tmp/arith2.cbl
+python3 - << 'PY'
+import subprocess
+def show(b):
+    r=subprocess.run(["/tmp/arith2"], input=b+b"\n", capture_output=True)
+    print(b, r.stdout)
+for s in [b"000000000A", b"0000000200", b"000000000+", b"A000000000", b"00000000P5", b"        20", b"5         ", b"ABCDEFGHIJ", b"000000012X", b"000000000{", b"00000000A5"]:
+    show(s)
+PY
+$ # strings in libcob for numeric conversion hints
+python3 - << 'PY'
+import pathlib
+p=pathlib.Path("/usr/lib/x86_64-linux-gnu")
+libs=list(p.glob("libcob*"))
+print(libs)
+PY
+find /usr -name 'libcob*' 2>/dev/null
+# also check if source package exists
+ls /usr/share/doc/libcob4 /usr/share/doc/libcob4-dev 2>/dev/null | head
+$ python3 - << 'PY'
+import subprocess, pathlib
+
+def bal_after(raw10, start=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists():
+        import shutil; shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[58:68]
+
+# For each byte as units, compare to (byte-0x30) if we only mod at the end vs during *10
+# Focus on bytes < 0x30 which produced the 0737... pattern
+# Hypothesis: internal calc uses signed 32-bit and digit = byte-0x30 (can be negative),
+# then the 32-bit result's DECIMAL representation is taken mod 10**10? Let's simulate.
+
+import ctypes
+
+def sim_int32(raw, digit_fn):
+    v = 0
+    for b in raw:
+        d = digit_fn(b)
+        v = ctypes.c_int32(v * 10 + d).value
+    return v
+
+def d_sub(b):
+    # space and '0' zone?
+    return b - 0x30
+
+def d_sub_zero_nibble(b):
+    if (b & 0x0F)==0:
+        return 0
+    return b - 0x30
+
+print("int32 sub units of 0x01", sim_int32(b"000000000"+bytes([1]), d_sub))
+print("stored", bal_after(b"000000000"+bytes([1])))
+
+# maybe 64-bit
+def sim_int64(raw, digit_fn):
+    v = 0
+    for b in raw:
+        d = digit_fn(b)
+        v = (v * 10 + d) & 0xFFFFFFFFFFFFFFFF
+        if v >= 2**63:
+            v -= 2**64
+    return v
+print("int64", sim_int64(b"000000000"+bytes([1]), d_sub))
+
+# What if leading '0' is digit 0, and only non 0x30 use (b-0x30), int32 overflow each step
+print("int32 careful", sim_int32(b"0"*9+bytes([1]), d_sub))
+
+# Print int32 result formatted
+v=sim_int32(b"0"*9+bytes([1]), d_sub)
+print("formatted", f"{v%10**10:010d}", "rawv", v)
+
+# Try all positions for byte 1 with int32 and digit=b-0x30, but '0' is 0
+def runsim(raw):
+    return sim_int32(raw, d_sub)
+
+print("--- compare positions byte 1 int32 ---")
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=1
+    v=runsim(bytes(raw))
+    got=bal_after(bytes(raw)).decode('latin1')
+    pred=f"{v % 10**10:010d}"
+    # also try abs and last 10 of str
+    print(pos, "v", v, "pred", pred, "got", got, "OK" if pred==got else "NO")
+PY
+$ python3 - << 'PY'
+data=open("/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0","rb").read()
+# find interesting strings
+import re
+ss=re.findall(rb"[\x20-\x7e]{6,}", data)
+keys=[]
+for s in ss:
+    if any(k in s.lower() for k in [b"numeric", b"digit", b"display", b"overflow", b"invalid", b"size error", b"cob_decimal"]):
+        keys.append(s)
+print("count", len(keys))
+for s in keys[:80]:
+    print(s)
+PY
+$ # Disassemble cob_decimal_set_field roughly with objdump if available
+which objdump nm gdb 2>/dev/null
+nm -D /usr/lib/x86_64-linux-gnu/libcob.so.4 | grep -E 'decimal_set_field|correct_numeric|check_numeric|move' | head -40
+$ objdump -d --start-address=0x22110 --stop-address=0x22800 /usr/lib/x86_64-linux-gnu/libcob.so.4 | head -400
+$ objdump -d --start-address=0x221b0 --stop-address=0x22490 /usr/lib/x86_64-linux-gnu/libcob.so.4
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def run(raw_amt, bal_bytes):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    # two accounts fixed
+    (base/"data/ACCOUNTS.DAT").write_bytes(
+        b"U001AAAAAAAAAAAAAAAAAAAA"+bal_bytes+
+        b"U002BBBBBBBBBBBBBBBBBBBB"+bal_bytes)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw_amt)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return acc[24:34], acc[58:68], tr[4:14]
+
+def parse_display(raw: bytes):
+    """Model cob_decimal_set_field for unsigned display PIC 9(n), n<=18-ish.
+    Skip leading bytes whose low nibble is 0.
+    If remaining length <= 1: value = byte-0x30 (unsigned 64, can be huge if byte<0x30? actually sub then cltq)
+    If remaining length >= 2 and <= 0x13: 
+       first byte low nibble seeds value, flag if low!=0
+       then for each middle byte:
+         if flag==0 and byte==0: skip
+         else set flag=1, value = value*100 + ((byte>>4)*10 + (byte&0x0f))? Wait the asm multiplies by 100 only when flag already set.
+       last byte: add high nibble only.
+    Let's code exactly from asm.
+    """
+    data = raw
+    # skip leading low-nibble 0 while length > 1
+    i = 0
+    n = len(data)
+    while n - i > 1 and (data[i] & 0x0F) == 0:
+        i += 1
+    rest = data[i:]
+    L = len(rest)
+    if L <= 1:
+        if L == 0:
+            return 0
+        b = rest[0]
+        # sub $0x30; cltq  -- signed 32->64
+        return (b - 0x30)  # python int, may be negative
+    # L >= 2
+    # first byte
+    b0 = rest[0]
+    val = b0 & 0x0F
+    flag = 1 if (b0 & 0x0F) != 0 else 0
+    # loop while rbx < r12, r12 = end-1 (last byte address)
+    # bytes rest[1:-1] are middle, rest[-1] is last
+    idx = 1
+    last = L - 1
+    while idx < last:
+        if flag == 0:
+            b = rest[idx]
+            if b == 0:
+                idx += 1
+                continue
+            flag = 1
+            # add ((b>>4)*10 + (b&0xf)) WITHOUT mul 100? Look at asm path when flag was 0:
+            # it jumps to add without mul. Yes.
+            val = val + ((b >> 4) * 10 + (b & 0x0F))
+            idx += 1
+            if idx == last:
+                break
+            # after add, if not end, fall through to mul 100 next iteration
+            continue
+        else:
+            val = val * 100
+            b = rest[idx]
+            if b == 0 and False:
+                pass
+            # the code sets flag=1 path always multiplies then reads byte
+            # re-read carefully:
+            # at 2230d: test edx (flag)
+            # if flag!=0: jmp 22343 mul 100, set edx=1, jmp 22311
+            # at 22311: load byte; if byte==0 and we came from 22311 with flag? 
+            # if flag was 0 we are at 22311. if byte==0 goto 22300 (skip, keep flag 0)
+            # else: eax=low, edx=high, add value += high*10+low, increment rbx, if rbx==end goto 22500
+            # then 22343 mul*100, edx=1, jmp 22311
+            val = val + ((b >> 4) * 10 + (b & 0x0F))
+            idx += 1
+            continue
+    # This got messy. Let's rewrite loop state machine matching asm exactly.
+    return "retry"
+
+def parse2(raw: bytes) -> int:
+    data = list(raw)
+    n = len(data)
+    i = 0
+    # skip while length>1 and low nibble 0
+    while (n - i) > 1 and (data[i] & 0x0F) == 0:
+        i += 1
+    # r12 length remaining
+    if n - i <= 1:
+        if n - i == 0:
+            return 0
+        b = data[i]
+        v = b - 0x30
+        # cltq sign extend 32
+        if v >= 2**31:
+            v -= 2**32
+        elif v < -2**31:
+            # sub is 32-bit eax
+            v = ctypes_sub(b)
+        return v
+    # length >= 2 path starting 2221f if > 0x13 goes elsewhere. Our n<=10 so OK, goes to 223d8
+    # 223d8 sets r12=0 then falls into 223e0 loop?? Wait I'm confusing two paths.
+    # For length > 1 and <= 0x13 it jumps to 223d8 from 22223 (jbe 223d8).
+    # 223d8: lea rcx, (rbx, r12, 1)  -- r12 still LENGTH, rcx = end
+    # xor r12d, r12d  -- accumulator = 0
+    # loop 223e0: val = (byte-0x30) + acc*10 ; until rbx==end
+    # So for length 2..19 the SIMPLE decimal accumulation with digit=byte-0x30 (signed)!
+    # The weird nibble path is for LONGER fields (>19 digits) or after some sign handling.
+    acc = 0
+    for j in range(i, n):
+        d = data[j] - 0x30
+        # eax is 32-bit sub then cltq sign-extends to 64 before add into r12 (64-bit)
+        if d >= 2**31:
+            d -= 2**32
+        acc = acc * 10 + d
+    return acc
+
+import ctypes
+def ctypes_sub(b):
+    return ctypes.c_int32(b - 0x30).value
+
+def parse3(raw: bytes) -> int:
+    data = list(raw)
+    n = len(data)
+    i = 0
+    while (n - i) > 1 and (data[i] & 0x0F) == 0:
+        i += 1
+    if n == i:
+        return 0
+    if (n - i) == 1:
+        return ctypes.c_int64(ctypes.c_int32(data[i] - 0x30).value).value
+    acc = 0
+    for j in range(i, n):
+        d = ctypes.c_int32(data[j] - 0x30).value
+        acc = acc * 10 + d
+    return acc
+
+# But wait, for normal "0000000200", leading zeros low nibble is 0, so skip all but last nonzero?
+# '0' is 0x30, low nibble 0, so ALL leading zeros skipped until last char if all zeros, or until a non-zero low nibble.
+# "0000000200": skip zeros... '2' is 0x32 low 2, stop at '2', remaining "200" length 3 <= 19.
+# digits: '2'-0x30=2, '0'-0x30=0, '0'=0 -> 200. GOOD.
+# "000000000A": skip to 'A'? 'A'=0x41 low 1, remaining "A" length 1.
+# length 1 path: byte-0x30 = 0x41-0x30 = 17. NOT the weird path. 
+# But arith test gave balance 4983 which is 5000-17. YES amount 17!
+# And MOVE display showed OUT=[000000000A] which is the raw field not the numeric value. 
+# SUBTRACT used numeric 17. Perfect.
+# "000000000+" : '+' = 0x2B low nibble 0xB != 0, so NOT skipped if... leading zeros skipped until '+', remaining length 1.
+# value = 0x2B - 0x30 = -5. 5000 - (-5) = 5005, but earlier result was 0737090511. NOT -5.
+# Hmm length-1 path didn't match '+'.
+# Unless low nibble 0 skip uses testb $0xf and '+' is 0x2B low B, not skipped. length 1.
+# 0x2B-0x30 = -5. Doesn't match 737095511 delta (seller from 0 was 0737095511).
+# Maybe length 1 path is NOT used and something else happens.
+# Let's re-read 221eb onwards for display type.
+# I need field type. PIC 9(10) is COB_TYPE_NUMERIC_DISPLAY = 17? 
+# At start: movzwl (%rdx), eax ; sub $0x11; cmp $0xa. 
+# type 0x11 = 17. sub 0x11 = 0, within 0..10, so it uses jump table NOT the 221b0 path!
+# So display type goes through jump table at 22138. I disassembled the wrong continuation (221b0 is default ja).
+print('types via jump table')
+
+# Let's get jump table at 4e800
+import struct
+data=open("/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0","rb").read()
+# file offset of vaddr 4e800. Need ELF load bias.
+# objdump -d showed 4e800 as address. Find mapping.
+import subprocess
+out=subprocess.check_output(["readelf","-S","/usr/lib/x86_64-linux-gnu/libcob.so.4"], text=True)
+# print sections containing 4e800
+for line in out.splitlines():
+    if "4e" in line.lower() or "rodata" in line or "PROGBITS" in line:
+        if any(x in line for x in [".rodata", ".data", "4e8", "LOAD"]):
+            pass
+print(out)
+PY
+$ python3 - << 'PY'
+import struct
+data=open("/usr/lib/x86_64-linux-gnu/libcob.so.4.1.0","rb").read()
+# vaddr 4e800 is in .rodata vaddr 4b000 offset 4b000, so fileoff = vaddr
+off=0x4e800
+entries=struct.unpack_from('<11i', data, off)
+print("rel", entries)
+base=0x4e800
+for i,e in enumerate(entries):
+    print(i, hex(base+e), "type", hex(0x11+i))
+PY
+$ sed -n '1,220p' << 'EOF'
+# already have disassembly. Let's manually simulate the long path more carefully by translating asm to python
+# and also check COB_TYPE values. type 0x11 went to 22150 which is binary-ish (memcpy 8 bytes).
+# PIC 9(10) might be type 0x15 which jumps to 221b0. Yes jump index 4 = type 0x15.
+print('ok')
+EOF
+python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def display_to_int(raw: bytes) -> int:
+    """Translate cob_decimal_set_field display branch (type 0x15) for unsigned data.
+    Based on disassembly at 221b0.
+    Assumptions for unsigned no separate sign:
+      - sign nibble handling: and $0x6 / cmp $6 sets a flag that may increment start pointer
+      - and $0x2 / cmp $1 adc -1 to length
+    For normal unsigned display, attribute bits 0x2 and 0x6 are likely clear, so:
+      start stays, length stays = field size.
+    Then:
+      if first byte == 0xFF: special pow
+      if first byte == 0: special pow
+      else r14=0, test sign bit 0x1 of attr -> for unsigned call? je not taken if bit 0 set?
+    This is too attribute-dependent. Let's instead brute the algorithm variants against data.
+    """
+    return 0
+
+# Empirical model search:
+# From units digit table, for b>=0x30, if (b&0xf)==0: digit 0 else digit b-0x30
+# for b<0x30, weird.
+# Let's see stored value as decimal digits somehow related to ASCII of something.
+
+def seller(raw, start=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return acc[58:68], tr[4:14]
+
+# Maybe the weird number 0737095469 is 5000 - amount wrapped, start was 0 so seller = amount mod 10**10.
+# Let's look at hex of the gmp value. Perhaps it's not a clean decimal.
+
+# I'll instrument by writing a C program that calls cob_decimal_set_field... hard without headers structs.
+
+# Look at cob_correct_numeric which is called for invalid numeric before set.
+print('--- correct numeric ---')
+PY
+objdump -d --start-address=0x119d0 --stop-address=0x12000 /usr/lib/x86_64-linux-gnu/libcob.so.4 | head -250
+$ # Get full display-field portion of cob_move and also check generated C for a tiny program
+cat > /tmp/t.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. T.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-RAW PIC X(10).
+       01 WS-NUM PIC 9(10)V99.
+       01 WS-BAL PIC 9(10) VALUE 5000.
+       PROCEDURE DIVISION.
+       MAIN.
+           MOVE "000000000A" TO WS-RAW
+           MOVE WS-RAW TO WS-NUM
+           SUBTRACT WS-NUM FROM WS-BAL
+           DISPLAY WS-BAL
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -C -o /tmp/t.c /tmp/t.cbl && wc -l /tmp/t.c && grep -n "WS_NUM\|WS_RAW\|cob_" /tmp/t.c | head -80
+$ sed -n '1,210p' /tmp/t.c
+$ sed -n '1,250p' /tmp/t.c.h; echo '======= L ======='; sed -n '1,200p' /tmp/t.c.l.h
+$ # disassemble from 22280 which is type 0x12, and find 0x10 handler. Jump table index = type-0x11 so 0x10 is NOT in that table.
+# At function start: cmp $0xa after sub 0x11, ja 221b0 if type-0x11 > 10 i.e. type > 0x1b.
+# type 0x10 - 0x11 = -1 which as unsigned 16 after movzwl of ax? 
+# sub $0x11,%eax on 32-bit eax after movzwl. type 0x10 -> eax=0x10-0x11 = 0xFFFFFFFF, cmp $0xa, ja taken (unsigned). So goes to 221b0!
+# So type 0x10 uses the 221b0 path I already partially disassembled. Good.
+# Now translate 221b0 carefully with attr flags = 0 (a_2 and a_3 have 0x0000 flags).
+python3 - << 'PY'
+# attr at 0x6 of cob_field_attr. From struct, need layout.
+# cob_field_attr { type u16, digits i16, scale i16, flags u16, pic ...}
+# offset 0 type, 2 digits, 4 scale, 6 flags. Yes flags=0 for our fields.
+#
+# 221b0: movzwl 0x6(%rdx),%eax   ; flags = 0
+# r12 = field->size (from 0(%r13))  WAIT 221b4: mov 0x0(%r13),%r12  -- cob_field.size is first member. Yes size.
+# edx = flags & 6; cmp 6; sete; add that to rbx (data pointer). flags 0 -> no add.
+# edx = flags & 2; cmp 1;  (0==1 false, CF=1 from cmp? cmp 1, dx=0: 0-1 borrow CF=1)
+# movzbl (%rbx), edx  -- first byte
+# adc $-1, %r12  -- size = size + (-1) + CF. CF=1 so size unchanged!
+# cmp first byte, 0xff -> special
+# test dl,dl je special if first byte 0
+# xor r14
+# test $1, al  (flags bit 0 sign separate?) je not taken? test 0, je IS taken to 221f6
+# 221f6: cmp $1, r12 (size); ja 2221a if size>1
+# 2221a: testb $0xf, (%rbx); je skip byte (leading low nibble 0)
+# after skip, if size remaining > 0x13 goto long path else 223d8 simple *10 + (byte-0x30)
+#
+# SO for normal 10-digit field with flags 0:
+# skip leading bytes with low nibble 0 while remaining length > 1
+# then if remaining <= 19: acc = 0; for each remaining byte: acc = acc*10 + (byte-0x30)  [signed 32 digit via cltq]
+#
+# For "000000000+" : '+' =0x2B low nibble B != 0, so not skipped when we reach it.
+# Leading '0' = 0x30 low 0 ARE skipped. Remaining is just '+' length 1.
+# Length 1 does NOT go to the *10 loop (that requires remaining > 1 after the skip loop exits when remaining==1).
+# When remaining becomes 1, jump 22214 je 223d8.
+# 223d8: lea rcx, (rbx, r12, 1) but r12 is remaining LENGTH which is 1, rcx=rbx+1
+# xor r12 accumulator 0
+# loop once: acc = (byte-0x30) + acc*10
+# So '+' -> 0x2B-0x30 = -5. Value -5.
+# But observed amount effect was NOT -5. Contradiction with seller result 0737095511 from 0.
+#
+# Unless scale V99 changes things: WS-AMOUNT is PIC 9(10)V99 size 12, scale 2.
+# MOVE input PIC 9(10) to WS-AMOUNT aligns scale, then arithmetic uses that.
+# Input field itself is PIC 9(10) scale 0.
+# SUBTRACT WS-AMOUNT FROM ACCOUNT-BALANCE.
+# So conversion is of the 12-byte scaled field not the original 10 bytes!
+# MOVE from numeric display to numeric display with different scale goes through cob_move which may reformat.
+# If source is NOT strictly numeric, cob_move may do a raw-ish copy plus scale padding?
+#
+# Let's test MOVE behavior into the 12 byte field by dumping memory via a C helper... 
+# We can DISPLAY the field which calls numeric conversion again.
+# Instead compile a program that MOVEs and also treats destination as X(12) via REDEFINES.
+
+cat > /tmp/redef.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. REDEF.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "IN.DAT" ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 IN-AMT PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-X REDEFINES WS-AMOUNT PIC X(12).
+       01 WS-OUT PIC 9(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           CLOSE INPUT-FILE
+           MOVE IN-AMT TO WS-AMOUNT
+           DISPLAY "X=[" WS-X "]"
+           MOVE WS-AMOUNT TO WS-OUT
+           DISPLAY "OUT=[" WS-OUT "]"
+           STOP RUN.
+EOF
+print('wrote')
+PY
+cd /tmp && cobc -x -free -o /tmp/redef /tmp/redef.cbl && python3 - << 'PY'
+import subprocess
+def show(b):
+    open("/tmp/IN.DAT","wb").write(b)
+    r=subprocess.run(["/tmp/redef"], cwd="/tmp", capture_output=True)
+    print(list(b), r.stdout)
+for s in [b"0000000200", b"000000000A", b"000000000+", b"000000000"+bytes([1]), b"5         ", b"        20", b"00000000P5", b"A000000000", b"ABCDEFGHIJ", b"123", b"000000012X", b"00000 0005", b"000000000{", b"000000000"+bytes([255]), b"00000000A5", b"          ", b"0000000000"]:
+    show(s)
+PY
+$ cat > /tmp/redef.cbl << 'EOF'
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. REDEF.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT INPUT-FILE ASSIGN TO "IN.DAT" ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD INPUT-FILE.
+       01 INPUT-RECORD.
+           05 IN-AMT PIC 9(10).
+       WORKING-STORAGE SECTION.
+       01 WS-AMOUNT PIC 9(10)V99.
+       01 WS-X REDEFINES WS-AMOUNT PIC X(12).
+       01 WS-OUT PIC 9(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           OPEN INPUT INPUT-FILE
+           READ INPUT-FILE END-READ
+           CLOSE INPUT-FILE
+           MOVE IN-AMT TO WS-AMOUNT
+           DISPLAY "X=[" WS-X "]"
+           MOVE WS-AMOUNT TO WS-OUT
+           DISPLAY "OUT=[" WS-OUT "]"
+           STOP RUN.
+EOF
+cd /tmp && cobc -x -free -o /tmp/redef /tmp/redef.cbl && python3 - << 'PY'
+import subprocess
+def show(b):
+    open("/tmp/IN.DAT","wb").write(b)
+    r=subprocess.run(["/tmp/redef"], cwd="/tmp", capture_output=True)
+    print(b, r.stdout)
+for s in [b"0000000200", b"000000000A", b"000000000+", b"000000000"+bytes([1]), b"5         ", b"        20", b"00000000P5", b"A000000000", b"ABCDEFGHIJ", b"123", b"000000012X", b"00000 0005", b"000000000{", b"000000000"+bytes([255]), b"00000000A5", b"          ", b"0000000000", b"0000000A00", b"000000000"+bytes([0x20])]:
+    show(s)
+PY
+$ python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def seller_and_tr(raw10, start=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return int(acc[58:68]), tr[4:14]
+
+def norm_spaces(raw):
+    return bytes(b if b!=0x20 else 0x30 for b in raw)
+
+def to_scaled(raw10):
+    # pad record to 10 with spaces on the right (short read), spaces->0, append 00
+    raw = raw10
+    if len(raw)<10:
+        raw = raw + b" "*(10-len(raw))
+    raw = raw[:10]
+    raw = norm_spaces(raw)
+    return raw + b"00"
+
+def parse_display(data: bytes) -> int:
+    b = list(data)
+    n = len(b)
+    i = 0
+    # flags 0: size unchanged, start unchanged
+    # skip leading low-nibble 0 while remaining > 1
+    while (n - i) > 1 and (b[i] & 0x0F) == 0:
+        i += 1
+    rem = n - i
+    if rem <= 1:
+        if rem == 0:
+            return 0
+        d = ctypes.c_int32(b[i] - 0x30).value
+        return d
+    if rem > 0x13:
+        raise NotImplementedError("long")
+    acc = 0
+    for j in range(i, n):
+        d = ctypes.c_int32(b[j] - 0x30).value
+        acc = acc * 10 + d
+    return acc
+
+def amount_from_input(raw10):
+    scaled = to_scaled(raw10)
+    # value includes 2 decimal digits; integer PIC 9(10) arithmetic truncates toward 0? or floor?
+    v = parse_display(scaled)
+    # scale 2: actual number is v / 100. When subtracting from integer field, decimals dropped.
+    if v >= 0:
+        return v // 100
+    else:
+        # COBOL truncation of negative is toward zero typically for MOVE, but SUBTRACT of scaled decimal?
+        return - ((-v) // 100)
+
+# compare many cases
+cases = []
+for ch in range(256):
+    cases.append(b"000000000"+bytes([ch]))
+for pos in range(10):
+    raw=bytearray(b"0"*10); raw[pos]=1
+    cases.append(bytes(raw))
+    raw=bytearray(b"0"*10); raw[pos]=ord('+')
+    cases.append(bytes(raw))
+    raw=bytearray(b"0"*10); raw[pos]=ord('A')
+    cases.append(bytes(raw))
+    raw=bytearray(b"0"*10); raw[pos]=255
+    cases.append(bytes(raw))
+    raw=bytearray(b"0"*10); raw[pos]=ord(' ')
+    cases.append(bytes(raw))
+extra=[b"5         ", b"        20", b"00000 0005", b"ABCDEFGHIJ", b"123", b"000000012X", b"A000000005", b"00000000AB", b"          ", b"0000000200", b"0000001001", b"9999999999", b"00000000P5", b"000000000{", b"12ABCDEFGH", b"0000000A00"]
+cases += extra
+
+bad=0
+for c in cases:
+    got, tr = seller_and_tr(c, 0)
+    pred = amount_from_input(c) % 10**10
+    if pred != got:
+        bad += 1
+        if bad<=30:
+            print("BAD", c, "got", got, "pred", pred, "scaled", to_scaled(c), "tr", tr)
+print("bad", bad, "of", len(cases))
+PY
+$ python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def seller(raw10, start=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return int(acc[58:68])
+
+def norm_spaces(raw):
+    return bytes(b if b!=0x20 else 0x30 for b in raw)
+
+def scaled_of(raw10):
+    raw = raw10[:10]
+    if len(raw)<10:
+        raw = raw + b" "*(10-len(raw))
+    return norm_spaces(raw)+b"00"
+
+# For bad bytes, compare got with various mods of negative accumulation
+# digit = byte-0x30 which is negative for byte<0x30
+# scaled field is 12 bytes: 9 zeros + byte + '0' '0'
+# after skip leading zero low-nibbles, if byte low nibble != 0, remaining is 3 bytes: B, '0','0'
+# acc = ((B-0x30)*10 + 0)*10 + 0 = (B-0x30)*100
+# integer amount = acc/100 = B-0x30  (negative)
+# stored seller from 0 should be (B-0x30) mod 10**10
+# but got is around 737095469 not 9999999953.
+
+bads=[]
+for ch in range(0,0x30):
+    if (ch & 0x0F)==0:
+        continue
+    got=seller(b"000000000"+bytes([ch]))
+    simple=((ch-0x30)*100)//100 % 10**10
+    print(f"{ch:02x} got {got:010d} simple {simple:010d} diff {got-simple}")
+PY
+$ python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def seller(raw10, start=0):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw10)
+    r=subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return int(acc[24:34]), int(acc[58:68]), tr[4:14], r.returncode
+
+def norm_spaces(raw):
+    return bytes(0x30 if b==0x20 else b for b in raw)
+
+def scaled_of(raw10):
+    raw = raw10[:10]
+    if len(raw)<10: raw += b" "*(10-len(raw))
+    return norm_spaces(raw)+b"00"
+
+def parse_display_int32acc(data: bytes) -> int:
+    b = list(data)
+    n = len(b)
+    i = 0
+    while (n - i) > 1 and (b[i] & 0x0F) == 0:
+        i += 1
+    acc = 0  # we'll keep as signed 32 each mul/add? r12 is 64-bit but digit cltq.
+    # Try accumulator itself as int32 because lea (%rax,%rdx,2) might be 32? No r12 is 64.
+    # Alternative: acc is 64 but each acc*10 + d is truncated to int32 because of some register.
+    acc32 = 0
+    for j in range(i, n):
+        d = ctypes.c_int32(b[j] - 0x30).value
+        acc32 = ctypes.c_int32(acc32 * 10 + d).value
+    return acc32
+
+def amount_from(raw10):
+    v = parse_display_int32acc(scaled_of(raw10))
+    # scale 2 truncation toward 0
+    if v >= 0:
+        return v // 100
+    else:
+        return - ((-v)//100)
+
+bad=0
+cases=[]
+for ch in range(256):
+    cases.append(b"000000000"+bytes([ch]))
+for pos in range(10):
+    for ch in [1, ord('+'), ord('A'), 255, 32, ord('a'), 0x0A, 0x2D]:
+        raw=bytearray(b"0"*10); raw[pos]=ch
+        cases.append(bytes(raw))
+extras=[b"5         ", b"        20", b"00000 0005", b"ABCDEFGHIJ", b"123",
+        b"000000012X", b"A000000005", b"00000000AB", b"          ", b"0000000200",
+        b"0000001001", b"9999999999", b"00000000P5", b"000000000{", b"12ABCDEFGH",
+        b"0000000A00", b"00000000A5", b"0000000A05", b"+000000000", b"000+000000",
+        b"\x01\x0200000000", b"00000000\x01\x02", b"000000000\x00", b"P000000005",
+        b"0000000P50", b"          ".replace(b" ", b"\x00",1), b"\x00"*10, b"\xff"*10,
+        b"1234567890", b"0000000007"]
+cases += extras
+seen=set()
+for c in cases:
+    if c in seen: continue
+    seen.add(c)
+    # use start 0 so seller == amount mod 1e10, but if negative subtraction from 0 wraps
+    bb, ss, tr, rc = seller(c, 0)
+    pred = amount_from(c) % 10**10
+    if pred != ss:
+        bad += 1
+        if bad<=25:
+            print("BAD", c, "got", ss, "pred", pred, "buyer", bb, "int32scaled", parse_display_int32acc(scaled_of(c)))
+print("bad", bad, "of", len(seen))
+PY
+$ python3 - << 'PY'
+import ctypes
+# What 32-bit pattern prints as 0737095469 if mis-decoded?
+# Suppose gmp value is negative and get_field uses unsigned conversion of low bits incorrectly.
+# 737095469 = 0x2BEF2F2D
+print(hex(737095469))
+# -4700 in hex
+print(hex((-4700) & 0xFFFFFFFF))
+print(hex((-47) & 0xFFFFFFFF))
+# Maybe they convert via double?
+import struct, math
+def via_double(v):
+    # store int in double and back
+    return int(float(v))
+print('dbl', via_double(-4700))
+
+# Look at cob_decimal_get_field for display output of negative values that don't fit?
+# Maybe subtraction of a scaled number with scale 2 from scale 0 does alignment by *100 on the balance
+# then subtracts the raw integer, then /100.
+# If amount_raw = -4700 (the scaled int32) and balance 0 * 100 - (-4700) = 4700, /100 = 47. Not match.
+# If balance is converted to gmp 0, amount gmp is wrong huge positive.
+
+# Let's see 737095469 factorization or relation to 4700
+target=737095469
+print('target+4700', target+4700)
+print('target-4700', target-4700)
+# 10**10 + something
+print((10**10 + (-4700)) % 10**10)
+
+# Perhaps the stored field is not the numeric value but corrupted bytes from a bad move when non-numeric,
+# and my int() of those bytes is coincidental? The bytes were b'0737095469' which are valid digits.
+# Both buyer and seller got THE SAME value when start is 0. Buyer should be (0 - amt) mod, seller (0+amt) mod.
+# If both equal, amt ≡ -amt (mod 10**10) => 2*amt ≡ 0 => amt ≡ 0 or 5*10**9.
+# 737095469*2 = 1474190938 != 0 mod 1e10. CONTRADICTION if both are modular + and - of same amt from 0.
+# Unless size error on one of them prevented update... but both changed from 0000000000 to same number.
+# Unless the operation isn't normal subtract/add because non-numeric caused the BALANCE field itself to be overwritten by the amount bytes somehow? 
+# 0737095469 doesn't look like the input.
+# Wait start balance 0000000000, result both 0737095469. 
+# If ADD and SUB both size-error and instead do something else? Unlikely same result.
+# OR the numeric value is so invalid that both computations overflow to the same garbage display.
+
+# Let's test buyer and seller with start balance 100000 not 0
+import subprocess, shutil, pathlib
+def both(raw, start):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[24:34], acc[58:68]
+
+for st in [0, 1, 100, 5000, 9999999999]:
+    print(st, both(b"000000000\x01", st))
+print('plus', both(b"000000000+", 5000))
+print('A', both(b"000000000A", 5000))
+print('normal', both(b"0000000200", 5000))
+PY
+$ python3 - << 'PY'
+# From start S, buyer = S - A, seller = S + A, both mod 10**10, for char 0x01
+# S=5000 buyer 0737090469 seller 0737100469
+# seller - buyer = 10000 = 2A => A = 5000? That can't if mod.
+# 737100469 - 737090469 = 10000 exactly, so within no-wrap, 2A=10000 A=5000
+# But S=5000, seller should be 10000 if A=5000, not 737100469.
+# Difference seller-start = 737100469-5000 = 737095469
+# buyer start-buyer = 5000-737090469 = negative huge
+# seller = start + 737095469
+# buyer = start - 737095469
+# YES A = 737095469 for units byte 0x01 when using start 5000.
+# Earlier when start 0, both became 737095469 which is +A and -A mod? 
+# -737095469 % 10**10 = 9262904531 NOT 737095469.
+# But observation start 0 buyer ALSO 737095469. That contradicts buyer = -A unless size error kept something else.
+# Wait start 0 result was BOTH 0737095469. 
+# -737095469 % 10**10 = 10**10 - 737095469 = 9262904531.
+# Not equal. So buyer was NOT start-A when start is 0?
+# Let me re-read the function... I printed int() of the fields. 0737095469.
+# Maybe when result is negative, COBOL does NOT wrap but stores absolute with some corruption? 
+# start 1: buyer 0737095468 seller 0737095470
+# delta seller-start = 737095469, buyer = start - 737095469 = 1-737095469 = -737095468
+# stored buyer 0737095468 which is abs(buyer)-1 or 737095468. 
+# abs(-737095468)=737095468 = stored. So NEGATIVE results are stored as absolute value WITHOUT sign!
+# Because PIC 9 is unsigned. GnuCOBOL might store the absolute value on overflow/negative into unsigned display?
+# Check start 5000 A=200: buyer 4800 positive OK.
+# Check start 100 amount 200: buyer should be -100. Stored?
+
+import subprocess, shutil, pathlib
+def both(raw, start_bytes):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+start_bytes+b"U002BBBBBBBBBBBBBBBBBBBB"+start_bytes)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[24:34], acc[58:68]
+
+print("100-200", both(b"0000000200", b"0000000100"))
+print("0-1", both(b"0000000001", b"0000000000"))
+print("50-100", both(b"0000000100", b"0000000050"))
+print("1180-12000", both(b"0000012000", b"0000001180"))
+# earlier over case buyer 1180-12000 stored 0000010820
+# 12000-1180=10820. So it stored the ABSOLUTE VALUE of the negative result!
+print("abs check", abs(1180-12000))
+print("100-201", both(b"0000000201", b"0000000100"))
+print("5-5", both(b"0000000005", b"0000000005"))
+print("5-6", both(b"0000000006", b"0000000005"))
+# seller overflow 9999999999+2
+print("add overflow", both(b"0000000002", b"9999999999"))
+# 10000000001 -> ? 
+print("add 9999999999+200", both(b"0000000200", b"9999999999"))
+PY
+$ python3 - << 'PY'
+import subprocess, shutil, pathlib
+
+def both(raw, start):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    return acc[24:34].decode(), acc[58:68].decode()
+
+def amt_field(n):
+    return f"{n:010d}".encode()
+
+print("underflow series")
+for bal, amt in [(100,200),(100,100),(100,101),(0,1),(0,0),(50,100),(1180,12000),(10,20),(999,1000),(1000,100000),(1,1000000000),(5,6),(5,5),(1,2)]:
+    b,s=both(amt_field(amt), bal)
+    print(f"bal {bal} amt {amt} -> buyer {b} seller {s} | abs(b-a)={abs(bal-amt)} (b+a)%={ (bal+amt)%10**10 }")
+
+print("--- large ---")
+for bal, amt in [(0,10**10-1),(1,10**10-1),(5000,9999999999),(9999999999,1),(9999999999,2),(9999999998,3),(1234567890,9876543210)]:
+    b,s=both(amt_field(amt), bal)
+    print(f"bal {bal} amt {amt} buyer {b} seller {s}")
+    print("  pred abs sub", f"{abs(bal-amt)%10**10:010d}", "add mod", f"{(bal+amt)%10**10:010d}", "add abs if over?", f"{abs((bal+amt)%10**10) if False else ''}")
+PY
+$ python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def both(raw, start=5000):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return int(acc[24:34]), int(acc[58:68]), tr[4:14]
+
+def norm_spaces(raw):
+    return bytes(0x30 if b==0x20 else b for b in raw)
+
+def prepare_input_amount(raw_in):
+    # fixed 10 from file record, short padded with spaces on the right (COBOL record pad)
+    raw = raw_in
+    if len(raw)<10:
+        raw = raw + b" "*(10-len(raw))
+    raw = raw[:10]
+    stored = norm_spaces(raw)  # what ends up in TRANS-AMOUNT and numeric source
+    return stored
+
+def parse_display(data: bytes) -> int:
+    b = list(data)
+    n = len(b)
+    i = 0
+    while (n - i) > 1 and (b[i] & 0x0F) == 0:
+        i += 1
+    acc = 0
+    # use int64 accumulator, digit = signed byte-0x30 (32-bit sign extended)
+    for j in range(i, n):
+        d = ctypes.c_int32(b[j] - 0x30).value
+        acc = acc * 10 + d
+    return acc
+
+def amount_of(stored10):
+    scaled = stored10 + b"00"  # MOVE to 9(10)V99 appends two zero decimals
+    v = parse_display(scaled)
+    # truncate scale 2 toward 0
+    if v >= 0:
+        return v // 100
+    else:
+        return -((-v)//100)
+
+def apply(start, amt):
+    # buyer: if start-amt < 0 store abs else start-amt, but if abs >= 10**10? 
+    sub = start - amt
+    if sub < 0:
+        buyer = abs(sub) % 10**10   # maybe just abs if fits
+    else:
+        buyer = sub % 10**10
+    seller = (start + amt) % 10**10
+    # if seller addition exceeds, mod works as observed
+    return buyer, seller
+
+bad=0
+cases=[]
+for ch in list(range(256)):
+    cases.append(b"000000000"+bytes([ch]))
+for pos in range(10):
+    for ch in [1, ord('+'), ord('A'), 255, 32, ord('a'), 10, 0, ord('P'), ord('{'), ord('5')]:
+        raw=bytearray(b"0"*10); raw[pos]=ch
+        cases.append(bytes(raw))
+for s in [b"5         ", b"        20", b"00000 0005", b"ABCDEFGHIJ", b"123",
+          b"000000012X", b"A000000005", b"00000000AB", b"          ", b"0000000200",
+          b"0000001001", b"9999999999", b"00000000P5", b"000000000{", b"12ABCDEFGH",
+          b"0000000A00", b"00000000A5", b"0000000A05", b"+000000000", b"000+000000",
+          b"\x01\x0200000000", b"00000000\x01\x02", b"\x00"*10, b"\xff"*10,
+          b"1234567890", b"0000000007", b"0000000 05", b"  00000200", b"5000000000",
+          b"000000000p", b"P00000000Q"]:
+    cases.append(s)
+
+seen=set(); bad=0
+for c in cases:
+    if c in seen: continue
+    seen.add(c)
+    stored = prepare_input_amount(c)
+    amt = amount_of(stored)
+    for start in (0, 1, 5000, 1180, 9999999999):
+        gb, gs, tr = both(c, start)
+        pb, ps = apply(start, amt)
+        if gb!=pb or gs!=ps or tr!=stored:
+            bad += 1
+            if bad<=20:
+                print("BAD in", c, "start", start, "amt", amt)
+                print("  got", gb, gs, tr)
+                print("  pred", pb, ps, stored)
+            break
+print("bad", bad, "of", len(seen))
+PY
+$ python3 - << 'PY'
+import ctypes, subprocess, shutil, pathlib
+
+def both(raw, start=5000):
+    base=pathlib.Path("/tmp/fit")
+    if base.exists(): shutil.rmtree(base)
+    (base/"src").mkdir(parents=True); (base/"data").mkdir()
+    bb=f"{start:010d}".encode()
+    (base/"data/ACCOUNTS.DAT").write_bytes(b"U001AAAAAAAAAAAAAAAAAAAA"+bb+b"U002BBBBBBBBBBBBBBBBBBBB"+bb)
+    (base/"data/BOOKS.DAT").write_bytes(b"B001CCCCCCCCCCCCCCCCCCCCU002")
+    (base/"data/TRANSACTIONS.DAT").write_bytes(b"")
+    (base/"src/INPUT.DAT").write_bytes(b"U001U002B001"+raw)
+    subprocess.run(["/tmp/bookforum"], cwd=base, capture_output=True)
+    acc=(base/"data/ACCOUNTS.DAT").read_bytes()
+    tr=(base/"data/TRANSACTIONS.DAT").read_bytes()
+    return int(acc[24:34]), int(acc[58:68]), tr[4:14]
+
+def norm_spaces(raw):
+    return bytes(0x30 if b==0x20 else b for b in raw)
+
+def prepare(raw):
+    if len(raw)<10: raw=raw+b" "*(10-len(raw))
+    return norm_spaces(raw[:10])
+
+def digit_value(b):
+    # try: if b < 0x30: use low nibble only? or b itself?
+    return ctypes.c_int32(b - 0x30).value
+
+def parse(data):
+    b=list(data); n=len(b); i=0
+    while n-i>1 and (b[i]&0x0F)==0:
+        i+=1
+    acc=0
+    for j in range(i,n):
+        # NEW: if byte < 0x30, digit = byte (not byte-0x30) ??? 
+        bb=b[j]
+        if bb < 0x30:
+            d = bb   # positive small
+        else:
+            d = ctypes.c_int32(bb - 0x30).value
+        acc = acc*10 + d
+    return acc
+
+def amount(stored):
+    v=parse(stored+b"00")
+    if v>=0: return v//100
+    return -((-v)//100)
+
+def apply(start, amt):
+    sub=start-amt
+    buyer = abs(sub)%10**10 if sub<0 else sub%10**10
+    seller=(start+amt)%10**10
+    return buyer, seller
+
+bad=0; seen=set(); cases=[]
+for ch in range(256):
+    cases.append(b"000000000"+bytes([ch]))
+for pos in range(10):
+    for ch in [1, ord('+'), ord('A'), 255, 32, ord('a'), 10, 0, ord('P'), ord('{'), ord('5'), 0x1f, 0x2f]:
+        raw=bytearray(b"0"*10); raw[pos]=ch
+        cases.append(bytes(raw))
+for s in [b"5         ", b"        20", b"00000 0005", b"ABCDEFGHIJ", b"123",
+          b"000000012X", b"A000000005", b"00000000AB", b"          ", b"0000000200",
+          b"9999999999", b"00000000P5", b"000000000{", b"12ABCDEFGH",
+          b"0000000A00", b"00000000A5", b"+000000000", b"\x01\x0200000000", b"00000000\x01\x02",
+          b"\x00"*10, b"\xff"*10, b"1234567890", b"  00000200", b"P00000000Q",
+          b"0000000 05", b"\x01"*10, b"0\x0100000000", b"00\x010000000", b"000\x01" + b"0"*6]:
+    cases.append(s)
+for c in cases:
+    if c in seen: continue
+    seen.add(c)
+    stored=prepare(c)
+    amt=amount(stored)
+    for start in (0,5000,9999999999):
+        gb,gs,tr=both(c,start)
+        pb,ps=apply(start, amt)
+        if (gb,gs)!=(pb,ps) or tr!=stored:
+            bad+=1
+            if bad<=15:
+                print("BAD",c,"start",start,"amt",amt,"parse",parse(stored+b"00"))
+                print(" got",gb,gs,tr)
+                print(" pred",pb,ps,stored)
+            break
+print("bad",bad,"/",len(seen))
+PY
+stopped: step limit reached

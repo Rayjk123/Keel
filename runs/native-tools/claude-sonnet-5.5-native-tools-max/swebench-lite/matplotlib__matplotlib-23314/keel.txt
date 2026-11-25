@@ -1,0 +1,407 @@
+$ cd . && pwd && ls && git log --oneline -3 && git status
+$ cd . && ls lib/mpl_toolkits/mplot3d/ && wc -l lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && grep -n "def draw" -A 60 lib/mpl_toolkits/mplot3d/axes3d.py | head -150
+$ cd . && grep -n "    def draw(self, renderer" -B 3 -A 75 lib/matplotlib/axes/_base.py
+$ cd . && sed -n 1,60p lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && python -c "import matplotlib; print(matplotlib.__version__, matplotlib.__file__)"; python --version
+$ cd . && mkdir -p /tmp/repro && cat > /tmp/repro/repro.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def render(set_invisible):
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    if set_invisible:
+        ax1.set_visible(False)
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba()).copy()
+    plt.close(fig)
+    return buf
+
+a = render(False)
+b = render(True)
+h, w = a.shape[:2]
+# Left half corresponds to ax1.
+left_a, left_b = a[:, : w // 2], b[:, : w // 2]
+right_a, right_b = a[:, w // 2:], b[:, w // 2:]
+print("left half identical with/without set_visible(False)? ", np.array_equal(left_a, left_b))
+print("right half identical with/without set_visible(False)?", np.array_equal(right_a, right_b))
+# Is left half of b pure white (nothing drawn)?
+print("left half of invisible figure all white?", bool((left_b == 255).all()))
+EOF
+python /tmp/repro/repro.py
+$ cd . && cat > /tmp/repro/repro_img.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1, 1, 1)
+ax2.scatter(1, 1, 1, c='r')
+ax1.set_visible(False)
+fig.savefig("/tmp/repro/before.png")
+EOF
+python /tmp/repro/repro_img.py && ls -la /tmp/repro
+$ cd . && cat > /tmp/repro/analyze.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1, 1, 1)
+ax2.scatter(1, 1, 1, c='r')
+ax1.set_visible(False)
+fig.canvas.draw()
+buf = np.asarray(fig.canvas.buffer_rgba()).copy()
+h, w = buf.shape[:2]
+left = buf[:, : w // 2, :3]
+nonwhite = np.any(left != 255, axis=-1)
+ys, xs = np.nonzero(nonwhite)
+print("image size", w, h)
+print("non-white pixels in left half:", nonwhite.sum())
+if nonwhite.sum():
+    print("bbox of non-white (x0,x1,y0,y1):", xs.min(), xs.max(), ys.min(), ys.max())
+    # unique colours
+    cols, counts = np.unique(left[nonwhite], axis=0, return_counts=True)
+    order = np.argsort(-counts)[:8]
+    for i in order:
+        print("  colour", cols[i], "count", counts[i])
+print("ax1 bbox (display px):", ax1.get_position().bounds, "fig px", fig.bbox.bounds)
+print("ax1 patch visible:", ax1.patch.get_visible(), "axis3don:", ax1._axis3don)
+print("ax1 get_visible:", ax1.get_visible())
+EOF
+python /tmp/repro/analyze.py
+> read /testbed/lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && grep -n "allow_rasterization" -r lib/mpl_toolkits lib/matplotlib/axes/_base.py lib/matplotlib/artist.py | head -30
+$ cd . && cat > /tmp/repro/which_drawn.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from unittest import mock
+import matplotlib.patches as mpatches
+from mpl_toolkits.mplot3d import axis3d
+
+fig, ax = plt.subplots(subplot_kw={'projection': '3d'})
+ax.scatter(1, 1, 1)
+ax.set_visible(False)
+
+calls = []
+def wrap(cls, name):
+    orig = getattr(cls, name)
+    def w(self, *a, **k):
+        calls.append(f"{cls.__name__}.{name} ({type(self).__name__})")
+        return orig(self, *a, **k)
+    setattr(cls, name, w)
+
+wrap(mpatches.Patch, "draw")
+wrap(axis3d.Axis, "draw_pane")
+wrap(axis3d.Axis, "draw")
+fig.canvas.draw()
+print("\n".join(calls))
+EOF
+python /tmp/repro/which_drawn.py
+$ cd . && grep -n "get_tightbbox" -B2 -A 25 lib/mpl_toolkits/mplot3d/axes3d.py | head -80
+$ cd . && grep -n "    def get_tightbbox" -A 75 lib/matplotlib/axes/_base.py | head -110
+$ cd . && cat > /tmp/repro/tight.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import traceback
+
+for name, kw in [("2d", {}), ("3d", {'projection': '3d'})]:
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw=kw)
+    ax1.set_visible(False)
+    for what in ("get_tightbbox", "tight_layout", "savefig_tight"):
+        try:
+            if what == "get_tightbbox":
+                r = ax1.get_tightbbox(fig.canvas.get_renderer())
+                print(name, what, "->", r)
+            elif what == "tight_layout":
+                fig.tight_layout()
+                print(name, what, "-> ok")
+            else:
+                import io
+                fig.savefig(io.BytesIO(), bbox_inches="tight")
+                print(name, what, "-> ok")
+        except Exception:
+            print(name, what, "-> EXC")
+            traceback.print_exc(limit=-2)
+    plt.close(fig)
+EOF
+python /tmp/repro/tight.py
+$ cd . && sed -n 15,60p lib/matplotlib/artist.py
+$ cd . && grep -n "get_visible\|get_tightbbox" lib/matplotlib/tight_layout.py lib/matplotlib/_constrained_layout.py lib/matplotlib/figure.py | head -40
+$ cd . && sed -n 1580,1665p lib/matplotlib/figure.py
+$ cd . && cat > /tmp/repro/layouts.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import traceback
+
+for proj in (None, "3d"):
+    for layout in (None, "tight", "constrained"):
+        kw = {} if proj is None else {"projection": proj}
+        fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw=kw, layout=layout)
+        ax1.set_visible(False)
+        try:
+            fig.canvas.draw()
+            print(f"proj={proj!s:5} layout={layout!s:12} -> ok")
+        except Exception as e:
+            print(f"proj={proj!s:5} layout={layout!s:12} -> {type(e).__name__}: {e}")
+        plt.close(fig)
+EOF
+python /tmp/repro/layouts.py
+$ cd . && sed -n 575,640p lib/matplotlib/_constrained_layout.py
+$ cd . && grep -n "def _get_tightbbox_for_layout_only" -B2 -A 20 lib/matplotlib/artist.py
+$ cd . && grep -n "def union" -B3 -A 22 lib/matplotlib/transforms.py
+$ cd . && grep -n "get_visible\|set_visible\|_visible" lib/mpl_toolkits/mplot3d/*.py
+$ cd . && sed -n 255,420p lib/mpl_toolkits/mplot3d/axis3d.py
+$ cd . && grep -rn "get_tightbbox" lib --include=*.py | grep -v "^lib/matplotlib/tests/" | grep -v "def get_tightbbox"
+$ cd . && grep -n "get_visible\|def get_subplotspec_list\|def get_tight_layout_figure" -n lib/matplotlib/tight_layout.py; sed -n 20,100p lib/matplotlib/tight_layout.py
+$ cd . && sed -n 55,110p lib/matplotlib/_tight_layout.py
+$ cd . && sed -n 4518,4545p lib/matplotlib/axes/_base.py
+$ cd . && sed -n 60,200p lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && grep -n "_frameon\|_axis3don\|def set_axis_on\|def set_axis_off\|def grid\b" lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && sed -n 1,40p lib/mpl_toolkits/tests/test_mplot3d.py; echo ------; grep -n "check_figures_equal" lib/mpl_toolkits/tests/test_mplot3d.py | head -20; echo ------; tail -60 lib/mpl_toolkits/tests/test_mplot3d.py
+$ cd . && grep -n "constrained\|tight_layout\|get_tightbbox\|set_visible" lib/mpl_toolkits/tests/test_mplot3d.py
+$ cd . && sed -n 470,545p lib/mpl_toolkits/mplot3d/axis3d.py
+$ cd . && sed -n 1120,1150p lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && cat > /tmp/repro/tight_tb.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import traceback
+
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'}, layout="constrained")
+ax1.set_visible(False)
+try:
+    fig.canvas.draw()
+except Exception:
+    traceback.print_exc()
+EOF
+python /tmp/repro/tight_tb.py
+$ cd . && grep -n "def inaxes" -A 40 lib/matplotlib/backend_bases.py | head -70
+$ cd . && grep -n "_on_move\|_button_press\|_button_release" lib/mpl_toolkits/mplot3d/axes3d.py | head; grep -n "    def _button_press" -A 12 lib/mpl_toolkits/mplot3d/axes3d.py
+> edit /testbed/lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && python /tmp/repro/repro.py && python /tmp/repro/which_drawn.py; echo "--- (nothing above this line means no Patch/Axis drawn) ---"
+$ cd . && cat > /tmp/repro/diff_right.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def render(set_invisible):
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    if set_invisible:
+        ax1.set_visible(False)
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba()).copy()
+    info = (ax1.get_position().bounds, ax2.get_position().bounds)
+    plt.close(fig)
+    return buf, info
+
+a, ia = render(False)
+b, ib = render(True)
+print("positions with ax1 visible:  ", ia)
+print("positions with ax1 invisible:", ib)
+d = np.any(a != b, axis=-1)
+ys, xs = np.nonzero(d)
+print("n differing px:", d.sum())
+print("diff bbox x:", xs.min(), xs.max(), " y:", ys.min(), ys.max())
+w = a.shape[1]
+print("diff px in left half :", d[:, : w // 2].sum())
+print("diff px in right half:", d[:, w // 2:].sum())
+# where in the right half
+r = d[:, w // 2:]
+ys, xs = np.nonzero(r)
+if len(xs):
+    print("right-half diff bbox x:", xs.min() + w // 2, xs.max() + w // 2, " y:", ys.min(), ys.max())
+EOF
+python /tmp/repro/diff_right.py
+$ cd . && cat > /tmp/repro/diff_right2.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def render(mode):
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    if mode == "invisible":
+        ax1.set_visible(False)
+    elif mode == "removed":
+        ax1.remove()
+    fig.canvas.draw()
+    buf = np.asarray(fig.canvas.buffer_rgba()).copy()
+    ext1 = ax1.get_window_extent().bounds
+    ext2 = ax2.get_window_extent().bounds
+    plt.close(fig)
+    return buf, ext1, ext2
+
+vis, e1, e2 = render("visible")
+inv, _, _ = render("invisible")
+rem, _, _ = render("removed")
+print("ax1 window extent (x, y, w, h):", [round(v, 1) for v in e1])
+print("ax2 window extent (x, y, w, h):", [round(v, 1) for v in e2])
+print()
+print("invisible == removed (whole figure)?", np.array_equal(inv, rem))
+print("visible   == removed (whole figure)?", np.array_equal(vis, rem))
+
+# Pixels that differ between 'visible' and 'invisible'
+d = np.any(vis != inv, axis=-1)
+ys, xs = np.nonzero(d)
+print("visible vs invisible differ over x in", xs.min(), "-", xs.max())
+print("ax2's left edge is at x =", round(e2[0], 1))
+# Is any differing pixel inside ax2's window extent?
+x0, y0, w, h = e2
+H = vis.shape[0]
+in_ax2 = d[:, int(np.ceil(x0)):]
+print("differing px at x >= ax2 left edge:", in_ax2.sum())
+EOF
+python /tmp/repro/diff_right2.py
+$ cd . && grep -n "    def get_tightbbox" -B2 -A 16 lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && grep -n "    def get_tightbbox" -A 30 lib/matplotlib/artist.py | head -50
+$ cd . && grep -rn "def draw(self" lib/matplotlib/axes lib/matplotlib/projections lib/mpl_toolkits --include=*.py | grep -v tests
+> read /testbed/lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && grep -n "self\.M\b\|\.M\b" lib/mpl_toolkits/mplot3d/axes3d.py lib/mpl_toolkits/mplot3d/axis3d.py lib/mpl_toolkits/mplot3d/art3d.py
+$ cd . && sed -n 1040,1075p lib/mpl_toolkits/mplot3d/axes3d.py; echo -----; grep -n "    def format_coord" -A 40 lib/mpl_toolkits/mplot3d/axes3d.py | head -70
+$ cd . && grep -rn "_frameon" lib --include=*.py | grep -v "/tests/"
+$ cd . && sed -n 4405,4442p lib/matplotlib/axes/_base.py
+$ cd . && git log --oneline -5 -S"self._frameon = False" -- lib/mpl_toolkits/mplot3d/axes3d.py
+> edit /testbed/lib/mpl_toolkits/mplot3d/axes3d.py
+$ cd . && python /tmp/repro/layouts.py && echo ---- && python /tmp/repro/tight.py && echo ---- && python /tmp/repro/diff_right2.py
+$ cd . && git diff
+$ cd . && sed -n 1385,1420p lib/mpl_toolkits/tests/test_mplot3d.py; echo ....; sed -n 1520,1560p lib/mpl_toolkits/tests/test_mplot3d.py
+$ cd . && grep -rn "set_visible(False)" lib/matplotlib/tests/test_axes.py lib/matplotlib/tests/test_tightlayout.py lib/matplotlib/tests/test_constrainedlayout.py lib/matplotlib/tests/test_figure.py lib/matplotlib/tests/test_artist.py | head -30
+$ cd . && grep -n "def test_invisible_axes\|def test_.*invisible" -A 22 lib/matplotlib/tests/test_constrainedlayout.py lib/matplotlib/tests/test_tightlayout.py lib/matplotlib/tests/test_axes.py | head -90
+$ cd . && sed -n 218,300p lib/mpl_toolkits/tests/test_mplot3d.py
+$ cd . && sed -n 505,530p lib/mpl_toolkits/mplot3d/art3d.py
+$ cd . && ls lib/mpl_toolkits/tests/ lib/mpl_toolkits/tests/baseline_images/test_mplot3d | head -20; git status --short
+$ cd . && cat > /tmp/repro/issue_snippet.py << 'EOF'
+# Exactly the snippet from the issue (Agg instead of Qt5Agg, savefig instead of show)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+import numpy as np
+
+fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
+ax1.scatter(1,1,1)
+ax2.scatter(1,1,1, c='r')
+ax1.set_visible(False)
+fig.canvas.draw()
+got = np.asarray(fig.canvas.buffer_rgba()).copy()
+
+# Reference: same layout, but only the right-hand Axes ever created.
+fig2 = plt.figure()
+ax = fig2.add_subplot(1, 2, 2, projection='3d')
+ax.scatter(1, 1, 1, c='r')
+fig2.canvas.draw()
+ref = np.asarray(fig2.canvas.buffer_rgba()).copy()
+
+print("issue snippet renders identically to 'only ax2 exists':", np.array_equal(got, ref))
+EOF
+python /tmp/repro/issue_snippet.py
+$ cd . && git stash && echo "=== ORIGINAL CODE ===" && python /tmp/repro/layouts.py; git stash pop && git diff --stat
+$ cd . && tail -c 300 lib/mpl_toolkits/tests/test_mplot3d.py | cat -A | tail -5
+$ cd . && sed -n 415,450p lib/matplotlib/tests/test_constrainedlayout.py; echo ....; sed -n 135,160p lib/matplotlib/tests/test_tightlayout.py
+$ cd . && cat > /tmp/repro/positions.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+for proj in (None, "3d"):
+    kw = {} if proj is None else {"projection": proj}
+    fig, axs = plt.subplots(1, 2, subplot_kw=kw, constrained_layout=True)
+    axs[0].set_visible(False)
+    fig.canvas.draw()
+    print(f"proj={proj!s:5} ax1 pos={[round(v, 3) for v in axs[0].get_position().bounds]}"
+          f" ax2 pos={[round(v, 3) for v in axs[1].get_position().bounds]}")
+EOF
+python /tmp/repro/positions.py
+$ cd . && cat > /tmp/repro/axis_visible.py << 'EOF'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+
+def render(hide_xaxis):
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.scatter(1, 1, 1)
+    if hide_xaxis:
+        ax.xaxis.set_visible(False)
+    fig.canvas.draw()
+    out = np.asarray(fig.canvas.buffer_rgba()).copy()
+    plt.close(fig)
+    return out
+
+print("hiding ax.xaxis changes the render:", not np.array_equal(render(False), render(True)))
+EOF
+python /tmp/repro/axis_visible.py; git stash -q; echo "(on original code:)"; python /tmp/repro/axis_visible.py; git stash pop -q; git diff --stat
+$ cd . && sed -n 2890,2935p lib/matplotlib/figure.py; grep -n "def _get_draw_artists" -A 22 lib/matplotlib/figure.py
+$ cd . && grep -n "def _draw_list_compositing_images" -A 45 lib/matplotlib/image.py
+$ cd . && sed -n 345,400p lib/matplotlib/_constrained_layout.py
+$ cd . && sed -n 193,232p lib/matplotlib/figure.py
+$ cd . && cat >> lib/mpl_toolkits/tests/test_mplot3d.py << 'EOF'
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes(fig_test, fig_ref):
+    # An invisible Axes3D must not draw anything, neither its artists nor its
+    # background patch, panes and axis lines.  The reference figure is blank.
+    ax = fig_test.subplots(subplot_kw={'projection': '3d'})
+    ax.scatter(1, 1, 1)
+    ax.set_visible(False)
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes_leaves_neighbour_untouched(fig_test, fig_ref):
+    # Hiding one of two 3D subplots must look the same as if that subplot had
+    # never been created, and must not change the other subplot.
+    ax1, ax2 = fig_test.subplots(1, 2, subplot_kw={'projection': '3d'})
+    ax1.scatter(1, 1, 1)
+    ax2.scatter(1, 1, 1, c='r')
+    ax1.set_visible(False)
+
+    ax = fig_ref.add_subplot(1, 2, 2, projection='3d')
+    ax.scatter(1, 1, 1, c='r')
+
+
+@check_figures_equal(extensions=["png"])
+def test_invisible_axes_can_be_shown_again(fig_test, fig_ref):
+    ax = fig_test.add_subplot(projection='3d')
+    ax.scatter(1, 1, 1)
+    ax.set_visible(False)
+    fig_test.canvas.draw()
+    ax.set_visible(True)
+
+    ax = fig_ref.add_subplot(projection='3d')
+    ax.scatter(1, 1, 1)
+
+
+def test_invisible_axes_tightbbox_and_layout():
+    # As for 2D Axes, the tight bbox of an invisible Axes3D is None; this used
+    # to raise an AttributeError in constrained layout.
+    fig, (ax1, ax2) = plt.subplots(1, 2, subplot_kw={'projection': '3d'},
+                                   layout='constrained')
+    ax1.set_visible(False)
+    renderer = fig.canvas.get_renderer()
+    assert ax1.get_tightbbox(renderer) is None
+    assert ax2.get_tightbbox(renderer) is not None
+    fig.draw_without_rendering()
+EOF
+tail -50 lib/mpl_toolkits/tests/test_mplot3d.py | head -20
+$ cd . && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k "invisible" -v -p no:cacheprovider 2>&1 | tail -20
+$ cd . && git stash push lib/mpl_toolkits/mplot3d/axes3d.py -q && git status --short && echo "=== tests against ORIGINAL axes3d.py ===" && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k "invisible" -p no:cacheprovider 2>&1 | grep -E "PASSED|FAILED|passed|failed|Error" | head -20; git stash pop -q && git status --short
+$ cd . && git status --short --ignored | grep -v __pycache__ | head -20; echo ---; grep -n "Number of open figures changed" -B 12 lib/matplotlib/testing/decorators.py | head -40
+$ cd . && git stash push lib/mpl_toolkits/mplot3d/axes3d.py -q && python -m pytest lib/mpl_toolkits/tests/test_mplot3d.py -k "test_invisible_axes and png and not again and not neighbour" -p no:cacheprovider 2>&1 | grep -E "^E " | head -12; git stash pop -q && git status --short
+$ cd . && find result_images -type f | head -30; echo ---; find result_images -type f -newer /tmp/repro/repro.py | wc -l; find result_images -type f | wc -l
+stopped: step limit reached

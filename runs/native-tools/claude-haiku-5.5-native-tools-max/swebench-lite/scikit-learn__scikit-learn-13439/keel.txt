@@ -1,0 +1,287 @@
+$ cd . && git status && git log --oneline -3 && ls
+$ cd . && grep -n "__len__\|__getitem__\|def _iter\|def __\|class Pipeline\|class FeatureUnion" sklearn/pipeline.py
+> read sklearn/pipeline.py
+$ cd . && grep -n "slice\|__len__\|len(pipe\|pipe\[" sklearn/tests/test_pipeline.py | head -50; echo ---; grep -rn "__len__" sklearn/pipeline.py sklearn/base.py sklearn/utils/metaestimators.py; echo ---; grep -rn -i "slic\|indexing\|__getitem__" doc/whats_new/v0.21.rst | head -20
+$ cd . && sed -n 525,560p sklearn/tests/test_pipeline.py; echo ---; sed -n 400,415p doc/whats_new/v0.21.rst; echo ---; sed -n 1,30p sklearn/pipeline.py
+$ cd /tmp && python -c "import sklearn, sys; print(sklearn.__file__, sklearn.__version__); print(sys.version)" && cd - >/dev/null && cat > /tmp/repro.py <<'EOF'
+from sklearn import svm
+from sklearn.datasets import samples_generator
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+from sklearn.pipeline import Pipeline
+
+# generate some data to play with
+X, y = samples_generator.make_classification(
+    n_informative=5, n_redundant=0, random_state=42)
+
+anova_filter = SelectKBest(f_regression, k=5)
+clf = svm.SVC(kernel='linear')
+pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
+
+print("len:", len(pipe))
+print("pipe[:len(pipe)]:", pipe[:len(pipe)])
+EOF
+cd /tmp && python /tmp/repro.py; cd - >/dev/null
+$ cd . && grep -n "len(" sklearn/pipeline.py; echo ---; sed -n 1,80p sklearn/utils/metaestimators.py | grep -n "class _BaseComposition\|def \|len(" ; echo ---; python -m pytest --version 2>&1 | head -2; echo ---; python -m pytest sklearn/tests/test_pipeline.py -q 2>&1 | tail -5
+$ cd . && grep -rn "__len__" sklearn --include=*.py | grep -v "/tests/" ; echo "--- tests:"; grep -rln "__len__" sklearn --include=*.py | grep "/tests/"; echo "--- hasattr/getattr of len in sklearn:"; grep -rn "hasattr([^)]*'__len__'\|hasattr([^)]*\"__len__\"" sklearn --include=*.py | head; echo "--- setup.cfg doctest config:"; grep -n -A5 "tool:pytest" setup.cfg
+$ cd . && sed -n 118,150p sklearn/utils/validation.py; echo "--- _index_param_value:"; grep -n -A12 "def _index_param_value" sklearn/model_selection/_validation.py; echo "--- callers of _is_arraylike / _num_samples:"; grep -rn "_is_arraylike(\|_num_samples(" sklearn --include=*.py | grep -v "def \|/tests/" | head -30; echo "--- numpy:"; python -c "import numpy; print(numpy.__version__)"
+$ pwd; cd /testbed 2>/dev/null && pwd; echo "--- _is_arraylike callers:"; grep -rn "_is_arraylike" sklearn --include=*.py | grep -v "/tests/"; echo "--- _index_param_value callers:"; grep -rn "_index_param_value" sklearn --include=*.py | grep -v "/tests/"
+$ cd /testbed && cat > /tmp/probe.py <<'EOF'
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import SelectKBest
+from sklearn.model_selection import cross_validate
+from sklearn.model_selection._validation import _index_param_value
+from sklearn.pipeline import Pipeline
+from sklearn.utils.validation import _is_arraylike
+
+X, y = make_classification(n_samples=60, random_state=0)
+pipe = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+rf = RandomForestClassifier(n_estimators=2, random_state=0).fit(X, y)
+
+def attempt(label, fn):
+    try:
+        out = fn()
+        print("%-45s OK -> %s" % (label, type(out).__name__))
+    except Exception as e:
+        print("%-45s RAISES %s: %s" % (label, type(e).__name__, str(e)[:70]))
+
+attempt("_is_arraylike(pipe)", lambda: _is_arraylike(pipe))
+attempt("_is_arraylike(rf ensemble)", lambda: _is_arraylike(rf))
+attempt("_index_param_value(X, pipe, idx)", lambda: _index_param_value(X, pipe, np.arange(10)))
+attempt("_index_param_value(X, rf, idx)", lambda: _index_param_value(X, rf, np.arange(10)))
+attempt("cross_validate w/ pipe as fit_param",
+        lambda: cross_validate(LogisticRegression(), X, y, cv=3,
+                               fit_params={'aux': pipe}))
+attempt("cross_validate w/ rf as fit_param",
+        lambda: cross_validate(LogisticRegression(), X, y, cv=3,
+                               fit_params={'aux': rf}))
+attempt("np.asarray(pipe).shape", lambda: np.asarray(pipe).shape)
+EOF
+python /tmp/probe.py 2>&1 | grep -v Warning
+$ cd /testbed && cat > /tmp/probe2.py <<'EOF'
+import numpy as np
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+from sklearn.model_selection import cross_validate
+from sklearn.model_selection._validation import _index_param_value
+from sklearn.pipeline import Pipeline
+from sklearn.utils.validation import _is_arraylike
+
+class AcceptsEstimatorParam(BaseEstimator, ClassifierMixin):
+    """Classifier whose fit() takes an estimator as a (non-sample) fit param."""
+    def fit(self, X, y, helper=None):
+        self.classes_ = np.unique(y)
+        self.helper_ = helper
+        return self
+    def predict(self, X):
+        return np.repeat(self.classes_[0], X.shape[0])
+
+X, y = make_classification(n_samples=60, random_state=0)
+pipe = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+
+print("_is_arraylike(pipe) =", _is_arraylike(pipe))
+print("_index_param_value passthrough? ",
+      _index_param_value(X, pipe, np.arange(10)) is pipe)
+try:
+    res = cross_validate(AcceptsEstimatorParam(), X, y, cv=3,
+                         fit_params={'helper': pipe})
+    print("cross_validate with Pipeline fit param: OK, n_fits =",
+          len(res['test_score']))
+except Exception as e:
+    print("cross_validate with Pipeline fit param: RAISES",
+          type(e).__name__, str(e)[:80])
+EOF
+python /tmp/probe2.py 2>&1 | grep -v Warn | tee /tmp/before.txt
+$ cd /testbed && cat > /tmp/experiment.py <<'EOF'
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+
+pipe = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+print("np.asarray(pipe).shape BEFORE:", np.asarray(pipe).shape)
+
+# Simulate the proposed fix by monkeypatching (repo untouched)
+Pipeline.__len__ = lambda self: len(self.steps)
+print("len(pipe) AFTER:", len(pipe))
+print("np.asarray(pipe).shape AFTER:", np.asarray(pipe).shape)
+EOF
+python /tmp/experiment.py 2>&1 | grep -v Warn
+echo "=== cross_validate probe with __len__ monkeypatched ==="
+cat > /tmp/experiment2.py <<'EOF'
+import runpy, sys
+from sklearn.pipeline import Pipeline
+Pipeline.__len__ = lambda self: len(self.steps)
+runpy.run_path('/tmp/probe2.py', run_name='__main__')
+EOF
+python /tmp/experiment2.py 2>&1 | grep -v Warn
+$ cd /testbed && echo "--- _is_arraylike / _index_param_value / _num_samples tests:"; grep -rn "_is_arraylike\|_index_param_value\|_num_samples" sklearn --include=test_*.py | head -20; echo "--- fit_params tests in model_selection:"; grep -n "def test.*fit_param\|def test_.*param" sklearn/model_selection/tests/test_validation.py; echo "--- MockClassifier in test_validation:"; grep -n "class MockClassifier\|class MockEstimatorWithFitParam\|def fit" sklearn/model_selection/tests/test_validation.py | head; echo "--- Sized/len checks on objects:"; grep -rn "Sized\|isinstance([^)]*, *abc\.\?Sequence" sklearn --include=*.py | grep -v "/tests/\|externals" | head
+$ cd /testbed && grep -n "np.empty\|MaskedArray\|dtype=object" sklearn/model_selection/_search.py | head; echo "--- ensure no line in repo changed:"; git status --short; cat > /tmp/experiment3.py <<'EOF'
+import warnings; warnings.filterwarnings("ignore")
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+from sklearn.model_selection import GridSearchCV, ParameterGrid
+from sklearn.pipeline import Pipeline
+
+Pipeline.__len__ = lambda self: len(self.steps)   # simulate the proposed fix
+
+p1 = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+p2 = Pipeline([('sel', SelectKBest(k=3)), ('clf', LogisticRegression(C=0.5))])
+print("np.array([p1,p2]).shape:", np.array([p1, p2], dtype=object).shape)
+print("bool(p1):", bool(p1))
+
+X, y = make_classification(n_samples=60, random_state=0)
+try:
+    gs = GridSearchCV(LogisticRegression(), {'C': [0.1, 1.0]}, cv=2)
+    # pipelines as parameter *values* (e.g. swapping whole estimators)
+    gs = GridSearchCV(SelectKBest(), {'k': [3, 5]}, cv=2)  # baseline-ish
+    gs = GridSearchCV(p1, {'clf': [LogisticRegression(), LogisticRegression(C=2)]}, cv=2)
+    gs.fit(X, y)
+    print("GridSearchCV(clf=[estimators]) OK, best:", gs.best_params_)
+except Exception as e:
+    print("GridSearchCV RAISES", type(e).__name__, str(e)[:120])
+try:
+    gs = GridSearchCV(LogisticRegression(), {'C': [0.1, 1.0]}, cv=2).fit(X, y)
+    print("plain GridSearchCV OK")
+except Exception as e:
+    print("plain GridSearchCV RAISES", e)
+EOF
+python /tmp/experiment3.py 2>&1 | grep -v Warn
+$ cd /testbed && python -c "
+from sklearn.pipeline import Pipeline
+try:
+    Pipeline([])
+    print('Pipeline([]) constructed')
+except Exception as e:
+    print('Pipeline([]) raises', type(e).__name__, e)
+" 2>&1 | grep -v Warn; echo "--- PR template:"; cat PULL_REQUEST_TEMPLATE.md | head -30; echo "--- utils tests touching num_samples/arraylike:"; grep -n "def test_.*num_samples\|def test_.*arraylike\|def test_check_array\b" sklearn/utils/tests/test_validation.py; sed -n 800,830p sklearn/utils/tests/test_validation.py
+$ cd /testbed && sed -n 770,790p sklearn/model_selection/_search.py; echo "--- tests referencing 'got estimator' / fit-param estimator behavior:"; grep -rn "got estimator\|Expected sequence or array-like" sklearn --include=*.py | head; echo "--- search w/ pipeline-valued param (baseline vs monkeypatched):"; cat > /tmp/search_probe.py <<'EOF'
+import sys, warnings; warnings.filterwarnings("ignore")
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.ensemble import BaggingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+if len(sys.argv) > 1:
+    Pipeline.__len__ = lambda self: len(self.steps)
+X, y = make_classification(n_samples=60, random_state=0)
+p1 = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+p2 = Pipeline([('sel', SelectKBest(k=3)), ('clf', LogisticRegression(C=0.5))])
+try:
+    gs = GridSearchCV(BaggingClassifier(n_estimators=2, random_state=0),
+                      {'base_estimator': [p1, p2]}, cv=2).fit(X, y)
+    vals = gs.cv_results_['param_base_estimator']
+    print("OK dtype/shape:", vals.dtype, vals.shape,
+          "| stored types:", [type(v).__name__ for v in vals],
+          "| identity kept:", vals[0] is p1 and vals[1] is p2)
+except Exception as e:
+    print("RAISES", type(e).__name__, str(e)[:120])
+EOF
+echo "baseline:"; python /tmp/search_probe.py; echo "with __len__:"; python /tmp/search_probe.py mono
+$ cd /testbed && echo "--- baseline (unpatched) numpy coercion of pipelines:"; python -c "
+import warnings; warnings.filterwarnings('ignore')
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+p1 = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+p2 = Pipeline([('sel', SelectKBest(k=3)), ('clf', LogisticRegression(C=0.5))])
+print('np.array([p1,p2], dtype=object).shape:', np.array([p1, p2], dtype=object).shape)
+print('np.asarray(p1).shape:', np.asarray(p1).shape)
+" 2>&1 | grep -v Warn
+echo "--- numpy/array coercion of steps or estimators inside sklearn source:"
+grep -rn "np\.\(asarray\|array\)(\s*\(self\.\)\?\(steps\|estimators\|transformer_list\|estimators_\)" sklearn --include=*.py | grep -v "/tests/" ; echo "(end)"
+echo "--- truthiness checks on estimator-like names:"
+grep -rnE "if (not )?(self\.)?(base_)?(estimator|pipe|pipeline|clf|transformer|final_estimator|_final_estimator)\s*:" sklearn --include=*.py | grep -v "/tests/\|externals" ; echo "(end)"
+grep -rnE "(estimator|pipeline|transformer) or " sklearn --include=*.py | grep -v "/tests/\|externals" | head; echo "(end)"
+$ cd /testbed && grep -rnE "np\.(asarray|array|empty)\(.*(estimator|pipeline|pipe|transformer)s?\b" sklearn --include=*.py | grep -v "/tests/\|externals\|^.*#" | head -30; echo "(end greps)"; echo "--- object arrays of estimators:"; grep -rn "dtype=object" sklearn --include=*.py | grep -v "/tests/\|externals" | head -20
+$ cd /testbed && timeout 900 python -m pytest -q -p no:cacheprovider sklearn/tests/test_pipeline.py sklearn/model_selection/tests/test_validation.py sklearn/utils/tests/test_validation.py sklearn/model_selection/tests/test_search.py sklearn/ensemble/tests/test_base.py sklearn/compose/tests sklearn/tests/test_base.py 2>&1 | tail -15
+$ cd /testbed && echo "--- np.array/asarray over estimator containers in non-test code:"; grep -rnE "np\.(asarray|array)\(\s*(self\.)?(estimators|steps|transformer_list)" sklearn --include=*.py | grep -v "/tests/\|externals"; echo "(end)"; echo "--- MockClassifier fit signature + fit-param tests:"; sed -n 162,185p sklearn/model_selection/tests/test_validation.py; sed -n 583,606p sklearn/model_selection/tests/test_validation.py
+$ cd /testbed && sed -n 1,40p sklearn/tests/test_pipeline.py | grep -n "import\|^from"; echo "--- test_validation imports (model_selection):"; sed -n 1,60p sklearn/model_selection/tests/test_validation.py | grep -n "import" | head -40; echo "--- flake8/pycodestyle:"; (python -m flake8 --version || python -m pycodestyle --version || echo none) 2>&1 | head -3
+$ cd /testbed && echo "--- _is_arraylike all refs (incl tests):"; grep -rn "_is_arraylike" sklearn doc --include=*.py --include=*.rst | grep -v "^sklearn/externals"; echo "--- MockDataFrame / CheckingClassifier:"; grep -n "class \|def " sklearn/utils/mocking.py | head -30; echo "--- MockClassifier rest:"; sed -n 186,200p sklearn/model_selection/tests/test_validation.py; grep -n "def score\|def predict\|def predict_proba" sklearn/model_selection/tests/test_validation.py | head -5; echo "--- return_estimator in cross_validate?"; grep -n "return_estimator" sklearn/model_selection/_validation.py | head -3
+$ cd /testbed && sed -n 162,200p sklearn/model_selection/tests/test_validation.py; echo "--- utils/tests/test_validation imports around _num_samples:"; sed -n 30,50p sklearn/utils/tests/test_validation.py; echo "--- whats_new 0.21 pipeline section:"; grep -n ":mod:\`sklearn.pipeline\`" doc/whats_new/v0.21.rst
+$ cd /testbed && echo "--- test_validation module-level X,y and MockClassifier methods:"; grep -n "^X\b\|^y\b\|^X,\|^X =\|^y =\|^X, y" sklearn/model_selection/tests/test_validation.py | head; sed -n 162,166p sklearn/model_selection/tests/test_validation.py; grep -n "def get_params\|def set_params\|def get_params" sklearn/model_selection/tests/test_validation.py | head -4; echo "--- imports in test_validation for estimators:"; grep -n "LogisticRegression\|SelectKBest\|f_classif\|Pipeline\|make_classification\|MockClassifier\b" sklearn/model_selection/tests/test_validation.py | head -12; echo "--- utils test: _is_arraylike import?"; grep -n "_is_arraylike" sklearn/utils/tests/test_validation.py; echo "--- column_transformer hasattr __len__ context:"; sed -n 664,676p sklearn/compose/_column_transformer.py
+$ cd /testbed && awk 'NR>=380 && NR<=500 && /^def |_index_param_value/ {print NR": "$0}' sklearn/model_selection/_validation.py; awk 'NR>=760 && NR<=840 && /^def |_index_param_value/ {print NR": "$0}' sklearn/model_selection/_validation.py; echo "--- search.py fit_params path:"; grep -n "fit_params" sklearn/model_selection/_search.py | head -20
+$ cd /testbed && grep -rnE "np\.(asarray|array|stack|vstack|hstack|concatenate)\(.*(estimator|pipe|transformer|step)" sklearn --include=*.py | grep -v "/tests/\|externals\|^\s*#" | head -20; echo "(end)"; echo "--- candidate_params in search:"; grep -n "candidate_params" sklearn/model_selection/_search.py | head -12
+> edit /testbed/sklearn/pipeline.py
+> read /testbed/sklearn/utils/validation.py
+> edit /testbed/sklearn/utils/validation.py
+$ cd /tmp && python /tmp/repro.py 2>&1 | grep -v Warn; cd /testbed && echo "--- slicing identity (issue: pipe[:len(pipe)]):"; python -c "
+import warnings; warnings.filterwarnings('ignore')
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectKBest
+from sklearn.feature_selection import f_regression
+pipe = Pipeline([('anova', SelectKBest(f_regression, k=5)), ('svc', SVC(kernel='linear'))])
+full = pipe[:len(pipe)]
+print('len =', len(pipe), '| pipe[:len] is Pipeline:', isinstance(full, Pipeline),
+      '| same steps:', full.steps == pipe.steps)
+print('len of empty-slice pipeline:', len(pipe[:0]) if False else 'n/a (Pipeline([]) invalid)')
+print('len(pipe[:-1]) =', len(pipe[:-1]), '| len(pipe[1:]) =', len(pipe[1:]))
+" 2>&1 | grep -v Warn; echo "--- cross_validate probe after fix (compare to /tmp/before.txt):"; python /tmp/probe2.py 2>&1 | grep -v Warn > /tmp/after.txt; cat /tmp/after.txt; echo "--- diff before/after:"; diff /tmp/before.txt /tmp/after.txt && echo "IDENTICAL"
+$ cd /testbed && cat > /tmp/edge.py <<'EOF'
+import sys, warnings; warnings.filterwarnings("ignore")
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import SelectKBest
+from sklearn.model_selection import ParameterGrid
+from sklearn.utils.validation import _is_arraylike
+if len(sys.argv) > 1:          # simulate ORIGINAL code: no Pipeline.__len__
+    del Pipeline.__len__
+p = Pipeline([('sel', SelectKBest(k=5)), ('clf', LogisticRegression())])
+def attempt(label, fn):
+    try:
+        print("%-28s -> %r" % (label, fn()))
+    except Exception as e:
+        print("%-28s RAISES %s" % (label, type(e).__name__))
+attempt("bool(pipe)", lambda: bool(p))
+attempt("np.asarray(pipe).shape", lambda: np.asarray(p).shape)
+attempt("list(pipe) types", lambda: [type(s).__name__ for s in p])
+attempt("ParameterGrid({'a': pipe})", lambda: len(list(ParameterGrid({'a': p}))))
+attempt("ParameterGrid({'a': [pipe]})", lambda: len(list(ParameterGrid({'a': [p]}))))
+EOF
+echo "=== ORIGINAL (simulated) ==="; python /tmp/edge.py orig; echo "=== AFTER FIX ==="; python /tmp/edge.py
+$ cd /testbed && python - <<'EOF' 2>&1 | grep -v Warn
+import warnings; warnings.filterwarnings("ignore")
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection._validation import _index_param_value
+from sklearn.utils.validation import _is_arraylike
+X, y = make_classification(n_samples=60, random_state=0)
+rf = RandomForestClassifier(n_estimators=2, random_state=0).fit(X, y)
+print("ensemble _is_arraylike:", _is_arraylike(rf))
+v = _index_param_value(X, rf, np.arange(10))
+print("ensemble _index_param_value now passes through:", v is rf)
+print("np.asarray(rf).shape (precedent, has __len__+__getitem__):", np.asarray(rf).shape)
+EOF
+echo "--- truthiness on pipeline-like names in sklearn (non-test):"; grep -rnE "\bif (not )?(self\.)?(_?final_estimator|pipe\w*|estimator|transformer)\b *:" sklearn --include=*.py | grep -v "/tests/\|externals"; echo "(end)"
+$ cd /testbed && grep -n "_index_param_value\|_is_arraylike" sklearn/model_selection/tests/test_validation.py sklearn/utils/tests/test_validation.py; echo "(imports checked)"; grep -n "^class Transf\|^class FitParamT\|^def test_pipeline_index\|^def test_set_pipeline_steps" sklearn/tests/test_pipeline.py; echo "--- model_selection fit_params test end:"; sed -n 606,625p sklearn/model_selection/tests/test_validation.py; echo "--- MockDataFrame has fit?"; grep -n "def fit" sklearn/utils/mocking.py
+> edit /testbed/sklearn/tests/test_pipeline.py
+> read /testbed/sklearn/tests/test_pipeline.py
+> edit /testbed/sklearn/tests/test_pipeline.py
+> read /testbed/sklearn/model_selection/tests/test_validation.py
+$ cd /testbed && echo "--- model_selection test_validation imports of BaseEstimator/ClassifierMixin/_index_param_value:"; grep -n "BaseEstimator\|ClassifierMixin\|_index_param_value" sklearn/model_selection/tests/test_validation.py | head; echo "--- utils test_validation imports (top):"; sed -n 1,30p sklearn/utils/tests/test_validation.py | grep -n "import"; grep -n "BaseEstimator\|from sklearn.pipeline\|MockDataFrame" sklearn/utils/tests/test_validation.py | head
+> edit /testbed/sklearn/model_selection/tests/test_validation.py
+$ cd /testbed && grep -n "SelectKBest\|^from sklearn.feature_selection\|^from sklearn.linear_model import\|^from sklearn.datasets import make_classification" sklearn/model_selection/tests/test_validation.py
+$ cd /testbed && sed -n 66,80p sklearn/model_selection/tests/test_validation.py
+> edit /testbed/sklearn/model_selection/tests/test_validation.py
+$ cd /testbed && grep -n "_num_samples,\|    _num_samples)\|^from sklearn.utils.validation import\|_is_arraylike" sklearn/utils/tests/test_validation.py | head; grep -n "def test_retrieve_samples_from_non_standard_shape" sklearn/utils/tests/test_validation.py
+> read /testbed/sklearn/utils/tests/test_validation.py
+> edit /testbed/sklearn/utils/tests/test_validation.py
+> read /testbed/sklearn/utils/tests/test_validation.py
+> edit /testbed/sklearn/utils/tests/test_validation.py
+$ cd /testbed && grep -n "LogisticRegression" sklearn/utils/tests/test_validation.py | head -3; echo "--- run new tests:"; python -m pytest -q -p no:cacheprovider sklearn/tests/test_pipeline.py::test_pipeline_len sklearn/model_selection/tests/test_validation.py::test_cross_val_fit_param_pipeline sklearn/utils/tests/test_validation.py::test_is_arraylike 2>&1 | tail -15
+$ cd /testbed && python -m pytest -q -p no:cacheprovider sklearn/tests/test_pipeline.py::test_pipeline_len sklearn/model_selection/tests/test_validation.py::test_cross_val_fit_param_pipeline sklearn/utils/tests/test_validation.py::test_is_arraylike 2>&1 | grep -E "^(FAILED|PASSED|ERROR)|Error|assert|^E " | head -30
+> edit /testbed/sklearn/model_selection/tests/test_validation.py
+stopped: step limit reached

@@ -1,0 +1,337 @@
+$ ls -la
+$ head -50 graphene.dat
+$ tail -50 graphene.dat
+$ wc -l graphene.dat && head -1 graphene.dat && tail -1 graphene.dat
+$ cat > fit_raman.py << 'EOF'
+import numpy as np
+from scipy.optimize import curve_fit
+import json
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude * (gamma**2) / ((x - x0)**2 + gamma**2) + offset
+
+# Load data - European format with comma as decimal separator
+data = []
+with open('graphene.dat', 'r') as f:
+    for line in f:
+        parts = line.strip().split('\t')
+        if len(parts) == 2:
+            x = float(parts[0].replace(',', '.'))
+            y = float(parts[1].replace(',', '.'))
+            data.append((x, y))
+
+data = np.array(data)
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# The x values appear to be in some unit - let me analyze
+# For Raman of graphene: G peak ~1580 cm^-1, 2D peak ~2700 cm^-1
+# Let's look at the data range
+print(f"X range: {x_data.min():.2f} to {x_data.max():.2f}")
+print(f"Y range: {y_data.min():.2f} to {y_data.max():.2f}")
+
+# Find peaks in the intensity data
+# The data might be wavelength that needs conversion, or directly in cm^-1
+# Let's look at the intensity profile
+
+# Sort data by x for easier analysis
+sort_idx = np.argsort(x_data)
+x_sorted = x_data[sort_idx]
+y_sorted = y_data[sort_idx]
+
+# Print some statistics about high intensity regions
+print("\nLooking for peaks...")
+# Find local maxima
+from scipy.signal import find_peaks
+peaks, properties = find_peaks(y_sorted, height=15000, distance=50)
+print(f"Found peaks at x positions: {x_sorted[peaks]}")
+print(f"Peak intensities: {y_sorted[peaks]}")
+
+EOF
+python3 fit_raman.py
+$ pip install numpy scipy -q && python3 fit_raman.py
+$ cat > fit_raman.py << 'EOF'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
+import json
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude * (gamma**2) / ((x - x0)**2 + gamma**2) + offset
+
+# Load data - European format with comma as decimal separator
+data = []
+with open('graphene.dat', 'r') as f:
+    for line in f:
+        parts = line.strip().split('\t')
+        if len(parts) == 2:
+            x = float(parts[0].replace(',', '.'))
+            y = float(parts[1].replace(',', '.'))
+            data.append((x, y))
+
+data = np.array(data)
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# Sort data by x for easier analysis
+sort_idx = np.argsort(x_data)
+x_sorted = x_data[sort_idx]
+y_sorted = y_data[sort_idx]
+
+print(f"X range: {x_sorted.min():.2f} to {x_sorted.max():.2f}")
+print(f"Y range: {y_sorted.min():.2f} to {y_sorted.max():.2f}")
+
+# Find peaks in the intensity data
+peaks, properties = find_peaks(y_sorted, height=10000, distance=100, prominence=5000)
+print(f"\nFound peaks at x positions: {x_sorted[peaks]}")
+print(f"Peak intensities: {y_sorted[peaks]}")
+
+# Identify G and 2D peaks
+# The 2D peak in graphene is typically more intense and at higher Raman shift
+# In this data, the peak with highest intensity is the 2D peak
+peak_intensities = y_sorted[peaks]
+peak_positions = x_sorted[peaks]
+
+# Find the most intense peak - this is the 2D peak
+max_idx = np.argmax(peak_intensities)
+peak_2D_pos = peak_positions[max_idx]
+peak_2D_intensity = peak_intensities[max_idx]
+
+# For G peak - it should be at a different position
+# Based on typical graphene Raman, G peak is less intense than 2D
+# Let's find peaks in different regions
+
+# Let's examine the data more carefully
+# Print regions around high intensity
+print("\nLooking for G peak region (around 32000-34000)...")
+mask_g_region = (x_sorted > 32500) & (x_sorted < 34000)
+if np.any(mask_g_region):
+    g_region_y = y_sorted[mask_g_region]
+    g_region_x = x_sorted[mask_g_region]
+    max_g_idx = np.argmax(g_region_y)
+    print(f"Local max in G region: x={g_region_x[max_g_idx]:.2f}, y={g_region_y[max_g_idx]:.2f}")
+
+print("\nLooking for 2D peak region (around 18000-21000)...")
+mask_2d_region = (x_sorted > 18000) & (x_sorted < 21000)
+if np.any(mask_2d_region):
+    d2_region_y = y_sorted[mask_2d_region]
+    d2_region_x = x_sorted[mask_2d_region]
+    max_2d_idx = np.argmax(d2_region_y)
+    print(f"Local max in 2D region: x={d2_region_x[max_2d_idx]:.2f}, y={d2_region_y[max_2d_idx]:.2f}")
+
+# Based on analysis, fit the peaks
+# G peak: around x ~ 33000-34000
+# 2D peak: around x ~ 19000-20000
+
+# Fit 2D peak
+x_2d_center = 19140
+mask_2d = (x_sorted > 18500) & (x_sorted < 20000)
+x_2d_fit = x_sorted[mask_2d]
+y_2d_fit = y_sorted[mask_2d]
+
+# Initial guess for 2D peak
+max_2d_idx = np.argmax(y_2d_fit)
+p0_2d = [x_2d_fit[max_2d_idx], 200, y_2d_fit[max_2d_idx] - 5000, 5000]
+
+try:
+    popt_2d, pcov_2d = curve_fit(lorentzian, x_2d_fit, y_2d_fit, p0=p0_2d, maxfev=10000)
+    print(f"\n2D peak fit: x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amplitude={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+except Exception as e:
+    print(f"Error fitting 2D peak: {e}")
+    popt_2d = p0_2d
+
+# Fit G peak
+mask_g = (x_sorted > 32500) & (x_sorted < 34000)
+x_g_fit = x_sorted[mask_g]
+y_g_fit = y_sorted[mask_g]
+
+# Initial guess for G peak
+max_g_idx = np.argmax(y_g_fit)
+p0_g = [x_g_fit[max_g_idx], 200, y_g_fit[max_g_idx] - 5000, 5000]
+
+try:
+    popt_g, pcov_g = curve_fit(lorentzian, x_g_fit, y_g_fit, p0=p0_g, maxfev=10000)
+    print(f"G peak fit: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amplitude={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+except Exception as e:
+    print(f"Error fitting G peak: {e}")
+    popt_g = p0_g
+
+# Save results
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(popt_g[1]),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(popt_2d[1]),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults saved to /app/results.json")
+print(json.dumps(results, indent=2))
+EOF
+python3 fit_raman.py
+$ cat > fit_raman.py << 'EOF'
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks, savgol_filter
+import json
+
+# Lorentzian function
+def lorentzian(x, x0, gamma, amplitude, offset):
+    return amplitude * (gamma**2) / ((x - x0)**2 + gamma**2) + offset
+
+# Load data - European format with comma as decimal separator
+data = []
+with open('graphene.dat', 'r') as f:
+    for line in f:
+        parts = line.strip().split('\t')
+        if len(parts) == 2:
+            x = float(parts[0].replace(',', '.'))
+            y = float(parts[1].replace(',', '.'))
+            data.append((x, y))
+
+data = np.array(data)
+x_data = data[:, 0]
+y_data = data[:, 1]
+
+# Sort data by x
+sort_idx = np.argsort(x_data)
+x_sorted = x_data[sort_idx]
+y_sorted = y_data[sort_idx]
+
+print(f"X range: {x_sorted.min():.2f} to {x_sorted.max():.2f}")
+print(f"Y range: {y_sorted.min():.2f} to {y_sorted.max():.2f}")
+
+# Find the peaks more carefully
+# Use smoothed data
+y_smooth = savgol_filter(y_sorted, 51, 3)
+
+# Find the maximum peak location (2D peak)
+max_idx = np.argmax(y_smooth)
+peak_2D_pos = x_sorted[max_idx]
+peak_2D_intensity = y_sorted[max_idx]
+print(f"\n2D peak: x={peak_2D_pos:.2f}, intensity={peak_2D_intensity:.2f}")
+
+# Find G peak - search in a different region
+# Exclude the 2D peak region and find the next largest peak
+search_mask = (x_sorted < 18000) | (x_sorted > 20000)
+y_search = y_sorted.copy()
+y_search[~search_mask] = 0
+g_idx = np.argmax(y_search)
+
+# But wait, based on earlier analysis, the G peak should be around 33000
+# Let's search specifically there
+mask_g_region = (x_sorted > 31000) & (x_sorted < 36000)
+g_region_y = y_sorted[mask_g_region]
+g_region_x = x_sorted[mask_g_region]
+g_local_idx = np.argmax(g_region_y)
+peak_g_pos = g_region_x[g_local_idx]
+peak_g_intensity = g_region_y[g_local_idx]
+print(f"G peak: x={peak_g_pos:.2f}, intensity={peak_g_intensity:.2f}")
+
+# Now fit the peaks with proper Lorentzian
+# For 2D peak - use a narrower region around the peak
+x_2d_center = peak_2D_pos
+gamma_est_2d = 400  # Initial estimate - half width at half maximum
+mask_2d = (x_sorted > x_2d_center - 5*gamma_est_2d) & (x_sorted < x_2d_center + 5*gamma_est_2d)
+x_2d_fit = x_sorted[mask_2d]
+y_2d_fit = y_sorted[mask_2d]
+
+# Estimate the local baseline for 2D peak
+baseline_2d = np.percentile(y_2d_fit, 5)  # Use lower percentile as baseline
+amplitude_est_2d = peak_2D_intensity - baseline_2d
+
+p0_2d = [x_2d_center, gamma_est_2d, amplitude_est_2d, baseline_2d]
+print(f"\n2D peak initial guess: x0={p0_2d[0]:.2f}, gamma={p0_2d[1]:.2f}, amplitude={p0_2d[2]:.2f}, offset={p0_2d[3]:.2f}")
+
+try:
+    popt_2d, pcov_2d = curve_fit(lorentzian, x_2d_fit, y_2d_fit, p0=p0_2d, maxfev=10000)
+    print(f"2D peak fit: x0={popt_2d[0]:.4f}, gamma={popt_2d[1]:.4f}, amplitude={popt_2d[2]:.4f}, offset={popt_2d[3]:.4f}")
+except Exception as e:
+    print(f"Error fitting 2D peak: {e}")
+    popt_2d = p0_2d
+
+# For G peak
+x_g_center = peak_g_pos
+gamma_est_g = 400  # Initial estimate
+mask_g = (x_sorted > x_g_center - 5*gamma_est_g) & (x_sorted < x_g_center + 5*gamma_est_g)
+x_g_fit = x_sorted[mask_g]
+y_g_fit = y_sorted[mask_g]
+
+# Estimate the local baseline for G peak
+baseline_g = np.percentile(y_g_fit, 10)  # Use lower percentile as baseline
+amplitude_est_g = peak_g_intensity - baseline_g
+
+p0_g = [x_g_center, gamma_est_g, amplitude_est_g, baseline_g]
+print(f"\nG peak initial guess: x0={p0_g[0]:.2f}, gamma={p0_g[1]:.2f}, amplitude={p0_g[2]:.2f}, offset={p0_g[3]:.2f}")
+
+try:
+    popt_g, pcov_g = curve_fit(lorentzian, x_g_fit, y_g_fit, p0=p0_g, maxfev=10000)
+    print(f"G peak fit: x0={popt_g[0]:.4f}, gamma={popt_g[1]:.4f}, amplitude={popt_g[2]:.4f}, offset={popt_g[3]:.4f}")
+except Exception as e:
+    print(f"Error fitting G peak: {e}")
+    popt_g = p0_g
+
+# Calculate fit quality
+y_2d_pred = lorentzian(x_2d_fit, *popt_2d)
+residual_2d = np.sum((y_2d_fit - y_2d_pred)**2)
+print(f"\n2D fit residual sum of squares: {residual_2d:.2f}")
+
+y_g_pred = lorentzian(x_g_fit, *popt_g)
+residual_g = np.sum((y_g_fit - y_g_pred)**2)
+print(f"G fit residual sum of squares: {residual_g:.2f}")
+
+# Save results
+results = {
+    "G": {
+        "x0": float(popt_g[0]),
+        "gamma": float(popt_g[1]),
+        "amplitude": float(popt_g[2]),
+        "offset": float(popt_g[3])
+    },
+    "2D": {
+        "x0": float(popt_2d[0]),
+        "gamma": float(popt_2d[1]),
+        "amplitude": float(popt_2d[2]),
+        "offset": float(popt_2d[3])
+    }
+}
+
+with open('/app/results.json', 'w') as f:
+    json.dump(results, f, indent=2)
+
+print("\nResults saved to /app/results.json")
+print(json.dumps(results, indent=2))
+EOF
+python3 fit_raman.py
+node:internal/deps/undici/undici:15456
+      Error.captureStackTrace(err);
+            ^
+
+TypeError: fetch failed
+    at node:internal/deps/undici/undici:15456:13
+    at async chat (file:///tmp/keel/agent.ts:130:15)
+    at async agent (file:///tmp/keel/agent.ts:178:19) {
+  [cause]: HeadersTimeoutError: Headers Timeout Error
+      at FastTimer.onParserTimeout [as _onTimeout] (node:internal/deps/undici/undici:6515:32)
+      at Timeout.onTick [as _onTimeout] (node:internal/deps/undici/undici:2433:17)
+      at listOnTimeout (node:internal/timers:585:17)
+      at process.processTimers (node:internal/timers:521:7) {
+    code: 'UND_ERR_HEADERS_TIMEOUT',
+    [Symbol(undici.error.UND_ERR)]: true,
+    [Symbol(undici.error.UND_ERR_HEADERS_TIMEOUT)]: true
+  }
+}
+
+Node.js v22.23.5

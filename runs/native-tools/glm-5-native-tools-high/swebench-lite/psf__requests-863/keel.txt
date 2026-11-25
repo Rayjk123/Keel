@@ -1,0 +1,129 @@
+$ find . -type f -name "*.py" | head -20
+$ ls -la
+> read requests/models.py
+> read requests/hooks.py
+$ find . -name "*.py" -exec grep -l "register_hook\|hooks" {} \; 2>/dev/null
+> read requests/sessions.py
+$ grep -n -A 10 -B 5 "hook" tests/test_requests.py
+> edit requests/models.py
+$ cd /mnt/data && python -c "
+from requests.models import Request
+
+# Test with a single hook
+def hook1(r):
+    return r
+
+def hook2(r):
+    return r
+
+# Test with a single hook (existing behavior)
+req = Request(url='http://example.com', hooks={'response': hook1})
+print('Single hook test:', req.hooks['response'])
+
+# Test with a list of hooks (the issue)
+req2 = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+print('List of hooks test:', req2.hooks['response'])
+
+# Test with multiple hooks for different events
+req3 = Request(url='http://example.com', hooks={'response': [hook1, hook2], 'pre_request': hook1})
+print('Multiple events test:', req3.hooks)
+
+print('All tests passed!')
+"
+$ python -c "
+from requests.models import Request
+
+# Test with a single hook
+def hook1(r):
+    return r
+
+def hook2(r):
+    return r
+
+# Test with a single hook (existing behavior)
+req = Request(url='http://example.com', hooks={'response': hook1})
+print('Single hook test:', req.hooks['response'])
+
+# Test with a list of hooks (the issue)
+req2 = Request(url='http://example.com', hooks={'response': [hook1, hook2]})
+print('List of hooks test:', req2.hooks['response'])
+
+# Test with multiple hooks for different events
+req3 = Request(url='http://example.com', hooks={'response': [hook1, hook2], 'pre_request': hook1})
+print('Multiple events test:', req3.hooks)
+
+print('All tests passed!')
+"
+$ cd /testbed && python -m pytest tests/test_requests.py -v -k "hook" 2>&1 | head -50
+$ cd /testbed && python -m pytest tests/test_requests.py -v 2>&1 | tail -30
+$ python -c "
+from requests.models import Request
+
+def hook1(r):
+    return r
+
+def hook2(r):
+    return r
+
+def hook3(r):
+    return r
+
+# Test direct register_hook with a list
+req = Request(url='http://example.com')
+req.register_hook('response', [hook1, hook2, hook3])
+print('Direct register_hook with list:', req.hooks['response'])
+
+# Test direct register_hook with single hook
+req2 = Request(url='http://example.com')
+req2.register_hook('response', hook1)
+print('Direct register_hook with single:', req2.hooks['response'])
+
+# Test that we can call register_hook multiple times and it works correctly
+req3 = Request(url='http://example.com')
+req3.register_hook('response', hook1)
+req3.register_hook('response', hook2)
+print('Multiple calls to register_hook:', req3.hooks['response'])
+
+# Test deregister_hook still works
+req4 = Request(url='http://example.com', hooks={'response': [hook1, hook2, hook3]})
+req4.deregister_hook('response', hook2)
+print('After deregister_hook:', req4.hooks['response'])
+
+print('All edge case tests passed!')
+"
+$ python -c "
+from requests.hooks import dispatch_hook
+
+def hook1(data):
+    data['value'] = data.get('value', 0) + 1
+    return data
+
+def hook2(data):
+    data['value'] = data.get('value', 0) + 10
+    return data
+
+# Test dispatch with list of hooks
+hooks = {'response': [hook1, hook2]}
+result = dispatch_hook('response', hooks, {'initial': True})
+print('Dispatched with list:', result)
+
+# Test dispatch with single hook
+hooks2 = {'response': hook1}
+result2 = dispatch_hook('response', hooks2, {'initial': True})
+print('Dispatched with single:', result2)
+
+print('Dispatch hook tests passed!')
+"
+> read requests/models.py
+> read tests/test_requests.py
+## Summary
+
+I fixed the issue by modifying the `register_hook` method in `requests/models.py` to properly handle lists in the hooks argument dictionary.
+
+**The Problem:** The original `register_hook` method simply called `self.hooks[event].append(hook)`, which would wrap a list in another list. When the hooks were later dispatched, the code would try to call the inner list as a function, causing a failure.
+
+**The Fix:** Modified the method to check if the hook value is a list or tuple:
+- If it's a list/tuple: use `extend()` to add all hooks individually
+- If it's a single callable: use `append()` as before
+
+Now you can pass hooks like `hooks={'response': [hook1, hook2, hook3]}` directly when creating a Request, instead of having to create the request object first and then call `register_hook()` multiple times before sending.

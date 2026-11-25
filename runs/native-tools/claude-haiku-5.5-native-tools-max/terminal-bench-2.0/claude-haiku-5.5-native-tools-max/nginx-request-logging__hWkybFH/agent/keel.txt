@@ -1,0 +1,38 @@
+$ cat /etc/os-release 2>/dev/null | head -5; echo "---whoami:"; whoami; echo "---nginx:"; which nginx 2>/dev/null && nginx -v 2>&1; echo "---ls /etc/nginx:"; ls -la /etc/nginx 2>/dev/null; echo "---sites-enabled:"; ls -la /etc/nginx/sites-enabled 2>/dev/null; echo "---conf.d:"; ls -la /etc/nginx/conf.d 2>/dev/null; echo "---/var/www/html:"; ls -la /var/www/html 2>/dev/null; echo "---/var/log/nginx:"; ls -la /var/log/nginx 2>/dev/null; echo "---pkg mgr:"; which apt-get yum dnf apk 2>/dev/null; echo "---systemctl:"; which systemctl 2>/dev/null; pidof nginx 2>/dev/null; echo "done"
+$ export DEBIAN_FRONTEND=noninteractive; apt-get update -qq 2>&1 | tail -3; apt-get install -y -qq nginx 2>&1 | tail -5; echo "install exit: ${PIPESTATUS[0]}"; nginx -v 2>&1; which service 2>/dev/null; ls -la /etc/nginx; echo "---sites-enabled:"; ls -la /etc/nginx/sites-enabled/; echo "---nginx.conf:"; cat /etc/nginx/nginx.conf
+$ echo "== tools:"; for t in curl wget ss pgrep ps; do printf "%s: " $t; command -v $t || echo missing; done; echo "== /var/www/html:"; ls -la /var/www/html; echo "== /var/log/nginx:"; ls -la /var/log/nginx; echo "== conf.d:"; ls -la /etc/nginx/conf.d; echo "== existing log_format/limit_req:"; grep -rn "log_format\|limit_req" /etc/nginx/ || echo "none"; echo "== default site (no comments):"; grep -v '^\s*#' /etc/nginx/sites-available/default | grep -v '^\s*$'; echo "== listeners on 80/8080:"; (ss -ltn 2>/dev/null | grep -E ':(80|8080)\s') || echo "none"; echo "== nginx running?"; pgrep -a nginx || echo "not running"; echo "== backup:"; cp -p /etc/nginx/nginx.conf /tmp/nginx.conf.orig && echo "saved /tmp/nginx.conf.orig"
+> read /etc/nginx/nginx.conf
+> edit /etc/nginx/nginx.conf
+> write /etc/nginx/conf.d/benchmark-site.conf
+$ set -e
+mkdir -p /var/www/html
+printf '%s' 'Welcome to the benchmark webserver' > /var/www/html/index.html
+printf '%s' 'Page not found - Please check your URL' > /var/www/html/404.html
+rm -f /etc/nginx/sites-enabled/default
+echo "--- /var/www/html:"; ls -la /var/www/html
+echo "--- sites-enabled:"; ls -la /etc/nginx/sites-enabled/
+echo "--- index.html:"; cat /var/www/html/index.html; echo "<EOF>"
+echo "--- 404.html:"; cat /var/www/html/404.html; echo "<EOF>"
+$ echo "== nginx.conf lines 36-56 (cat -A shows tabs):"; sed -n '36,56p' /etc/nginx/nginx.conf | cat -A; echo; echo "== syntax test:"; nginx -t; echo "nginx -t exit: $?"
+$ service nginx restart 2>&1 || { echo "service failed, starting binary directly"; nginx; }; sleep 1
+echo "== master/worker processes:"; cat /run/nginx.pid 2>/dev/null && ps_out=$(for p in /proc/[0-9]*; do c=$(tr '\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *nginx*) echo "$(basename $p): $c";; esac; done); echo "$ps_out"
+echo "== listeners:"; ss -ltnp | grep -E ':(80|8080)\s' || echo "nothing listening"
+echo "== GET / :"; curl -s -i http://localhost:8080/; echo; echo "<EOF>"
+echo "== GET /missing (expect 404 + custom page):"; curl -s -i http://localhost:8080/missing-page; echo; echo "<EOF>"
+echo "== benchmark access log:"; cat /var/log/nginx/benchmark-access.log; echo "== benchmark error log:"; cat /var/log/nginx/benchmark-error.log 2>/dev/null; echo "(end)"
+sleep 2
+echo "== rate limit burst test: 40 parallel requests, status code counts:"; seq 1 40 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/ | sort | uniq -c
+sleep 2; echo "== after cooldown, single request:"; curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/
+$ echo "== log dir:"; ls -la /var/log/nginx/; echo "== effective directives (nginx -T):"; nginx -T 2>/dev/null | grep -E 'log_format|limit_req|access_log|error_log|listen 8080|error_page|server_name localhost|root /var/www'; echo "== config test:"; nginx -t 2>&1; echo "== default site gone?"; [ -e /etc/nginx/sites-enabled/default ] && echo "STILL PRESENT" || echo "yes, removed"; echo "== HTTP status summary:"; for u in / /404.html /missing; do printf "%-12s %s\n" "$u" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080$u)"; done; echo "== last 3 access log lines:"; tail -n 3 /var/log/nginx/benchmark-access.log
+$ echo "== ipv6 enabled in kernel?"; [ -f /proc/net/if_inet6 ] && echo "yes" || echo "no"; echo "== ::1 on lo:"; ip -6 addr show lo 2>/dev/null | grep inet6 || echo "none"; echo "== localhost resolves to:"; getent ahosts localhost | awk '{print $1}' | sort -u; echo "== curl via [::1]:8080:"; curl -g -s -o /dev/null -w '%{http_code}\n' 'http://[::1]:8080/' || echo "failed (exit $?)"; echo "== curl via 127.0.0.1:8080:"; curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/
+$ echo "== benchmark-error.log (first 3 lines):"; head -n 3 /var/log/nginx/benchmark-error.log | cut -c1-220; echo "== total lines: $(wc -l < /var/log/nginx/benchmark-error.log)"; echo; echo "Access log location: /var/log/nginx/benchmark-access.log"
+The task is finished. Nginx 1.22.1 is serving on `http://localhost:8080` with the requested configuration.
+
+- **Server config:** `/etc/nginx/conf.d/benchmark-site.conf` sets port 8080, root `/var/www/html`, the detailed access log, the error log, `limit_req burst=10`, and the custom 404 page.
+- **nginx.conf:** the `benchmark_detailed` log format and the 10 MB `benchmark_limit` zone at 10r/s. The original is backed up at `/tmp/nginx.conf.orig`.
+- **Content and default site:** `index.html` and `404.html` contain the exact text, and the default site symlink is removed.
+- **Checks:** `nginx -t` passes. `/` returns 200 with the welcome text, and a missing URL returns 404 with the custom page. Of 40 parallel requests, 12 succeeded and 28 got 503, and a request after a short pause succeeded.
+
+**Correction:** I earlier said requests are also written to the global `/var/log/nginx/access.log`. That was wrong. The server-level `access_log` replaces the http-level one, so traffic goes only to `benchmark-access.log`. The global file was still 0 bytes after dozens of test requests.
+
+**Access log:** `/var/log/nginx/benchmark-access.log`. It contains my test traffic, so truncate it before benchmarking.

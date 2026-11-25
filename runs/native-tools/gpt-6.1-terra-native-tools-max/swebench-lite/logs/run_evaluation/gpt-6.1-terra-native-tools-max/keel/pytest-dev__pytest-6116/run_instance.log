@@ -1,0 +1,477 @@
+2026-11-25 07:37:10,805 - INFO - Creating container for pytest-dev__pytest-6116...
+2026-11-25 07:37:10,849 - INFO - Container for pytest-dev__pytest-6116 created: 14d933f84ff4a41d9026c270476dc2d9961cf37f178665e1229bbfcfd3ecd53f
+2026-11-25 07:37:11,268 - INFO - Container for pytest-dev__pytest-6116 started: 14d933f84ff4a41d9026c270476dc2d9961cf37f178665e1229bbfcfd3ecd53f
+2026-11-25 07:37:11,269 - INFO - Intermediate patch for pytest-dev__pytest-6116 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pytest-dev__pytest-6116/patch.diff, now applying to container...
+2026-11-25 07:37:11,337 - INFO - >>>>> Applied Patch:
+Checking patch changelog/5845.feature.rst...
+Checking patch doc/en/usage.rst...
+Checking patch src/_pytest/main.py...
+Checking patch testing/test_collection.py...
+Checking patch testing/test_config.py...
+Checking patch testing/test_helpconfig.py...
+Checking patch testing/test_session.py...
+Checking patch testing/test_terminal.py...
+Applied patch changelog/5845.feature.rst cleanly.
+Applied patch doc/en/usage.rst cleanly.
+Applied patch src/_pytest/main.py cleanly.
+Applied patch testing/test_collection.py cleanly.
+Applied patch testing/test_config.py cleanly.
+Applied patch testing/test_helpconfig.py cleanly.
+Applied patch testing/test_session.py cleanly.
+Applied patch testing/test_terminal.py cleanly.
+
+2026-11-25 07:37:11,415 - INFO - Git diff before:
+diff --git a/doc/en/usage.rst b/doc/en/usage.rst
+index a23cf764a..6444e5a5b 100755
+--- a/doc/en/usage.rst
++++ b/doc/en/usage.rst
+@@ -128,6 +128,19 @@ Will run all tests which are decorated with the ``@pytest.mark.slow`` decorator.
+ 
+ For more information see :ref:`marks <mark>`.
+ 
++**Collect tests without executing them**
++
++To see which tests would be run, use ``-C`` (short for ``--collect-only``).
++Collection imports test modules and conftests, but does not run tests or set up
++their fixtures.
++
++.. code-block:: bash
++
++    pytest -C
++    pytest -Cq -k "MyClass"  # list node ids matching a keyword
++
++The ``--co`` and ``--collectonly`` options are also aliases for ``--collect-only``.
++
+ **Run tests from packages**
+ 
+ .. code-block:: bash
+diff --git a/src/_pytest/main.py b/src/_pytest/main.py
+index 843c5b5f7..102386de2 100755
+--- a/src/_pytest/main.py
++++ b/src/_pytest/main.py
+@@ -107,8 +107,10 @@ def pytest_addoption(parser):
+ 
+     group = parser.getgroup("collect", "collection")
+     group.addoption(
++        "-C",
+         "--collectonly",
+         "--collect-only",
++        "--co",
+         action="store_true",
+         help="only collect tests, don't execute them.",
+     ),
+diff --git a/testing/test_collection.py b/testing/test_collection.py
+index 259868357..33fdca960 100755
+--- a/testing/test_collection.py
++++ b/testing/test_collection.py
+@@ -389,7 +389,8 @@ class TestCustomConftests:
+         assert result.ret == 0
+         result.stdout.fnmatch_lines(["*2 passed*"])
+ 
+-    def test_pytest_fs_collect_hooks_are_seen(self, testdir):
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_pytest_fs_collect_hooks_are_seen(self, testdir, option):
+         testdir.makeconftest(
+             """
+             import pytest
+@@ -401,10 +402,37 @@ class TestCustomConftests:
+         """
+         )
+         testdir.mkdir("sub")
+-        testdir.makepyfile("def test_x(): pass")
+-        result = testdir.runpytest("--collect-only")
++        testdir.makepyfile("def test_x(): assert False")
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.OK
+         result.stdout.fnmatch_lines(["*MyModule*", "*test_x*"])
+ 
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_custom_item(self, testdir, option):
++        testdir.makeconftest(
++            """
++            import pytest
++
++            class CustomFile(pytest.File):
++                def collect(self):
++                    yield CustomItem("custom", self)
++
++            class CustomItem(pytest.Item):
++                def runtest(self):
++                    raise RuntimeError("custom item was executed")
++
++            def pytest_collect_file(path, parent):
++                if path.ext == ".custom":
++                    return CustomFile(path, parent)
++            """
++        )
++        testdir.makefile(".custom", test_sample="")
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(
++            ["<CustomFile test_sample.custom>", "  <CustomItem custom>"]
++        )
++
+     def test_pytest_collect_file_from_sister_dir(self, testdir):
+         sub1 = testdir.mkpydir("sub1")
+         sub2 = testdir.mkpydir("sub2")
+diff --git a/testing/test_config.py b/testing/test_config.py
+index d4d624348..09863afdf 100755
+--- a/testing/test_config.py
++++ b/testing/test_config.py
+@@ -149,6 +149,43 @@ class TestConfigCmdlineParsing:
+         config = testdir.parseconfig()
+         pytest.raises(AssertionError, lambda: config.parse([]))
+ 
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_aliases(self, testdir, option):
++        config = testdir.parseconfig(option)
++        assert config.option.collectonly is True
++        for name in ("collectonly", "-C", "--co", "--collect-only", "--collectonly"):
++            assert config.getoption(name) is True
++
++    def test_collectonly_default(self, testdir):
++        config = testdir.parseconfig()
++        for name in ("collectonly", "-C", "--co", "--collect-only", "--collectonly"):
++            assert config.getoption(name) is False
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_in_explicit_config_file(self, testdir, option):
++        config = testdir.makefile(
++            ".ini", custom="[pytest]\naddopts = {}\n".format(option)
++        )
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-c", config, "-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
++    def test_collectonly_with_explicit_config_file(self, testdir):
++        config = testdir.makefile(".ini", custom="[pytest]\n")
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-c", config, "-Cq")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_in_environment(self, testdir, monkeypatch, option):
++        monkeypatch.setenv("PYTEST_ADDOPTS", option)
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
+     def test_explicitly_specified_config_file_is_loaded(self, testdir):
+         testdir.makeconftest(
+             """
+diff --git a/testing/test_helpconfig.py b/testing/test_helpconfig.py
+index 962750f7b..3a30f879f 100755
+--- a/testing/test_helpconfig.py
++++ b/testing/test_helpconfig.py
+@@ -19,6 +19,7 @@ def test_help(testdir):
+     result.stdout.fnmatch_lines(
+         """
+         *-v*verbose*
++        *-C, --collect-only, --co*
+         *setup.cfg*
+         *minversion*
+         *to see*markers*pytest --markers*
+diff --git a/testing/test_session.py b/testing/test_session.py
+index 7b4eb817a..a6d9d6396 100755
+--- a/testing/test_session.py
++++ b/testing/test_session.py
+@@ -201,7 +201,8 @@ class TestNewSession(SessionTests):
+         assert failed == skipped == 0
+         assert passed == 7
+ 
+-    def test_collect_only_with_various_situations(self, testdir):
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collect_only_with_various_situations(self, testdir, option):
+         p = testdir.makepyfile(
+             test_one="""
+                 def test_one():
+@@ -217,8 +218,9 @@ class TestNewSession(SessionTests):
+             test_three="xxxdsadsadsadsa",
+             __init__="",
+         )
+-        reprec = testdir.inline_run("--collect-only", p.dirpath())
++        reprec = testdir.inline_run(option, p.dirpath())
+ 
++        assert reprec.ret == ExitCode.INTERRUPTED
+         itemstarted = reprec.getcalls("pytest_itemcollected")
+         assert len(itemstarted) == 3
+         assert not reprec.getreports("pytest_runtest_logreport")
+diff --git a/testing/test_terminal.py b/testing/test_terminal.py
+index 1bec577b8..cd995956a 100755
+--- a/testing/test_terminal.py
++++ b/testing/test_terminal.py
+@@ -276,18 +276,60 @@ class TestTerminal:
+ 
+ 
+ class TestCollectonly:
+-    def test_collectonly_basic(self, testdir):
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_basic(self, testdir, option):
+         testdir.makepyfile(
+             """
+-            def test_func():
+-                pass
++            import pytest
++
++            @pytest.fixture
++            def setup():
++                pytest.fail("fixture was executed")
++
++            def test_func(setup):
++                pytest.fail("test was executed")
+         """
+         )
+-        result = testdir.runpytest("--collect-only")
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.OK
+         result.stdout.fnmatch_lines(
+-            ["<Module test_collectonly_basic.py>", "  <Function test_func>"]
++            [
++                "collected 1 item",
++                "<Module test_collectonly_basic.py>",
++                "  <Function test_func>",
++            ]
+         )
+ 
++    @pytest.mark.parametrize(
++        "options", [("-C", "-q"), ("--co", "-q"), ("-Cq",), ("-qC",)]
++    )
++    def test_collectonly_with_selection(self, testdir, options):
++        testdir.makepyfile(
++            test_things="""
++            def test_keep():
++                raise RuntimeError("test was executed")
++
++            def test_drop():
++                raise RuntimeError("test was executed")
++            """
++        )
++        result = testdir.runpytest(*options, "-k", "keep")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["test_things.py::test_keep", "*1 deselected*"])
++        result.stdout.no_fnmatch_line("*test_drop*")
++
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_no_tests(self, testdir, option):
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.NO_TESTS_COLLECTED
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_subprocess(self, testdir, option):
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest_subprocess(option, "-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
+     def test_collectonly_skipped_module(self, testdir):
+         testdir.makepyfile(
+             """
+2026-11-25 07:37:11,415 - INFO - Eval script for pytest-dev__pytest-6116 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pytest-dev__pytest-6116/eval.sh; copying to container...
+2026-11-25 07:37:18,089 - INFO - Test runtime: 6.64 seconds
+2026-11-25 07:37:18,089 - INFO - Test output for pytest-dev__pytest-6116 written to logs/run_evaluation/gpt-6.1-terra-native-tools-max/keel/pytest-dev__pytest-6116/test_output.txt
+2026-11-25 07:37:18,127 - INFO - Git diff after:
+diff --git a/doc/en/usage.rst b/doc/en/usage.rst
+index a23cf764a..6444e5a5b 100755
+--- a/doc/en/usage.rst
++++ b/doc/en/usage.rst
+@@ -128,6 +128,19 @@ Will run all tests which are decorated with the ``@pytest.mark.slow`` decorator.
+ 
+ For more information see :ref:`marks <mark>`.
+ 
++**Collect tests without executing them**
++
++To see which tests would be run, use ``-C`` (short for ``--collect-only``).
++Collection imports test modules and conftests, but does not run tests or set up
++their fixtures.
++
++.. code-block:: bash
++
++    pytest -C
++    pytest -Cq -k "MyClass"  # list node ids matching a keyword
++
++The ``--co`` and ``--collectonly`` options are also aliases for ``--collect-only``.
++
+ **Run tests from packages**
+ 
+ .. code-block:: bash
+diff --git a/src/_pytest/main.py b/src/_pytest/main.py
+index 843c5b5f7..102386de2 100755
+--- a/src/_pytest/main.py
++++ b/src/_pytest/main.py
+@@ -107,8 +107,10 @@ def pytest_addoption(parser):
+ 
+     group = parser.getgroup("collect", "collection")
+     group.addoption(
++        "-C",
+         "--collectonly",
+         "--collect-only",
++        "--co",
+         action="store_true",
+         help="only collect tests, don't execute them.",
+     ),
+diff --git a/testing/test_config.py b/testing/test_config.py
+index d4d624348..09863afdf 100755
+--- a/testing/test_config.py
++++ b/testing/test_config.py
+@@ -149,6 +149,43 @@ class TestConfigCmdlineParsing:
+         config = testdir.parseconfig()
+         pytest.raises(AssertionError, lambda: config.parse([]))
+ 
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_aliases(self, testdir, option):
++        config = testdir.parseconfig(option)
++        assert config.option.collectonly is True
++        for name in ("collectonly", "-C", "--co", "--collect-only", "--collectonly"):
++            assert config.getoption(name) is True
++
++    def test_collectonly_default(self, testdir):
++        config = testdir.parseconfig()
++        for name in ("collectonly", "-C", "--co", "--collect-only", "--collectonly"):
++            assert config.getoption(name) is False
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_in_explicit_config_file(self, testdir, option):
++        config = testdir.makefile(
++            ".ini", custom="[pytest]\naddopts = {}\n".format(option)
++        )
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-c", config, "-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
++    def test_collectonly_with_explicit_config_file(self, testdir):
++        config = testdir.makefile(".ini", custom="[pytest]\n")
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-c", config, "-Cq")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_in_environment(self, testdir, monkeypatch, option):
++        monkeypatch.setenv("PYTEST_ADDOPTS", option)
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest("-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
+     def test_explicitly_specified_config_file_is_loaded(self, testdir):
+         testdir.makeconftest(
+             """
+diff --git a/testing/test_helpconfig.py b/testing/test_helpconfig.py
+index 962750f7b..3a30f879f 100755
+--- a/testing/test_helpconfig.py
++++ b/testing/test_helpconfig.py
+@@ -19,6 +19,7 @@ def test_help(testdir):
+     result.stdout.fnmatch_lines(
+         """
+         *-v*verbose*
++        *-C, --collect-only, --co*
+         *setup.cfg*
+         *minversion*
+         *to see*markers*pytest --markers*
+diff --git a/testing/test_session.py b/testing/test_session.py
+index 7b4eb817a..a6d9d6396 100755
+--- a/testing/test_session.py
++++ b/testing/test_session.py
+@@ -201,7 +201,8 @@ class TestNewSession(SessionTests):
+         assert failed == skipped == 0
+         assert passed == 7
+ 
+-    def test_collect_only_with_various_situations(self, testdir):
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collect_only_with_various_situations(self, testdir, option):
+         p = testdir.makepyfile(
+             test_one="""
+                 def test_one():
+@@ -217,8 +218,9 @@ class TestNewSession(SessionTests):
+             test_three="xxxdsadsadsadsa",
+             __init__="",
+         )
+-        reprec = testdir.inline_run("--collect-only", p.dirpath())
++        reprec = testdir.inline_run(option, p.dirpath())
+ 
++        assert reprec.ret == ExitCode.INTERRUPTED
+         itemstarted = reprec.getcalls("pytest_itemcollected")
+         assert len(itemstarted) == 3
+         assert not reprec.getreports("pytest_runtest_logreport")
+diff --git a/testing/test_terminal.py b/testing/test_terminal.py
+index 1bec577b8..cd995956a 100755
+--- a/testing/test_terminal.py
++++ b/testing/test_terminal.py
+@@ -276,18 +276,60 @@ class TestTerminal:
+ 
+ 
+ class TestCollectonly:
+-    def test_collectonly_basic(self, testdir):
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_basic(self, testdir, option):
+         testdir.makepyfile(
+             """
+-            def test_func():
+-                pass
++            import pytest
++
++            @pytest.fixture
++            def setup():
++                pytest.fail("fixture was executed")
++
++            def test_func(setup):
++                pytest.fail("test was executed")
+         """
+         )
+-        result = testdir.runpytest("--collect-only")
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.OK
+         result.stdout.fnmatch_lines(
+-            ["<Module test_collectonly_basic.py>", "  <Function test_func>"]
++            [
++                "collected 1 item",
++                "<Module test_collectonly_basic.py>",
++                "  <Function test_func>",
++            ]
+         )
+ 
++    @pytest.mark.parametrize(
++        "options", [("-C", "-q"), ("--co", "-q"), ("-Cq",), ("-qC",)]
++    )
++    def test_collectonly_with_selection(self, testdir, options):
++        testdir.makepyfile(
++            test_things="""
++            def test_keep():
++                raise RuntimeError("test was executed")
++
++            def test_drop():
++                raise RuntimeError("test was executed")
++            """
++        )
++        result = testdir.runpytest(*options, "-k", "keep")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["test_things.py::test_keep", "*1 deselected*"])
++        result.stdout.no_fnmatch_line("*test_drop*")
++
++    @pytest.mark.parametrize("option", ["-C", "--co", "--collect-only", "--collectonly"])
++    def test_collectonly_no_tests(self, testdir, option):
++        result = testdir.runpytest(option)
++        assert result.ret == ExitCode.NO_TESTS_COLLECTED
++
++    @pytest.mark.parametrize("option", ["-C", "--co"])
++    def test_collectonly_subprocess(self, testdir, option):
++        testdir.makepyfile("def test_foo(): assert False")
++        result = testdir.runpytest_subprocess(option, "-q")
++        assert result.ret == ExitCode.OK
++        result.stdout.fnmatch_lines(["*test_foo*"])
++
+     def test_collectonly_skipped_module(self, testdir):
+         testdir.makepyfile(
+             """
+2026-11-25 07:37:18,127 - INFO - Git diff changed after running eval script
+2026-11-25 07:37:18,127 - INFO - Grading answer for pytest-dev__pytest-6116...
+2026-11-25 07:37:18,132 - INFO - report: {'pytest-dev__pytest-6116': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'infra_failure': False, 'tests_status': {'FAIL_TO_PASS': {'success': ['testing/test_collection.py::TestCustomConftests::test_pytest_fs_collect_hooks_are_seen', 'testing/test_collection.py::TestCustomConftests::test_pytest_collect_file_from_sister_dir'], 'failure': []}, 'PASS_TO_PASS': {'success': ['testing/test_collection.py::TestCollector::test_collect_versus_item', 'testing/test_collection.py::TestCollector::test_check_equality', 'testing/test_collection.py::TestCollector::test_getparent', 'testing/test_collection.py::TestCollector::test_getcustomfile_roundtrip', 'testing/test_collection.py::TestCollector::test_can_skip_class_with_test_attr', 'testing/test_collection.py::TestCollectFS::test_ignored_certain_directories', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[activate]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[activate.csh]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[activate.fish]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[Activate]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[Activate.bat]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs[Activate.ps1]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[activate]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[activate.csh]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[activate.fish]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[Activate]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[Activate.bat]', 'testing/test_collection.py::TestCollectFS::test_ignored_virtualenvs_norecursedirs_precedence[Activate.ps1]', 'testing/test_collection.py::TestCollectFS::test__in_venv[activate]', 'testing/test_collection.py::TestCollectFS::test__in_venv[activate.csh]', 'testing/test_collection.py::TestCollectFS::test__in_venv[activate.fish]', 'testing/test_collection.py::TestCollectFS::test__in_venv[Activate]', 'testing/test_collection.py::TestCollectFS::test__in_venv[Activate.bat]', 'testing/test_collection.py::TestCollectFS::test__in_venv[Activate.ps1]', 'testing/test_collection.py::TestCollectFS::test_custom_norecursedirs', 'testing/test_collection.py::TestCollectFS::test_testpaths_ini', 'testing/test_collection.py::TestCollectPluginHookRelay::test_pytest_collect_file', 'testing/test_collection.py::TestCollectPluginHookRelay::test_pytest_collect_directory', 'testing/test_collection.py::TestPrunetraceback::test_custom_repr_failure', 'testing/test_collection.py::TestCustomConftests::test_ignore_collect_path', 'testing/test_collection.py::TestCustomConftests::test_ignore_collect_not_called_on_argument', 'testing/test_collection.py::TestCustomConftests::test_collectignore_exclude_on_option', 'testing/test_collection.py::TestCustomConftests::test_collectignoreglob_exclude_on_option', 'testing/test_collection.py::TestSession::test_parsearg', 'testing/test_collection.py::TestSession::test_collect_topdir', 'testing/test_collection.py::TestSession::test_collect_protocol_single_function', 'testing/test_collection.py::TestSession::test_collect_protocol_method', 'testing/test_collection.py::TestSession::test_collect_custom_nodes_multi_id', 'testing/test_collection.py::TestSession::test_collect_subdir_event_ordering', 'testing/test_collection.py::TestSession::test_collect_two_commandline_args', 'testing/test_collection.py::TestSession::test_serialization_byid', 'testing/test_collection.py::TestSession::test_find_byid_without_instance_parents', 'testing/test_collection.py::Test_getinitialnodes::test_global_file', 'testing/test_collection.py::Test_getinitialnodes::test_pkgfile', 'testing/test_collection.py::Test_genitems::test_check_collect_hashes', 'testing/test_collection.py::Test_genitems::test_example_items1', 'testing/test_collection.py::Test_genitems::test_class_and_functions_discovery_using_glob', 'testing/test_collection.py::test_matchnodes_two_collections_same_file', 'testing/test_collection.py::TestNodekeywords::test_no_under', 'testing/test_collection.py::TestNodekeywords::test_issue345', 'testing/test_collection.py::test_exit_on_collection_error', 'testing/test_collection.py::test_exit_on_collection_with_maxfail_smaller_than_n_errors', 'testing/test_collection.py::test_exit_on_collection_with_maxfail_bigger_than_n_errors', 'testing/test_collection.py::test_continue_on_collection_errors', 'testing/test_collection.py::test_continue_on_collection_errors_maxfail', 'testing/test_collection.py::test_fixture_scope_sibling_conftests', 'testing/test_collection.py::test_collect_init_tests', 'testing/test_collection.py::test_collect_invalid_signature_message', 'testing/test_collection.py::test_collect_handles_raising_on_dunder_class', 'testing/test_collection.py::test_collect_with_chdir_during_import', 'testing/test_collection.py::test_collect_symlink_file_arg', 'testing/test_collection.py::test_collect_symlink_out_of_tree', 'testing/test_collection.py::test_collectignore_via_conftest', 'testing/test_collection.py::test_collect_pkg_init_and_file_in_args', 'testing/test_collection.py::test_collect_pkg_init_only', 'testing/test_collection.py::test_collect_sub_with_symlinks[True]', 'testing/test_collection.py::test_collect_sub_with_symlinks[False]', 'testing/test_collection.py::test_collector_respects_tbstyle', 'testing/test_collection.py::test_collect_pyargs_with_testpaths'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for pytest-dev__pytest-6116: resolved: True
+2026-11-25 07:37:18,132 - INFO - Attempting to stop container sweb.eval.pytest-dev__pytest-6116.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:33,492 - INFO - Container sweb.eval.pytest-dev__pytest-6116.gpt-6.1-terra-native-tools-max stopped successfully.
+2026-11-25 07:37:33,492 - INFO - Attempting to remove container sweb.eval.pytest-dev__pytest-6116.gpt-6.1-terra-native-tools-max...
+2026-11-25 07:37:33,539 - INFO - Container sweb.eval.pytest-dev__pytest-6116.gpt-6.1-terra-native-tools-max removed successfully.

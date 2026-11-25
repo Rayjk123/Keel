@@ -1,0 +1,136 @@
+diff --git a/sklearn/model_selection/tests/test_validation.py b/sklearn/model_selection/tests/test_validation.py
+index ea21c058e..63f4629cf 100755
+--- a/sklearn/model_selection/tests/test_validation.py
++++ b/sklearn/model_selection/tests/test_validation.py
+@@ -66,6 +66,7 @@ from sklearn.impute import SimpleImputer
+ 
+ from sklearn.preprocessing import LabelEncoder
+ from sklearn.pipeline import Pipeline
++from sklearn.feature_selection import SelectKBest
+ 
+ from io import StringIO
+ from sklearn.base import BaseEstimator
+@@ -612,6 +613,30 @@ def test_cross_val_score_fit_params():
+     cross_val_score(clf, X, y, fit_params=fit_params)
+ 
+ 
++def test_cross_val_fit_param_pipeline():
++    # Regression test: a Pipeline passed as a fit param must not be treated as
++    # an array-like sample-aligned parameter, even though Pipeline implements
++    # __len__. Otherwise _index_param_value would raise in _num_samples.
++    class EstimatorParamClassifier(BaseEstimator):
++        def fit(self, X, y, helper=None):
++            self.classes_ = np.unique(y)
++            self.helper_ = helper
++            return self
++
++        def predict(self, X):
++            return np.repeat(self.classes_[0], X.shape[0])
++
++        def score(self, X, y):
++            return float(np.mean(self.predict(X) == y))
++
++    helper = Pipeline([('sel', SelectKBest(k=1)),
++                       ('clf', LogisticRegression())])
++    X_, y_ = make_classification(n_samples=30, random_state=0)
++    res = cross_validate(EstimatorParamClassifier(), X_, y_, cv=3,
++                         fit_params={'helper': helper})
++    assert len(res['test_score']) == 3
++
++
+ def test_cross_val_score_score_func():
+     clf = MockClassifier()
+     _score_func_args = []
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 7eaf9a46f..91fa607a2 100755
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -219,6 +219,10 @@ class Pipeline(_BaseComposition):
+             return self.named_steps[ind]
+         return est
+ 
++    def __len__(self):
++        """Returns the length of the Pipeline, i.e. the number of steps"""
++        return len(self.steps)
++
+     @property
+     def _estimator_type(self):
+         return self.steps[-1][1]._estimator_type
+diff --git a/sklearn/tests/test_pipeline.py b/sklearn/tests/test_pipeline.py
+index 8d6fe8f70..51cff13f5 100755
+--- a/sklearn/tests/test_pipeline.py
++++ b/sklearn/tests/test_pipeline.py
+@@ -552,6 +552,21 @@ def test_pipeline_index():
+     assert_raises(KeyError, lambda: pipe['foobar'])
+ 
+ 
++def test_pipeline_len():
++    transf = Transf()
++    clf = FitParamT()
++    pipe = Pipeline([('transf', transf), ('clf', clf)])
++    assert len(pipe) == 2
++    assert len(pipe[:1]) == 1
++    assert len(pipe[1:]) == 1
++    # slicing up to len(pipe) must yield the whole pipeline, as in the
++    # reported bug: pipe[:len(pipe)]
++    full = pipe[:len(pipe)]
++    assert isinstance(full, Pipeline)
++    assert full.steps == pipe.steps
++    assert len(full) == len(pipe)
++
++
+ def test_set_pipeline_steps():
+     transf1 = Transf()
+     transf2 = Transf()
+diff --git a/sklearn/utils/tests/test_validation.py b/sklearn/utils/tests/test_validation.py
+index 6cda15e7a..3ab380775 100755
+--- a/sklearn/utils/tests/test_validation.py
++++ b/sklearn/utils/tests/test_validation.py
+@@ -40,6 +40,7 @@ from sklearn.utils.validation import (
+     check_memory,
+     check_non_negative,
+     _num_samples,
++    _is_arraylike,
+     check_scalar)
+ import sklearn
+ 
+@@ -812,6 +813,24 @@ def test_retrieve_samples_from_non_standard_shape():
+     assert _num_samples(X) == len(X)
+ 
+ 
++def test_is_arraylike():
++    class WithLenFit:
++        # an estimator-like object defining __len__ (like a Pipeline)
++        def fit(self, X, y=None):
++            return self
++
++        def __len__(self):
++            return 2
++
++    assert _is_arraylike([1, 2, 3])
++    assert _is_arraylike(np.arange(3))
++    assert _is_arraylike(sp.csr_matrix(np.eye(3)))
++    # estimators are not array-like, even when they define __len__
++    assert not _is_arraylike(WithLenFit())
++    assert not _is_arraylike(LogisticRegression())
++    assert not _is_arraylike(None)
++
++
+ @pytest.mark.parametrize('x, target_type, min_val, max_val',
+                          [(3, int, 2, 5),
+                           (2.5, float, 2, 5)])
+diff --git a/sklearn/utils/validation.py b/sklearn/utils/validation.py
+index 25e15cfad..3db6b8d5f 100755
+--- a/sklearn/utils/validation.py
++++ b/sklearn/utils/validation.py
+@@ -123,6 +123,10 @@ def as_float_array(X, copy=True, force_all_finite=True):
+ 
+ def _is_arraylike(x):
+     """Returns whether the input is array-like"""
++    if hasattr(x, 'fit') and callable(x.fit):
++        # Estimators (e.g. Pipeline, which now implements __len__) are not
++        # array-like, even if they define __len__: _num_samples rejects them
++        return False
+     return (hasattr(x, '__len__') or
+             hasattr(x, 'shape') or
+             hasattr(x, '__array__'))

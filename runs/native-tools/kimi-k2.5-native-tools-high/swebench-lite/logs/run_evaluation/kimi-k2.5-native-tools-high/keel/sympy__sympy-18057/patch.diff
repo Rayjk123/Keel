@@ -1,0 +1,172 @@
+diff --git a/sympy/core/sympify.py b/sympy/core/sympify.py
+index ed4ea6ce5e..e73ac4c2f9 100755
+--- a/sympy/core/sympify.py
++++ b/sympy/core/sympify.py
+@@ -383,7 +383,7 @@ def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+     try:
+         a = a.replace('\n', '')
+         expr = parse_expr(a, local_dict=locals, transformations=transformations, evaluate=evaluate)
+-    except (TokenError, SyntaxError) as exc:
++    except (TokenError, SyntaxError, AttributeError, TypeError) as exc:
+         raise SympifyError('could not parse %r' % a, exc)
+ 
+     return expr
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 0000000000..04a142a217
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,98 @@
++"""
++Test case for the bug fix: sympy incorrectly attempts to eval reprs in its __eq__ method
++
++Passing strings produced by unknown objects into eval is very bad. It is especially 
++surprising for an equality check to trigger that kind of behavior.
++
++Before fix:
++- AttributeError: 'Symbol' object has no attribute 'y' (when repr returns 'x.y')
++- Objects whose repr is 'x' would incorrectly compare as equal to sympy Symbol x
++
++After fix:
++- Equality gracefully returns False instead of raising an exception
++"""
++
++import sympy
++from sympy import Symbol
++from sympy.core.sympify import sympify, SympifyError
++
++def test_repr_with_attribute_error():
++    """Test that comparing with an object whose repr causes AttributeError works."""
++    class C:
++        def __repr__(self):
++            return 'x.y'  # This would cause AttributeError: 'Symbol' object has no attribute 'y'
++    
++    result = sympy.Symbol('x') == C()
++    assert result == False, "Should return False, not raise AttributeError"
++    print("Test 1 passed: AttributeError in repr handled correctly")
++
++def test_repr_with_type_error():
++    """Test that comparing with an object whose repr causes TypeError works."""
++    class C:
++        def __repr__(self):
++            return 'sqrt()'  # This would cause TypeError
++    
++    result = sympy.Symbol('x') == C()
++    assert result == False, "Should return False, not raise TypeError"
++    print("Test 2 passed: TypeError in repr handled correctly")
++
++def test_sympify_raises_sympify_error():
++    """Test that sympify directly raises SympifyError for bad reprs."""
++    class C:
++        def __repr__(self):
++            return 'x.y'
++    
++    try:
++        sympify(C())
++        assert False, "Should have raised SympifyError"
++    except SympifyError:
++        print("Test 3 passed: sympify raises SympifyError correctly")
++
++def test_repr_with_name_error():
++    """Test that comparing with an object whose repr causes NameError works."""
++    class C:
++        def __repr__(self):
++            return 'undefined_var'  # This would cause NameError
++    
++    result = sympy.Symbol('x') == C()
++    assert result == False, "Should return False, not raise NameError"
++    print("Test 4 passed: NameError in repr handled correctly")
++
++def test_equality_still_works():
++    """Test that normal equality comparisons still work."""
++    x = Symbol('x')
++    y = Symbol('y')
++    
++    assert x == Symbol('x')
++    assert x != y
++    assert x != 1
++    assert x != 'x'  # This was already False before (strings excluded)
++    print("Test 5 passed: Normal equality still works")
++
++def test_sympy_method_still_works():
++    """Test that _sympy_ method still works for custom objects."""
++    class C:
++        def _sympy_(self):
++            return Symbol('x')
++    
++    x = Symbol('x')
++    assert x == C()
++    print("Test 6 passed: _sympy_ method still works")
++
++def test_eval_still_works():
++    """Test that sympify still works with valid expressions."""
++    x = Symbol('x')
++    assert sympify('x') == x
++    assert sympify('x + 1') == x + 1
++    assert sympify('x * 2') == x * 2
++    print("Test 7 passed: Valid expressions still sympify correctly")
++
++if __name__ == '__main__':
++    test_repr_with_attribute_error()
++    test_repr_with_type_error()
++    test_sympify_raises_sympify_error()
++    test_repr_with_name_error()
++    test_equality_still_works()
++    test_sympy_method_still_works()
++    test_eval_still_works()
++    print("\nAll tests passed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..0060b30dcc
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,49 @@
++import sympy
++
++def test_equality_with_repr_attributeref():
++    """Test that comparing a sympy Symbol with an object whose repr contains
++    an attribute reference doesn't cause eval errors."""
++    class C:
++        def __repr__(self):
++            return 'x.y'
++    
++    # This should not raise an exception
++    result = sympy.Symbol('x') == C()
++    print(f"Result of Symbol('x') == C() with repr 'x.y': {result}")
++    assert result == False
++
++def test_equality_with_invalid_repr():
++    """Test that objects with reprs that cause TypeError are handled."""
++    class C:
++        def __repr__(self):
++            return 'sqrt()'  # This would cause TypeError on eval
++    
++    result = sympy.Symbol('x') == C()
++    print(f"Result of Symbol('x') == C() with repr 'sqrt()': {result}")
++    assert result == False
++
++def test_equality_with_function_repr():
++    """Test that objects with reprs that might call functions are handled."""
++    class C:
++        def __repr__(self):
++            return 'x + 1'
++    
++    # This could legitimately parse as an expression
++    result = sympy.Symbol('x') == C()
++    print(f"Result of Symbol('x') == C() with repr 'x + 1': {result}")
++    assert result == False
++
++if __name__ == '__main__':
++    print("Test 1: attribute reference in repr")
++    test_equality_with_repr_attributeref()
++    print("PASSED\n")
++    
++    print("Test 2: invalid function call in repr")
++    test_equality_with_invalid_repr()
++    print("PASSED\n")
++    
++    print("Test 3: expression in repr")
++    test_equality_with_function_repr()
++    print("PASSED\n")
++    
++    print("All tests passed!")

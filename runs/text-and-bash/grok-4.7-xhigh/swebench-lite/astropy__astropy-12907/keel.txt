@@ -1,0 +1,134 @@
+$ find . -type d -name "modeling" | head -50 && find . -name "*separab*" -type f | head -50
+$ cat astropy/modeling/separable.py && echo "======= TESTS =======" && cat astropy/modeling/tests/test_separable.py
+$ sed -n '1,250p' astropy/modeling/separable.py; echo "======= SEARCH ======="; rg -n "_calculate_separability_matrix|separability_matrix|def separable" -g "*.py" astropy/modeling
+$ grep -n "op_precedence\|__and__\|CompoundModel\|def __or__" astropy/modeling/core.py | head -80
+$ grep -n "_calculate_separability_matrix\|separable" astropy/modeling/*.py | head -100; echo "======= CHANGES ======="; ls docs/changes/modeling | head -30
+$ ls docs/changes/modeling && echo "======= SAMPLE =======" && head -40 docs/changes/modeling/*.rst
+$ python - << 'PY'
+from pathlib import Path
+
+p = Path("astropy/modeling/separable.py")
+text = p.read_text()
+old = """    if isinstance(right, Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = 1
+"""
+new = """    if isinstance(right, Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = right
+"""
+if old not in text:
+    raise SystemExit("pattern not found")
+p.write_text(text.replace(old, new, 1))
+
+t = Path("astropy/modeling/tests/test_separable.py")
+ttext = t.read_text()
+addition = '''
+
+def test_nested_compound_models_separability():
+    """Regression test for nested CompoundModels used with '&'.
+
+    The separability of a nested compound model should match the
+    separability of the equivalent flat compound model.
+    """
+    cm = models.Linear1D(10) & models.Linear1D(5)
+    nested = models.Pix2Sky_TAN() & cm
+    flat = models.Pix2Sky_TAN() & models.Linear1D(10) & models.Linear1D(5)
+    assert_allclose(separability_matrix(nested), separability_matrix(flat))
+
+    left_nested = cm & models.Pix2Sky_TAN()
+    left_flat = models.Linear1D(10) & models.Linear1D(5) & models.Pix2Sky_TAN()
+    assert_allclose(separability_matrix(left_nested), separability_matrix(left_flat))
+
+    # More than two levels of nesting, on both sides.
+    deep = (models.Linear1D(1) & models.Linear1D(2)) & (models.Linear1D(3) & models.Linear1D(4))
+    deep_flat = models.Linear1D(1) & models.Linear1D(2) & models.Linear1D(3) & models.Linear1D(4)
+    assert_allclose(separability_matrix(deep), separability_matrix(deep_flat))
+    assert_allclose(is_separable(deep), np.array([True, True, True, True]))
+
+    # A non-separable model nested inside a compound model should remain coupled
+    # only across its own inputs/outputs.
+    rot_nested = models.Shift(1) & (models.Rotation2D(2) & models.Shift(2))
+    rot_flat = models.Shift(1) & models.Rotation2D(2) & models.Shift(2)
+    assert_allclose(separability_matrix(rot_nested), separability_matrix(rot_flat))
+'''
+if "test_nested_compound_models_separability" not in ttext:
+    t.write_text(ttext + addition)
+
+c = Path("docs/changes/modeling/separability_nested.bugfix.rst")
+c.write_text(
+    "Fixed ``separability_matrix`` and ``is_separable`` for nested compound "
+    "models using the ``&`` operator. Previously, combining a model with an "
+    "already-compound model (for example ``Pix2Sky_TAN() & (Linear1D & Linear1D)``) "
+    "incorrectly marked the nested model's outputs as dependent on all of its inputs.\n"
+)
+print("updated")
+PY
+$ python -c "
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, is_separable
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print('cm', separability_matrix(cm))
+print('flat', separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+print('nested', separability_matrix(m.Pix2Sky_TAN() & cm))
+print('left nested', separability_matrix(cm & m.Pix2Sky_TAN()))
+deep = (m.Linear1D(1) & m.Linear1D(2)) & (m.Linear1D(3) & m.Linear1D(4))
+print('deep', separability_matrix(deep))
+print('is_sep', is_separable(deep))
+rot = m.Shift(1) & (m.Rotation2D(2) & m.Shift(2))
+print('rot', separability_matrix(rot))
+print('both sides nonsep', separability_matrix((m.Rotation2D(2) & m.Shift(1)) & (m.Linear1D(1) & m.Pix2Sky_TAN())))
+"
+$ python -m pytest astropy/modeling/tests/test_separable.py -q
+$ find . -name "towncrier*" -o -name "pyproject.toml" | head -20; echo "===="; grep -n -A 40 "towncrier" pyproject.toml setup.cfg 2>/dev/null | head -80
+$ cat docs/changes/template.rst; echo "==== git log sample ===="; ls docs/changes | head; find docs/changes -name "*.bugfix.rst" | head -20
+$ cat docs/changes/README.rst | head -80; echo "==== sample ===="; cat docs/changes/io.ascii/12631.bugfix.rst
+$ grep -R "separability_matrix" -n docs astropy --include="*.rst" | head -30; ls docs/changes/modeling/
+$ sed -n '790,840p' astropy/modeling/core.py; echo "==== more tests ===="; python - << 'PY'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, is_separable
+
+def show(label, a, b=None):
+    ma = separability_matrix(a)
+    print(label)
+    print(ma)
+    if b is not None:
+        mb = separability_matrix(b)
+        print('match', np.array_equal(ma, mb))
+        if not np.array_equal(ma, mb):
+            print(mb)
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+show('comp nested', m.Shift(1) & m.Shift(2) | cm, m.Shift(1) & m.Shift(2) | m.Linear1D(10) & m.Linear1D(5))
+show('comp right nested', cm | (m.Scale(2) & m.Scale(3)), m.Linear1D(10) & m.Linear1D(5) | m.Scale(2) & m.Scale(3))
+show('rot nested', (m.Shift(1) & m.Shift(2) & m.Shift(3)) | (m.Rotation2D(2) & m.Identity(1)),
+     m.Shift(1) & m.Shift(2) & m.Shift(3) | m.Rotation2D(2) & m.Identity(1))
+show('both nested and', (m.Linear1D(1) & m.Linear1D(2)) & (m.Linear1D(3) & (m.Linear1D(4) & m.Linear1D(5))),
+     m.Linear1D(1) & m.Linear1D(2) & m.Linear1D(3) & m.Linear1D(4) & m.Linear1D(5))
+# nonseparable on left as array path? Pix2Sky is not compound
+show('poly', (m.Polynomial1D(1) & m.Polynomial1D(1)) & m.Polynomial2D(1))
+show('arith nested', (m.Shift(1) & m.Shift(2)) + (m.Scale(2) & m.Scale(3)))
+show('mapping nested', m.Mapping((1, 0)) & (m.Shift(1) & m.Shift(2)), m.Mapping((1,0)) & m.Shift(1) & m.Shift(2))
+show('mapping right of compound', (m.Shift(1) & m.Shift(2)) & m.Mapping((0, 0)), m.Shift(1) & m.Shift(2) & m.Mapping((0,0)))
+PY
+$ python -c "import astropy; print(astropy.__version__)" && git log -1 --oneline && git status --short
+$ git log -5 --format='%h %ci %s' && echo "====" && git show HEAD:astropy/modeling/separable.py | wc -l && ls docs/changes/modeling/
+$ grep -R "towncrier\|changes" -n astropy/tests docs --include="*.py" --include="*.rst" | head -40
+$ python - << 'PY'
+from pathlib import Path
+print(Path("astropy/modeling/separable.py").read_text().split("def _cstack")[1][:1200])
+print("---TEST TAIL---")
+print(Path("astropy/modeling/tests/test_separable.py").read_text()[-1800:])
+print("---CHANGE---")
+print(Path("docs/changes/modeling/separability_nested.bugfix.rst").read_text())
+PY
+$ mv docs/changes/modeling/separability_nested.bugfix.rst docs/changes/modeling/12901.bugfix.rst && ls docs/changes/modeling/
+$ echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+Nested compound models combined with `&` were treated as fully coupled because `_cstack` replaced the right-hand separability block with ones. That block is now copied through unchanged, so nested models match their flattened equivalents.

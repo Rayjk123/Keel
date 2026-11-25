@@ -1,0 +1,985 @@
+$ pwd && ls -la && git log --oneline -3 && git status
+$ cat astropy/modeling/separable.py
+$ cd /testbed && python - <<'EOF'
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, is_separable
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print("cm:\n", separability_matrix(cm))
+print("TAN & L & L:\n", separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+print("TAN & cm:\n", separability_matrix(m.Pix2Sky_TAN() & cm))
+EOF
+$ cd /testbed && cat astropy/modeling/tests/test_separable.py
+$ cd /testbed && git log --oneline -8 -- astropy/modeling/separable.py && grep -rn "separab" --include=*.py astropy | grep -v "tests/" | grep -v "^astropy/modeling/separable.py" | head -50
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import separability_matrix, is_separable
+
+# Where "= 1" and "= right" can differ: right operand matrix is not all-ones.
+# 1) Nested compound on the right
+print("Shift & (Shift & Shift):\n", separability_matrix(m.Shift(1) & (m.Shift(2) & m.Shift(3))).astype(int))
+# 2) Simple Mapping on the right whose matrix is a permutation (flat, no nesting at all!)
+mp = Mapping((1, 0))
+print("Shift & Mapping((1,0)) (flat):\n", separability_matrix(m.Shift(1) & mp).astype(int))
+print("   mapping alone:\n", separability_matrix(mp).astype(int))
+# 3) Right operand that is a '|' compound
+print("Shift & (Shift | Scale):\n", separability_matrix(m.Shift(1) & (m.Shift(2) | m.Scale(3))).astype(int))
+print("is_separable(TAN & (L & L)):", is_separable(m.Pix2Sky_TAN() & (m.Linear1D(10) & m.Linear1D(5))))
+EOF
+$ cd /testbed && grep -rn -i "separab" docs --include=*.rst | head -30; echo ---; ls docs/changes 2>/dev/null | head; echo ---; sed -n 1,60p CHANGES.rst
+$ cd /testbed && grep -rn "separability_matrix\|is_separable\|_separable(\|_cstack\|_calculate_separability_matrix" --include=*.py --include=*.rst --include=*.cfg --include=*.txt . | grep -v "^./astropy/modeling/separable.py" | grep -v "^./CHANGES.rst"
+$ cd /testbed && sed -n 720,770p docs/modeling/models.rst; echo ------; ls docs/changes/modeling/; echo ------; for f in docs/changes/modeling/*; do echo "== $f"; cat "$f"; done
+$ cd /testbed && sed -n 1,200p pyproject.toml
+$ cd /testbed && sed -n 795,830p astropy/modeling/core.py
+$ mkdir -p /tmp/scratch && cat > /tmp/scratch/fuzz_sep.py <<'EOF'
+"""
+Scratch: compare separability_matrix against an independent reference on random
+expression trees (nested '&' and '|' with a pool of leaf models).
+"""
+import itertools
+import random
+import numpy as np
+
+from astropy.modeling import models as m
+from astropy.modeling.core import CompoundModel
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import separability_matrix
+
+
+def leaf_matrix(model):
+    """Reference dependency matrix (n_outputs x n_inputs) for a *simple* model."""
+    if isinstance(model, Mapping):
+        mat = np.zeros((model.n_outputs, model.n_inputs), dtype=int)
+        for out, inp in enumerate(model.mapping):
+            mat[out, inp] = 1
+        return mat
+    if model.separable:
+        assert model.n_inputs == model.n_outputs == 1
+        return np.ones((1, 1), dtype=int)
+    return np.ones((model.n_outputs, model.n_inputs), dtype=int)
+
+
+def ref(model):
+    if isinstance(model, CompoundModel):
+        lm, rm = ref(model.left), ref(model.right)
+        if model.op == '&':
+            out = np.zeros((lm.shape[0] + rm.shape[0], lm.shape[1] + rm.shape[1]), dtype=int)
+            out[:lm.shape[0], :lm.shape[1]] = lm
+            out[lm.shape[0]:, lm.shape[1]:] = rm
+            return out
+        if model.op == '|':
+            return (rm @ lm != 0).astype(int)
+        raise NotImplementedError(model.op)
+    return leaf_matrix(model)
+
+
+def make_pool():
+    # name -> factory (fresh instance each time; (n_in, n_out) in the comment)
+    return {
+        'Shift': lambda: m.Shift(1),                       # 1->1 separable
+        'Scale': lambda: m.Scale(2),                       # 1->1 separable
+        'Rot': lambda: m.Rotation2D(2),                    # 2->2 non-separable
+        'Poly2D': lambda: m.Polynomial2D(1),               # 2->1 non-separable
+        'TAN': lambda: m.Pix2Sky_TAN(),                    # 2->2 non-separable
+        'Map(1,0)': lambda: Mapping((1, 0)),               # 2->2 permutation
+        'Map(0,0)': lambda: Mapping((0, 0)),               # 1->2
+        'Map(0,1,0)': lambda: Mapping((0, 1, 0)),          # 2->3
+        'Map(0,)': lambda: Mapping((0,), n_inputs=2),      # 2->1 (drops input 1)
+        'Id2': lambda: m.Identity(2),                      # 2->2 identity (Mapping subclass)
+    }
+
+
+def random_tree(rng, pool, depth):
+    names = list(pool)
+    if depth == 0 or rng.random() < 0.25:
+        return pool[rng.choice(names)]()
+    for _ in range(50):
+        l = random_tree(rng, pool, depth - 1)
+        r = random_tree(rng, pool, depth - 1)
+        op = rng.choice(['&', '|'])
+        if op == '|' and l.n_outputs != r.n_inputs:
+            continue
+        return (l & r) if op == '&' else (l | r)
+    return pool[rng.choice(names)]()
+
+
+def main(n=4000, seed=0, depth=4):
+    rng = random.Random(seed)
+    pool = make_pool()
+    bad = 0
+    checked = 0
+    for _ in range(n):
+        t = random_tree(rng, pool, depth)
+        try:
+            got = separability_matrix(t).astype(int)
+        except Exception as e:      # noqa
+            print("EXC", repr(t.__class__), e)
+            bad += 1
+            continue
+        want = ref(t)
+        checked += 1
+        # separability_matrix special-cases 1-input/multi-output at top level (all ones)
+        if t.n_inputs == 1 and t.n_outputs > 1:
+            want = np.ones((t.n_outputs, 1), dtype=int)
+        if got.shape != want.shape or not (got == want).all():
+            bad += 1
+            if bad <= 8:
+                print("MISMATCH for", t.__class__.__name__, getattr(t, 'op', None))
+                print(t)
+                print("got\n", got, "\nwant\n", want)
+    print(f"checked={checked} mismatches/exceptions={bad}")
+    return bad
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(1 if main() else 0)
+EOF
+cd /testbed && python /tmp/scratch/fuzz_sep.py 2>&1 | tail -60
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling import separable as s
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+tan = m.Pix2Sky_TAN()
+
+# What does _separable return for the nested right-hand operand?
+right = s._separable(cm)
+print("coord matrix of the nested (Linear1D & Linear1D):\n", right)
+print("\n_cstack(TAN, <that matrix>):\n", s._cstack(tan, right))
+print("\nwhereas _cstack with the two Linear1D flattened out gives:\n",
+      s._cstack(s._separable(tan & m.Linear1D(10)), m.Linear1D(5)))
+EOF
+> edit /testbed/astropy/modeling/separable.py
+> read /testbed/astropy/modeling/separable.py
+> read /testbed/astropy/modeling/separable.py
+> edit /testbed/astropy/modeling/separable.py
+$ cd /testbed && python - <<'EOF'
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix
+
+cm = m.Linear1D(10) & m.Linear1D(5)
+print("cm:\n", separability_matrix(cm))
+print("TAN & L & L:\n", separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)))
+print("TAN & cm:\n", separability_matrix(m.Pix2Sky_TAN() & cm))
+EOF
+$ cd /testbed && python /tmp/scratch/fuzz_sep.py 2>&1 | tail -60
+$ cd /testbed && git diff && python -m pytest astropy/modeling/tests/test_separable.py astropy/modeling/tests/test_core.py astropy/modeling/tests/test_compound.py astropy/modeling/tests/test_mappings.py -q -x 2>&1 | tail -8; python -m pytest --doctest-modules astropy/modeling/separable.py -q 2>&1 | tail -5
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import separability_matrix, is_separable
+
+# The previously-wrong *flat* (non-nested) case: a permuting Mapping on the right
+print("Shift & Mapping((1,0)) (flat):\n", separability_matrix(m.Shift(1) & Mapping((1, 0))).astype(int))
+
+# The reported problem, plus is_separable, plus further nesting
+cm = m.Linear1D(10) & m.Linear1D(5)
+print("is_separable(TAN & cm):", is_separable(m.Pix2Sky_TAN() & cm))
+print("deeper nesting  TAN & (L & (L & L)):\n",
+      separability_matrix(m.Pix2Sky_TAN() & (m.Linear1D(1) & (m.Linear1D(2) & m.Linear1D(3)))).astype(int))
+print("both sides nested  (TAN & L) & (L & TAN):\n",
+      separability_matrix((m.Pix2Sky_TAN() & m.Linear1D(1)) & (m.Linear1D(2) & m.Pix2Sky_TAN())).astype(int))
+
+# zero-size operands: are they even constructible in this version?
+try:
+    z = m.fix_inputs(m.Shift(1), {0: 1.0})
+    print("fix_inputs all -> n_inputs", z.n_inputs, "n_outputs", z.n_outputs)
+    print(separability_matrix(m.Shift(2) & z))
+except Exception as e:
+    print("fix_inputs-all:", type(e).__name__, e)
+EOF
+$ cd /testbed && git stash && python -m pytest astropy/modeling/tests/test_core.py::test_prepare_outputs_single_entry_vector -q 2>&1 | tail -15; git stash pop && git diff --stat
+$ cd /testbed && python -m pytest astropy/modeling -q -p no:cacheprovider -x -q 2>&1 | tail -3; echo; echo "=== WITH FIX (full, no -x) ==="; python -m pytest astropy/modeling -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed" | sort > /tmp/scratch/with_fix.txt; cat /tmp/scratch/with_fix.txt
+git stash -q; echo; echo "=== BASELINE (full, no -x) ==="; python -m pytest astropy/modeling -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed" | sort > /tmp/scratch/baseline.txt; cat /tmp/scratch/baseline.txt; git stash pop -q; git diff --stat
+$ cd /testbed && diff /tmp/scratch/baseline.txt /tmp/scratch/with_fix.txt && echo "IDENTICAL failure sets (all pre-existing, unrelated to separable.py)"; git status --short
+$ cd /testbed && cat > /tmp/scratch/edge.py <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.separable import separability_matrix, _separable
+
+z = m.fix_inputs(m.Shift(1), {0: 1.0})
+print("z:", type(z).__name__, "op=", z.op, "n_inputs", z.n_inputs, "n_outputs", z.n_outputs)
+for label, build in [
+    ("separability_matrix(z)", lambda: separability_matrix(z)),
+    ("_separable(z)", lambda: _separable(z)),
+    ("Shift & z", lambda: separability_matrix(m.Shift(2) & z)),
+    ("z & Shift", lambda: separability_matrix(z & m.Shift(2))),
+    ("(Shift & Shift) & z", lambda: separability_matrix((m.Shift(2) & m.Shift(3)) & z)),
+]:
+    try:
+        print(f"{label:28s}->", repr(build()).replace("\n", " "))
+    except Exception as e:
+        print(f"{label:28s}-> {type(e).__name__}: {e}")
+EOF
+echo "=== WITH FIX ==="; python /tmp/scratch/edge.py
+git stash -q; echo; echo "=== BASELINE ==="; python /tmp/scratch/edge.py; git stash pop -q; git diff --stat
+$ cd /testbed && cat docs/changes/README.rst | head -60; ls docs/changes/modeling docs/changes/coordinates | head -20
+> read /testbed/astropy/modeling/tests/test_separable.py
+$ cat > /tmp/scratch/numeric_probe.py <<'EOF'
+"""
+Independent ground truth for separability: numerically perturb each input of a
+random nested model and record which outputs react.  Compare with
+separability_matrix().  (No shared logic with the structural reference.)
+"""
+import random
+import numpy as np
+
+from astropy.modeling import models as m
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import separability_matrix
+
+
+def poly2d():
+    p = m.Polynomial2D(1)
+    p.c0_0, p.c1_0, p.c0_1 = 0.3, 1.1, -0.7   # depends on both inputs
+    return p
+
+
+POOL = {
+    'Shift': lambda: m.Shift(1),
+    'Scale': lambda: m.Scale(2),
+    'Rot': lambda: m.Rotation2D(30),
+    'Poly2D': poly2d,
+    'TAN': lambda: m.Pix2Sky_TAN(),
+    'Map(1,0)': lambda: Mapping((1, 0)),
+    'Map(0,0)': lambda: Mapping((0, 0)),
+    'Map(0,1,0)': lambda: Mapping((0, 1, 0)),
+    'Map(0,)': lambda: Mapping((0,), n_inputs=2),
+    'Id2': lambda: m.Identity(2),
+}
+
+
+def random_tree(rng, depth):
+    if depth == 0 or rng.random() < 0.25:
+        return POOL[rng.choice(list(POOL))]()
+    for _ in range(50):
+        l, r = random_tree(rng, depth - 1), random_tree(rng, depth - 1)
+        op = rng.choice(['&', '|'])
+        if op == '|' and l.n_outputs != r.n_inputs:
+            continue
+        return (l & r) if op == '&' else (l | r)
+    return POOL[rng.choice(list(POOL))]()
+
+
+def probe(model, rng):
+    n_in, n_out = model.n_inputs, model.n_outputs
+    dep = np.zeros((n_out, n_in), dtype=bool)
+    for _ in range(3):                       # a few random base points
+        x0 = [rng.uniform(-15, 15) for _ in range(n_in)]
+        y0 = np.atleast_1d(np.array(model(*x0), dtype=float)).ravel()
+        for j in range(n_in):
+            x1 = list(x0)
+            x1[j] += 1.7
+            y1 = np.atleast_1d(np.array(model(*x1), dtype=float)).ravel()
+            dep[:, j] |= ~np.isclose(y0, y1, rtol=0, atol=1e-7)
+    return dep
+
+
+def main(n=1500, seed=1, depth=4):
+    rng = random.Random(seed)
+    bad = checked = 0
+    for _ in range(n):
+        t = random_tree(rng, depth)
+        if t.n_inputs == 1 and t.n_outputs > 1:
+            continue          # separability_matrix special-cases this to all-True by design
+        got = separability_matrix(t)
+        want = probe(t, rng)
+        checked += 1
+        if got.shape != want.shape or (got != want).any():
+            bad += 1
+            if bad <= 3:
+                print("MISMATCH:", t.expression if hasattr(t, 'expression') else t)
+                print(got.astype(int), "\n--\n", want.astype(int))
+    print(f"numeric-probe: checked={checked} mismatches={bad}")
+    return bad
+
+
+if __name__ == '__main__':
+    raise SystemExit(1 if main() else 0)
+EOF
+cd /testbed && echo "=== WITH FIX ===" && python /tmp/scratch/numeric_probe.py 2>&1 | tail -15
+git stash -q; echo; echo "=== BASELINE ===" ; python /tmp/scratch/numeric_probe.py 2>&1 | tail -3; git stash pop -q; git diff --stat
+$ cd /testbed && cat > /tmp/scratch/numeric_probe_detail.py <<'EOF'
+import random, sys
+sys.path.insert(0, '/tmp/scratch')
+import numpy as np
+from numeric_probe import random_tree, probe
+from astropy.modeling.separable import separability_matrix
+from astropy.modeling.core import CompoundModel
+
+def flat_expr(t):
+    """Readable expression using component names instead of the multi-line repr."""
+    if isinstance(t, CompoundModel):
+        return f"({flat_expr(t.left)} {t.op} {flat_expr(t.right)})"
+    n = t.__class__.__name__
+    if n == 'Mapping':
+        return f"Map{t.mapping}"
+    return n
+
+rng = random.Random(1)
+shown = 0
+kinds = {}
+for _ in range(1500):
+    t = random_tree(rng, 4)
+    if t.n_inputs == 1 and t.n_outputs > 1:
+        continue
+    got = separability_matrix(t)
+    want = probe(t, rng)
+    if got.shape != want.shape or (got != want).any():
+        diff_rows = sorted(set(np.argwhere(got != want)[:, 0]))
+        e = flat_expr(t)
+        has_tan = 'Pix2Sky_TAN' in e
+        has_poly = 'Polynomial2D' in e
+        kinds[(has_tan, has_poly)] = kinds.get((has_tan, has_poly), 0) + 1
+        if shown < 4 and not has_tan:
+            shown += 1
+            print("EXPR:", e)
+            print("got:\n", got.astype(int), "\nprobe:\n", want.astype(int), "\n")
+print("residual mismatches by (contains TAN, contains Polynomial2D):", kinds)
+EOF
+python /tmp/scratch/numeric_probe_detail.py 2>&1 | tail -60
+$ cd /testbed && python - <<'EOF'
+import sys, random
+sys.path.insert(0, '/tmp/scratch')
+import numpy as np
+import numeric_probe as npb
+from astropy.modeling.separable import separability_matrix
+
+
+def probe_exact(model, rng, npts=6):
+    """Dependence by *exact* output change (no tolerance); NaN==NaN counted as 'unchanged'."""
+    n_in, n_out = model.n_inputs, model.n_outputs
+    dep = np.zeros((n_out, n_in), dtype=bool)
+    for _ in range(npts):
+        x0 = [rng.uniform(-3, 3) for _ in range(n_in)]      # smaller range => fewer saturations
+        y0 = np.atleast_1d(np.array(model(*x0), dtype=float)).ravel()
+        for j in range(n_in):
+            x1 = list(x0)
+            x1[j] += 0.37
+            y1 = np.atleast_1d(np.array(model(*x1), dtype=float)).ravel()
+            changed = ~((y0 == y1) | (np.isnan(y0) & np.isnan(y1)))
+            dep[:, j] |= changed
+    return dep
+
+
+rng = random.Random(1)
+checked = bad = 0
+for _ in range(1500):
+    t = npb.random_tree(rng, 4)
+    if t.n_inputs == 1 and t.n_outputs > 1:
+        continue
+    got = separability_matrix(t)
+    want = probe_exact(t, rng)
+    checked += 1
+    if got.shape != want.shape or (got != want).any():
+        bad += 1
+print(f"exact-probe: checked={checked} mismatches={bad}")
+EOF
+$ cd /testbed && cat > /tmp/scratch/minimal.py <<'EOF'
+import sys, itertools
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+import numeric_probe as npb
+from astropy.modeling.separable import separability_matrix
+from astropy.modeling.core import CompoundModel
+
+
+def flat_expr(t):
+    if isinstance(t, CompoundModel):
+        return f"({flat_expr(t.left)} {t.op} {flat_expr(t.right)})"
+    n = t.__class__.__name__
+    return f"Map{t.mapping}" if n == 'Mapping' else (f"Identity({t.n_inputs})" if n == 'Identity' else n)
+
+
+def probe_exact(model, rng, npts=8):
+    n_in, n_out = model.n_inputs, model.n_outputs
+    dep = np.zeros((n_out, n_in), dtype=bool)
+    for _ in range(npts):
+        x0 = [rng.uniform(-3, 3) for _ in range(n_in)]
+        y0 = np.atleast_1d(np.array(model(*x0), dtype=float)).ravel()
+        for j in range(n_in):
+            x1 = list(x0); x1[j] += 0.37
+            y1 = np.atleast_1d(np.array(model(*x1), dtype=float)).ravel()
+            dep[:, j] |= ~((y0 == y1) | (np.isnan(y0) & np.isnan(y1)))
+    return dep
+
+
+names = list(npb.POOL)
+rng = random.Random(5)
+found = []
+# all depth-1 trees:  leaf OP leaf
+for a, b in itertools.product(names, names):
+    for op in ('&', '|'):
+        A, B = npb.POOL[a](), npb.POOL[b]()
+        if op == '|' and A.n_outputs != B.n_inputs:
+            continue
+        t = (A & B) if op == '&' else (A | B)
+        if t.n_inputs == 1 and t.n_outputs > 1:
+            continue
+        got = separability_matrix(t)
+        want = probe_exact(t, rng)
+        if got.shape != want.shape or (got != want).any():
+            found.append((flat_expr(t), got.astype(int), want.astype(int)))
+print("depth-1 mismatches:", len(found))
+for e, g, w in found[:6]:
+    print(e, "\n got:\n", g, "\n probe:\n", w, "\n")
+EOF
+python /tmp/scratch/minimal.py 2>&1 | tail -80
+$ cd /testbed && cat > /tmp/scratch/minimal2.py <<'EOF'
+import sys
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+import numeric_probe as npb
+from minimal import flat_expr, probe_exact
+from astropy.modeling.separable import separability_matrix
+from astropy.modeling.core import CompoundModel
+
+
+def size(t):
+    return size(t.left) + size(t.right) if isinstance(t, CompoundModel) else 1
+
+
+rng = random.Random(1)
+fails = []
+for _ in range(3000):
+    t = npb.random_tree(rng, 4)
+    if t.n_inputs == 1 and t.n_outputs > 1:
+        continue
+    got = separability_matrix(t)
+    want = probe_exact(t, rng)
+    if got.shape != want.shape or (got != want).any():
+        fails.append((size(t), flat_expr(t), got.astype(int), want.astype(int)))
+
+fails.sort(key=lambda f: f[0])
+print("total failing:", len(fails))
+seen = set()
+for s, e, g, w in fails[:12]:
+    if e in seen:
+        continue
+    seen.add(e)
+    print(f"size={s}  {e}\n got:\n{g}\n probe:\n{w}\n")
+EOF
+python /tmp/scratch/minimal2.py 2>&1 | grep -v "^depth-1" | head -90
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+
+tan = m.Pix2Sky_TAN()
+xs = np.array([0.5, 1.0, 2.0, 3.5])
+phi, theta = tan(xs, xs)
+print("TAN(x, x)  phi  :", phi)
+print("TAN(x, x)  theta:", theta)
+print("-> phi is constant along the diagonal x == y, theta is not")
+EOF
+echo
+echo "=== numeric probe with the diagonal-degenerate projection removed from the pool ==="
+python - <<'EOF'
+import sys
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+import numeric_probe as npb
+from minimal import probe_exact
+from astropy.modeling import custom_model
+from astropy.modeling.separable import separability_matrix
+
+@custom_model
+def Mix(x, y):                      # 2->2, non-separable, no diagonal degeneracy
+    return x * y + x, np.sin(x) + y ** 2
+Mix.separable = False
+
+pool = dict(npb.POOL)
+del pool['TAN']
+pool['Mix'] = lambda: Mix()
+npb.POOL.clear(); npb.POOL.update(pool)
+
+for seed in (1, 2, 3):
+    rng = random.Random(seed)
+    checked = bad = 0
+    for _ in range(1500):
+        t = npb.random_tree(rng, 4)
+        if t.n_inputs == 1 and t.n_outputs > 1:
+            continue
+        got = separability_matrix(t)
+        want = probe_exact(t, rng)
+        checked += 1
+        bad += int(got.shape != want.shape or bool((got != want).any()))
+    print(f"seed={seed}: checked={checked} mismatches={bad}")
+EOF
+$ cd /testbed && cat > /tmp/scratch/probe2.py <<'EOF'
+import sys
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+import numeric_probe as npb
+from minimal import probe_exact, flat_expr
+from astropy.modeling import Model
+from astropy.modeling.separable import separability_matrix
+
+
+class Mix(Model):
+    """Non-separable 2->2 model with no diagonal degeneracy."""
+    n_inputs = 2
+    n_outputs = 2
+    _separable = False
+
+    @staticmethod
+    def evaluate(x, y):
+        return x * y + x + 0.3 * y, np.sin(0.7 * x) + 0.5 * y ** 2
+
+
+def run(pool, seeds=(1, 2, 3), n=1500, label=""):
+    npb.POOL.clear()
+    npb.POOL.update(pool)
+    total_bad = 0
+    for seed in seeds:
+        rng = random.Random(seed)
+        checked = bad = 0
+        for _ in range(n):
+            t = npb.random_tree(rng, 4)
+            if t.n_inputs == 1 and t.n_outputs > 1:
+                continue
+            got = separability_matrix(t)
+            want = probe_exact(t, rng)
+            checked += 1
+            bad += int(got.shape != want.shape or bool((got != want).any()))
+        print(f"{label} seed={seed}: checked={checked} mismatches={bad}")
+        total_bad += bad
+    return total_bad
+
+
+if __name__ == '__main__':
+    base = dict(npb.POOL)
+    pool = {k: v for k, v in base.items() if k != 'TAN'}
+    pool['Mix'] = lambda: Mix()
+    bad = run(pool, label="no-TAN/with-Mix")
+    raise SystemExit(1 if bad else 0)
+EOF
+python /tmp/scratch/probe2.py 2>&1 | grep -v "^depth-1"
+echo "--- and: does every residual failure (in the original pool) contain the diagonal-degenerate projection? ---"
+python - <<'EOF'
+import sys
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+import numeric_probe as npb
+from minimal import probe_exact, flat_expr
+from astropy.modeling.separable import separability_matrix
+
+rng = random.Random(1)
+fails = with_proj = 0
+for _ in range(3000):
+    t = npb.random_tree(rng, 4)
+    if t.n_inputs == 1 and t.n_outputs > 1:
+        continue
+    got = separability_matrix(t)
+    want = probe_exact(t, rng)
+    if got.shape != want.shape or (got != want).any():
+        fails += 1
+        with_proj += 'Pix2Sky_Gnomonic' in flat_expr(t)
+print(f"residual failures={fails}, of which contain Pix2Sky_Gnomonic={with_proj}")
+EOF
+> read /testbed/astropy/modeling/tests/test_separable.py
+$ cd /testbed && grep -n -A12 "^\[flake8\]\|^\[pycodestyle\]\|^\[tool:pytest\]" setup.cfg | head -50; python -m flake8 --version 2>&1 | head -2; python -m pycodestyle --version 2>&1 | head -2
+$ cd /testbed && sed -n 1055,1090p astropy/modeling/tests/test_models.py; grep -n -i "changelog\|docs/changes\|news fragment" CONTRIBUTING.md | head
+$ cd /testbed && python - <<'EOF'
+import re
+p = 'astropy/modeling/tests/test_separable.py'
+s = open(p).read()
+
+# --- imports -----------------------------------------------------------------
+s = s.replace(
+"""# pylint: disable=invalid-name
+import pytest
+import numpy as np
+from numpy.testing import assert_allclose
+""",
+"""# pylint: disable=invalid-name
+import itertools
+
+import pytest
+import numpy as np
+from numpy.testing import assert_allclose, assert_array_equal
+""", 1)
+
+# --- one more module level model (a pure permutation) -------------------------
+s = s.replace(
+"""map3 = Mapping((0, 0), name='map3')
+""",
+"""map3 = Mapping((0, 0), name='map3')
+map4 = Mapping((1, 0), name='map4')
+""", 1)
+
+# --- more compound models ----------------------------------------------------
+s = s.replace(
+"""    'cm7': (map2 | p2 & sh1,
+            (np.array([False, True]),
+             np.array([[True, False], [False, True]]))
+            )
+}
+""",
+"""    'cm7': (map2 | p2 & sh1,
+            (np.array([False, True]),
+             np.array([[True, False], [False, True]]))
+            ),
+    # The right operand of "&" is itself a compound model.
+    'cm8': (rot & (sh1 & sh2),
+            (np.array([False, False, True, True]),
+             np.array([[True, True, False, False],
+                       [True, True, False, False],
+                       [False, False, True, False],
+                       [False, False, False, True]]))
+            ),
+    'cm9': (sh1 & (rot & sh2),
+            (np.array([True, False, False, True]),
+             np.array([[True, False, False, False],
+                       [False, True, True, False],
+                       [False, True, True, False],
+                       [False, False, False, True]]))
+            ),
+    'cm10': ((rot & sh1) & (sh2 & rot),
+             (np.array([False, False, True, True, False, False]),
+              np.array([[True, True, False, False, False, False],
+                        [True, True, False, False, False, False],
+                        [False, False, True, False, False, False],
+                        [False, False, False, True, False, False],
+                        [False, False, False, False, True, True],
+                        [False, False, False, False, True, True]]))
+             ),
+    'cm11': (sh1 & (map2 | rot & scl1),
+             (np.array([True, True, True, True]),
+              np.array([[True, False, False],
+                        [False, True, False],
+                        [False, True, False],
+                        [False, False, True]]))
+             ),
+    # The right operand of "&" is a Mapping that does not just pass its inputs on.
+    'cm12': (sh1 & map4,
+             (np.array([True, True, True]),
+              np.array([[True, False, False],
+                        [False, False, True],
+                        [False, True, False]]))
+             ),
+    'cm13': (sh1 & map1,
+             (np.array([True, True, True, True, True]),
+              np.array([[True, False, False],
+                        [False, True, False],
+                        [False, False, True],
+                        [False, True, False],
+                        [False, False, True]]))
+             )
+}
+""", 1)
+
+# --- unit test for _cstack with coord_matrix operands -------------------------
+s = s.replace(
+"""def test_arith_oper():
+""",
+"""def test_cstack_coord_matrix():
+    # ``_separable`` passes the operators the coord_matrix of both operands, so
+    # the structure of the right one must be kept and not only its shape.
+    ones = np.ones((2, 2))
+    eye = np.eye(2)
+    swap = np.array([[0, 1], [1, 0]])
+    map1_matrix = np.array([[1, 0], [0, 1], [1, 0], [0, 1]])
+
+    result = _cstack(ones, eye)
+    assert_allclose(result, np.array([[1, 1, 0, 0],
+                                      [1, 1, 0, 0],
+                                      [0, 0, 1, 0],
+                                      [0, 0, 0, 1]]))
+    result = _cstack(eye, ones)
+    assert_allclose(result, np.array([[1, 0, 0, 0],
+                                      [0, 1, 0, 0],
+                                      [0, 0, 1, 1],
+                                      [0, 0, 1, 1]]))
+    result = _cstack(eye, swap)
+    assert_allclose(result, np.array([[1, 0, 0, 0],
+                                      [0, 1, 0, 0],
+                                      [0, 0, 0, 1],
+                                      [0, 0, 1, 0]]))
+    result = _cstack(np.array([[1]]), map1_matrix)
+    assert_allclose(result, np.array([[1, 0, 0],
+                                      [0, 1, 0],
+                                      [0, 0, 1],
+                                      [0, 1, 0],
+                                      [0, 0, 1]]))
+
+
+def test_arith_oper():
+""", 1)
+
+# --- end-to-end tests ---------------------------------------------------------
+s = s.rstrip('\n') + '''
+
+
+def test_separable_nested_compound_model():
+    """
+    A compound model on the right of "&" must keep its own separability.
+    """
+    cm = models.Linear1D(10) & models.Linear1D(5)
+    assert_array_equal(separability_matrix(cm), [[True, False],
+                                                 [False, True]])
+
+    expected = np.array([[True, True, False, False],
+                         [True, True, False, False],
+                         [False, False, True, False],
+                         [False, False, False, True]])
+    flat = models.Pix2Sky_TAN() & models.Linear1D(10) & models.Linear1D(5)
+    nested = models.Pix2Sky_TAN() & cm
+    assert_array_equal(separability_matrix(flat), expected)
+    assert_array_equal(separability_matrix(nested), expected)
+    assert_array_equal(is_separable(flat), [False, False, True, True])
+    assert_array_equal(is_separable(nested), [False, False, True, True])
+
+
+def _block_diag(matrices):
+    """Place the (boolean) ``matrices`` along the diagonal of a bigger one."""
+    result = np.zeros((sum(m.shape[0] for m in matrices),
+                       sum(m.shape[1] for m in matrices)), dtype=bool)
+    row = col = 0
+    for matrix in matrices:
+        result[row:row + matrix.shape[0], col:col + matrix.shape[1]] = matrix
+        row += matrix.shape[0]
+        col += matrix.shape[1]
+    return result
+
+
+_triples = list(itertools.product([sh1, rot, map1], repeat=3))
+
+
+@pytest.mark.parametrize('triple', _triples,
+                         ids=['&'.join(m.name for m in t) for t in _triples])
+def test_separable_cstack_is_block_diagonal(triple):
+    """
+    "&" puts models side by side, so the result is the same however the
+    operands are grouped, and each of them keeps its own separability.
+    """
+    a, b, c = triple
+    expected = _block_diag([separability_matrix(m) for m in triple])
+    expected_separable = np.concatenate([is_separable(m) for m in triple])
+
+    for compound in (a & b & c, a & (b & c), (a & b) & c):
+        assert_array_equal(separability_matrix(compound), expected)
+        assert_array_equal(is_separable(compound), expected_separable)
+'''
+open(p, 'w').write(s)
+EOF
+git diff --stat
+$ cd /testbed && echo "=== WITH FIX ===" && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -6
+echo
+echo "=== WITHOUT FIX (source reverted, new tests kept) ==="
+git stash push -q astropy/modeling/separable.py && git diff --stat | tail -1
+python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed" | sed -E 's/ - .*//' 
+git stash pop -q && git diff --stat
+$ cd /testbed && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider -k "compound_model9" 2>&1 | grep -B3 -A12 "AssertionError" | head -40
+echo "-------- the pieces, computed independently --------"
+python - <<'EOF'
+import numpy as np
+from astropy.modeling import models
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import is_separable, separability_matrix, _separable
+
+sh1 = models.Shift(1); scl1 = models.Scale(1); rot = models.Rotation2D(2)
+map2 = Mapping((0, 0, 1))
+
+inner = map2 | rot & scl1
+print("is_separable(inner)           :", is_separable(inner), "  <- the existing 'cm3' test expects [False False True]")
+print("_separable(inner) raw counts  :\n", _separable(inner))
+whole = sh1 & inner
+print("is_separable(sh1 & inner)     :", is_separable(whole))
+print("separability_matrix(whole)    :\n", separability_matrix(whole).astype(int))
+EOF
+> edit /testbed/astropy/modeling/tests/test_separable.py
+> read /testbed/astropy/modeling/tests/test_separable.py
+> edit /testbed/astropy/modeling/tests/test_separable.py
+$ cd /testbed && echo "=== WITH FIX ===" && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -3
+echo
+echo "=== WITHOUT FIX (source reverted, new tests kept) ==="
+git stash push -q astropy/modeling/separable.py
+python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|passed|failed" | sed -E 's/ - .*//' | grep -v "cstack_is_block_diagonal" 
+echo "(block-diagonal parametrized failures on baseline:" $(python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | grep -c "^FAILED.*cstack_is_block_diagonal") "of 27)"
+git stash pop -q && git diff --stat
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import is_separable, separability_matrix
+
+sh1 = models.Shift(1); sh2 = models.Shift(2)
+scl1 = models.Scale(1); scl2 = models.Scale(2)
+rot = models.Rotation2D(2)
+map2 = Mapping((0, 0, 1))
+
+print("--- left/right symmetry through a nested '|' (is_separable keeps the path counts) ---")
+inner = map2 | rot & scl1
+L = (inner & sh1)
+R = (sh1 & inner)
+print("inner & sh1 :", is_separable(L))
+print("sh1 & inner :", is_separable(R))
+assert list(is_separable(L)) == list(is_separable(inner)) + list(is_separable(sh1))
+assert list(is_separable(R)) == list(is_separable(sh1)) + list(is_separable(inner))
+
+print("\n--- upstream-style nested cases ---")
+cases = {
+    "rot & (sh1 & sh2)":         rot & (sh1 & sh2),
+    "rot & sh1 & sh2":           rot & sh1 & sh2,
+    "(rot & sh1) & sh2":         (rot & sh1) & sh2,
+    "rot & sh1 & (scl1 & scl2)": rot & sh1 & (scl1 & scl2),
+}
+for name, mdl in cases.items():
+    print(f"{name:28s}", is_separable(mdl).astype(int), "\n", separability_matrix(mdl).astype(int))
+
+print("\n--- arithmetic operators nested on either side of '&' (always non-separable by design) ---")
+for name, mdl in {
+    "sh1 & (sh1 + sh2)":      sh1 & (sh1 + sh2),
+    "(sh1 + sh2) & sh1":      (sh1 + sh2) & sh1,
+    "rot & (rot + rot)":      rot & (rot + rot),
+    "(rot * rot) & sh1":      (rot * rot) & sh1,
+}.items():
+    print(f"{name:22s}", separability_matrix(mdl).astype(int).tolist())
+EOF
+$ cd /testbed && sed -n 370,380p docs/modeling/compound-models.rst; echo ...; sed -n 440,452p docs/modeling/compound-models.rst
+echo
+echo "=== docs/modeling doctests: with fix vs baseline ==="
+python -m pytest docs/modeling -q -p no:cacheprovider 2>&1 | grep -E "passed|failed" > /tmp/scratch/docs_fix.txt; cat /tmp/scratch/docs_fix.txt
+git stash push -q astropy/modeling/separable.py
+python -m pytest docs/modeling -q -p no:cacheprovider 2>&1 | grep -E "passed|failed" > /tmp/scratch/docs_base.txt; cat /tmp/scratch/docs_base.txt
+git stash pop -q; git diff --stat
+$ cd /testbed && python -m pytest docs/modeling -q -p no:cacheprovider 2>&1 | grep -E "^FAILED|^(E  )" | head -8
+$ cd /testbed && python -m pyflakes astropy/modeling/tests/test_separable.py astropy/modeling/separable.py 2>&1 | head -5; python -m pylint --version 2>&1 | head -1; awk 'length > 100 {print FILENAME": "FNR": "length" cols"}' astropy/modeling/tests/test_separable.py astropy/modeling/separable.py; echo "(line-length check done)"
+$ cd /testbed && python -m pytest docs/modeling/compound-models.rst -q -p no:cacheprovider 2>&1 | grep -E "Error|Expected|Got|^[0-9]+ " | head -8; echo ----; sed -n 205,210p astropy/modeling/tests/test_separable.py; git blame -s -L208,208 astropy/modeling/tests/test_separable.py | cut -c1-60
+$ cd /testbed && python -m pytest docs/modeling/compound-models.rst -q -p no:cacheprovider 2>&1 | grep -iE "warning|deprecat" | head -4
+$ cd /testbed && python - <<'EOF'
+import numpy as np
+from astropy.modeling import models as m
+from astropy.modeling.models import Mapping
+from astropy.modeling.separable import _cstack, separability_matrix
+
+# 1) Can a model with zero outputs even be built?
+for label, make in [("Mapping(())", lambda: Mapping(())),
+                    ("Mapping((), n_inputs=1)", lambda: Mapping((), n_inputs=1))]:
+    try:
+        mm = make()
+        print(f"{label}: built, n_inputs={mm.n_inputs} n_outputs={mm.n_outputs}")
+        print("   Shift & it ->", separability_matrix(m.Shift(1) & mm).astype(int).tolist())
+    except Exception as e:
+        print(f"{label}: {type(e).__name__}: {str(e)[:90]}")
+
+# 2) direct helper call with a zero-row / zero-column right matrix
+for shape in [(0, 2), (2, 0)]:
+    try:
+        r = _cstack(np.ones((1, 1)), np.zeros(shape))
+        print("_cstack(1x1, zeros%s) ->" % (shape,), r.shape)
+    except Exception as e:
+        print("_cstack(1x1, zeros%s) -> %s: %s" % (shape, type(e).__name__, str(e)[:80]))
+EOF
+echo "=== same helper calls on the ORIGINAL code ==="
+git stash push -q astropy/modeling/separable.py
+python - <<'EOF'
+import numpy as np
+from astropy.modeling.separable import _cstack
+for shape in [(0, 2), (2, 0)]:
+    try:
+        r = _cstack(np.ones((1, 1)), np.zeros(shape))
+        print("_cstack(1x1, zeros%s) ->" % (shape,), r.shape)
+    except Exception as e:
+        print("_cstack(1x1, zeros%s) -> %s: %s" % (shape, type(e).__name__, str(e)[:80]))
+EOF
+git stash pop -q; git diff --stat | tail -1
+$ cd /testbed && cat > /tmp/scratch/hook.py <<'EOF'
+import numpy as np
+from astropy.modeling import models
+from astropy.modeling.separable import separability_matrix
+
+
+class CustomShift(models.Shift):
+    """1-in/1-out model whose hook says "the output depends on no input"."""
+    def _calculate_separability_matrix(self):
+        return np.array([[0]])
+
+
+c, s = CustomShift(1), models.Shift(2)
+print("custom & shift:", separability_matrix(c & s).astype(int).tolist(), " want [[0, 0], [0, 1]]")
+print("shift & custom:", separability_matrix(s & c).astype(int).tolist(), " want [[1, 0], [0, 0]]")
+print("shift & (shift & custom):", separability_matrix(s & (s & c)).astype(int).tolist(),
+      " want [[1,0,0],[0,1,0],[0,0,0]]")
+EOF
+echo "=== WITH FIX ==="; python /tmp/scratch/hook.py
+git stash push -q astropy/modeling/separable.py
+echo "=== BASELINE ==="; python /tmp/scratch/hook.py
+git stash pop -q; git diff --stat | tail -1
+> read /testbed/astropy/modeling/tests/test_separable.py
+$ cd /testbed && cat >> astropy/modeling/tests/test_separable.py <<'EOF'
+
+
+def test_separable_nested_custom_separability_matrix():
+    """
+    The matrix returned by ``Model._calculate_separability_matrix`` has to be
+    used as it is, wherever the model is in the expression.
+    """
+    class CustomShift(models.Shift):
+        def _calculate_separability_matrix(self):
+            return np.array([[0]])
+
+    custom = CustomShift(1)
+    assert_array_equal(separability_matrix(custom & sh1), [[False, False],
+                                                           [False, True]])
+    assert_array_equal(separability_matrix(sh1 & custom), [[True, False],
+                                                           [False, False]])
+    assert_array_equal(separability_matrix(sh1 & (sh2 & custom)),
+                       np.diag([True, True, False]))
+EOF
+cat > docs/changes/modeling/12907.bugfix.rst <<'EOF'
+Fixed ``astropy.modeling.separable.separability_matrix`` and
+``astropy.modeling.separable.is_separable`` for nested compound models, where a
+compound model used as the right-hand operand of the ``&`` operator was always
+treated as non-separable.
+EOF
+echo "=== WITH FIX ===" && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider 2>&1 | tail -2
+git stash push -q astropy/modeling/separable.py
+echo "=== BASELINE: the new custom-matrix test ===" && python -m pytest astropy/modeling/tests/test_separable.py -q -p no:cacheprovider -k custom_separability_matrix 2>&1 | tail -2
+git stash pop -q; git status --short
+$ cd /testbed && python - <<'EOF'
+import sys
+sys.path.insert(0, '/tmp/scratch')
+import random
+import numpy as np
+from minimal import probe_exact
+import astropy.modeling.tests.test_separable as T
+from astropy.modeling.separable import separability_matrix, is_separable
+
+# The mixing models in this module are Rotation2D (genuinely mixing) and Polynomial2D
+# (needs non-zero coefficients to be numerically sensitive); give p2/p22 real coefficients.
+for p in (T.p2, T.p22):
+    for name in p.param_names:
+        setattr(p, name, 0.7)
+
+rng = random.Random(0)
+bad = 0
+for key, (mdl, (exp_sep, exp_mat)) in T.compound_models.items():
+    probe = probe_exact(mdl, rng, npts=12)
+    ok_mat = probe.shape == exp_mat.shape and (probe == exp_mat).all()
+    ok_sep = (probe.sum(1) == 1).tolist() == exp_sep.tolist() if probe.shape == exp_mat.shape else False
+    # is_separable is defined on the *path counts*, not on the 0/1 matrix, so only check it
+    # against the code (already done by the test); here we validate the matrix against numerics.
+    print(f"{key:5s} matrix matches numeric ground truth: {ok_mat}")
+    bad += (not ok_mat)
+print("bad:", bad)
+EOF
+$ cd /testbed && echo "=== full astropy/modeling suite: baseline (source reverted, new tests kept out) vs fixed ===" 
+python -m pytest astropy/modeling -q -p no:cacheprovider 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed" | sed -E 's/ in [0-9.]+s//' | sort > /tmp/scratch/final_fix.txt
+tail -1 /tmp/scratch/final_fix.txt; grep -c "" /tmp/scratch/final_fix.txt
+# baseline failure set (computed earlier, same environment) must be a subset-equal of the fixed one
+sed -E 's/ in [0-9.]+s//' /tmp/scratch/baseline.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/scratch/b_set.txt
+grep -E "^(FAILED|ERROR)" /tmp/scratch/final_fix.txt | sort > /tmp/scratch/f_set.txt
+diff /tmp/scratch/b_set.txt /tmp/scratch/f_set.txt && echo "failure/error sets IDENTICAL to the pre-change baseline (all pre-existing)"
+grep -E "passed|failed" /tmp/scratch/final_fix.txt
+$ cd /testbed && git diff astropy/modeling/separable.py && echo "=============== changelog ===============" && cat docs/changes/modeling/12907.bugfix.rst && echo "=============== test diff (stat) ===============" && git diff --stat && git status --short && rm -rf /tmp/scratch && echo "(scratch files removed)"

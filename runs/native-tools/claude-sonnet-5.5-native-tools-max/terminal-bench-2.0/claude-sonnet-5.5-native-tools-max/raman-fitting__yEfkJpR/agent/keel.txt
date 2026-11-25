@@ -1,0 +1,321 @@
+$ pwd && ls -la && echo "-----" && ls -la /app 2>/dev/null
+$ which python python3 pip pip3; python3 --version; python3 -c "import numpy, scipy; print(numpy.__version__, scipy.__version__)"; python3 -c "import matplotlib; print(matplotlib.__version__)"; python3 -c "import pandas; print(pandas.__version__)"; python3 -c "import lmfit; print(lmfit.__version__)"
+$ cd /app && file graphene.dat && wc -l graphene.dat && echo "----- HEAD -----" && head -n 40 graphene.dat | cat -A | cut -c1-200
+$ cd /app && echo "----- TAIL -----" && tail -n 20 graphene.dat | cat -A | cut -c1-200
+$ cd /app && wc -l graphene.dat && echo "----- HEAD -----" && head -n 40 graphene.dat | cat -A | cut -c1-200
+$ cd /app && head -c 600 graphene.dat | od -c | head -n 30
+$ cd /app && (timeout 60 pip install numpy scipy matplotlib 2>&1 | tail -n 5); echo "pip exit: $?"
+$ cd /app && cat > /tmp/load.py << 'EOF'
+import numpy as np
+
+def load(path="/app/graphene.dat"):
+    xs, ys = [], []
+    with open(path, "r", newline="") as f:
+        for ln, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                raise ValueError(f"line {ln}: unexpected format: {line!r}")
+            xs.append(float(parts[0].replace(",", ".")))
+            ys.append(float(parts[1].replace(",", ".")))
+    return np.array(xs), np.array(ys)
+
+if __name__ == "__main__":
+    x, y = load()
+    print("N =", len(x))
+    print("x: min %.6f max %.6f" % (x.min(), x.max()))
+    print("y: min %.6f max %.6f" % (y.min(), y.max()))
+    dx = np.diff(x)
+    print("monotonic decreasing:", np.all(dx < 0), " monotonic increasing:", np.all(dx > 0))
+    print("dx: min %.6f max %.6f" % (dx.min(), dx.max()))
+    print("NaNs:", np.isnan(x).sum(), np.isnan(y).sum())
+    print("duplicates in x:", len(x) - len(np.unique(x)))
+EOF
+python3 /tmp/load.py
+$ cd /app && cat > /tmp/explore.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from load import load
+
+x, y = load()
+idx = np.arange(len(x))
+
+fig, ax = plt.subplots(4, 1, figsize=(14, 16))
+ax[0].plot(x, y, lw=0.6)
+ax[0].set_title("y vs x (raw)")
+ax[0].set_xlabel("x")
+
+ax[1].plot(idx, y, lw=0.6)
+ax[1].set_title("y vs index")
+
+ax[2].plot(idx, x, lw=0.6)
+ax[2].set_title("x vs index")
+
+ax[3].semilogy(idx, -np.diff(x, prepend=x[0]), lw=0.6)
+ax[3].set_title("|dx| vs index (log)")
+plt.tight_layout()
+plt.savefig("/tmp/overview.png", dpi=70)
+print("saved")
+
+# print a coarse view of the data
+step = 100
+print("idx      x            y")
+for i in range(0, len(x), step):
+    print(f"{i:5d} {x[i]:12.4f} {y[i]:12.2f}")
+EOF
+python3 /tmp/explore.py
+$ cd /app && cat > /tmp/xaxis.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+i = np.arange(len(x))
+
+# Hypothesis: x = A / (lambda-like linear function of index)  ->  1/x linear in index
+inv = 1.0 / x
+p = np.polyfit(i, inv, 1)
+res = inv - np.polyval(p, i)
+print("1/x vs index  linear fit: slope=%.6e intercept=%.6e  max|res|=%.3e  rel=%.3e" % (p[0], p[1], np.abs(res).max(), np.abs(res).max()/inv.mean()))
+
+# Try 1e7/x  (nm if x is cm^-1)
+lam = 1e7 / x
+p2 = np.polyfit(i, lam, 1)
+res2 = lam - np.polyval(p2, i)
+print("lambda(nm)=1e7/x vs index: slope=%.6f nm/pt intercept=%.4f nm  max|res|=%.4e nm" % (p2[0], p2[1], np.abs(res2).max()))
+print("lambda range: %.3f nm .. %.3f nm" % (lam.min(), lam.max()))
+
+# also check polynomial of higher degree
+for deg in (1, 2, 3):
+    pp = np.polyfit(i, lam, deg)
+    r = lam - np.polyval(pp, i)
+    print("deg", deg, "max|res| nm:", np.abs(r).max(), " rms:", r.std())
+EOF
+python3 /tmp/xaxis.py
+$ cd /app && cat > /tmp/explore2.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+n = len(x)
+
+# crude text plot of y vs index, binned (mean over bins of 25 points)
+bins = 25
+print("bin_start_idx  x_start     x_end      mean_y     bar")
+ymax = y.max()
+for s in range(0, n, bins):
+    e = min(s + bins, n)
+    m = y[s:e].mean()
+    bar = "#" * int(60 * m / ymax)
+    print(f"{s:5d}  {x[s]:10.2f} {x[e-1]:10.2f} {m:10.1f} {bar}")
+EOF
+python3 /tmp/explore2.py
+$ cd /app && cat > /tmp/xaxis2.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from scipy.optimize import least_squares
+from load import load
+
+x, y = load()
+i = np.arange(len(x), dtype=float)
+
+# Model A: x = P + R/(S + i)
+def fA(p, i): return p[0] + p[1] / (p[2] + i)
+def rA(p): return fA(p, i) - x
+
+# initial guess: from ends
+best = None
+for S0 in (10, 50, 100, 300, 1000, 3000):
+    for P0 in (-2000, 0, 1000):
+        R0 = (x[0] - P0) * S0
+        try:
+            r = least_squares(rA, [P0, R0, S0], x_scale=[1000, 1e6, 100], max_nfev=5000)
+        except Exception as e:
+            continue
+        if best is None or r.cost < best.cost:
+            best = r
+print("Model A  x = P + R/(S+i):", best.x, " rms resid:", np.sqrt(2*best.cost/len(x)), " max|res|:", np.abs(best.fun).max())
+
+# look at dx structure
+dx = np.diff(x)
+print()
+print("dx at selected indices:")
+for k in (0, 1, 2, 5, 10, 50, 100, 200, 500, 1000, 2000, 3000, 3500, 3563):
+    print(k, dx[k])
+EOF
+python3 /tmp/xaxis2.py
+$ cd /app && cat > /tmp/peaks1.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+
+def show(a, b):
+    print(f"--- idx {a}..{b} ---")
+    ymax = y[a:b].max()
+    for k in range(a, b):
+        bar = "#" * int(70 * y[k] / ymax)
+        print(f"{k:5d} {x[k]:11.3f} {y[k]:11.1f} {bar}")
+
+show(95, 135)
+EOF
+python3 /tmp/peaks1.py
+$ cd /app && cat > /tmp/peaks2.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+
+def show(a, b):
+    print(f"--- idx {a}..{b} ---")
+    ymax = y[a:b].max()
+    for k in range(a, b):
+        bar = "#" * int(70 * y[k] / ymax)
+        print(f"{k:5d} {x[k]:11.3f} {y[k]:11.1f} {bar}")
+
+show(262, 312)
+show(538, 566)
+show(1040, 1100)
+EOF
+python3 /tmp/peaks2.py
+$ cd /app && cat > /tmp/xaxis3.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+i = np.arange(len(x), dtype=float)
+
+# Hypothesis: s = 1e7/x_file is a Raman shift (cm^-1).
+s = 1e7 / x
+print("s = 1e7/x range: %.3f .. %.3f cm^-1" % (s.min(), s.max()))
+print("s at peaks: ", [round(1e7/v, 1) for v in (19300, 10500, 6330, 3750)])
+
+# If the spectrometer is linear in wavelength: lambda(i) = l0 + k*i, and s = 1e7*(1/lL - 1/lambda)
+# then lambda = 1/(1/lL - s/1e7) must be linear in i for the right laser wavelength lL.
+best = []
+for lL in np.arange(300.0, 1200.0, 0.5):
+    inv = 1.0/lL - s/1e7
+    if np.any(inv <= 0):
+        continue
+    lam = 1.0/inv
+    p = np.polyfit(i, lam, 1)
+    r = lam - np.polyval(p, i)
+    best.append((r.std(), lL, p[0], p[1]))
+best.sort()
+print("\nbest linear-in-wavelength laser candidates (rms resid of lambda in nm):")
+for b in best[:8]:
+    print("  rms=%.4f nm  lL=%.1f nm  k=%.6f nm/pt  l0=%.4f nm" % b)
+
+# Also test s linear in index (i.e. spectrometer linear in wavenumber)
+p = np.polyfit(i, s, 1)
+print("\nlinear s(i): rms resid = %.3f cm^-1" % (s - np.polyval(p, i)).std())
+EOF
+python3 /tmp/xaxis3.py
+$ cd /app && cat > /tmp/xaxis4.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+i = np.arange(len(x), dtype=float)
+s = 1e7 / x          # candidate Raman shift axis (cm^-1)
+
+# local derivative ds/di (central differences), versus s
+g = np.gradient(s, i)
+print("ds/di at selected indices (cm^-1 per point):")
+for k in (0, 100, 500, 1000, 1500, 2000, 2500, 3000, 3564):
+    print(f"  i={k:5d}  s={s[k]:9.3f}  ds/di={g[k]:.5f}")
+
+# For a grating spectrometer linear in wavelength: ds/di = c*(nu_L - s)^2 -> sqrt(ds/di) linear in s
+sg = np.sqrt(g)
+p = np.polyfit(s, sg, 1)
+nuL = -p[1] / p[0]
+print("\nsqrt(ds/di) vs s linear fit: slope=%.3e intercept=%.4f -> implied nu_L=%.1f cm^-1 (lambda_L=%.2f nm)" % (p[0], p[1], nuL, 1e7/nuL if nuL>0 else float('nan')))
+res = sg - np.polyval(p, s)
+print("  rms residual of sqrt(ds/di): %.5f  (relative %.3e)" % (res.std(), res.std()/sg.mean()))
+
+# rms of lambda linearity for a few well known laser lines
+print("\nlinearity of absolute wavelength lambda(i) for typical laser lines:")
+for lL in (488.0, 514.5, 532.0, 561.0, 633.0, 647.0, 660.0, 671.0, 679.0, 780.0, 785.0, 830.0, 1064.0):
+    nu = 1e7 / lL
+    lam = 1e7 / (nu - s)
+    if np.any(nu - s <= 0):
+        print(f"  lambda_L={lL:7.1f} nm : invalid (s exceeds nu_L)")
+        continue
+    pp = np.polyfit(i, lam, 1)
+    r = lam - np.polyval(pp, i)
+    pp3 = np.polyfit(i, lam, 3)
+    r3 = lam - np.polyval(pp3, i)
+    print(f"  lambda_L={lL:7.1f} nm : lambda range {lam.min():8.2f}..{lam.max():8.2f}  lin rms={r.std():.4f} nm   cubic rms={r3.std():.5f} nm")
+EOF
+python3 /tmp/xaxis4.py
+$ cd /app && cat > /tmp/si_check.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from scipy.optimize import curve_fit
+from load import load
+
+x, y = load()
+s = 1e7 / x
+
+def lor(s, x0, g, a, c):
+    return c + a * g**2 / ((s - x0)**2 + g**2)
+
+# Si first-order peak: saturated plateau at ~79000. Exclude saturated points and fit the wings.
+sat = y > 0.95 * y.max()
+print("saturated points:", sat.sum(), " at s =", np.round(s[sat], 2))
+
+m = (s > 440) & (s < 600) & (~sat)
+p, cov = curve_fit(lor, s[m], y[m], p0=[520, 8, 80000, 15000], maxfev=20000)
+print("Si wing fit (cm^-1 axis, 1e7/x): x0=%.3f gamma=%.3f amp=%.1f off=%.1f" % tuple(p))
+print("   (reference Si phonon: 520.5 cm^-1)")
+
+# Same thing fitted directly in raw x units (not a Lorentzian there, just for the centre)
+xm = (x > 1e7/600) & (x < 1e7/440) & (~sat)
+def lor_x(x, x0, g, a, c): return c + a*g**2/((x-x0)**2+g**2)
+px, _ = curve_fit(lor_x, x[xm], y[xm], p0=[19200, 400, 80000, 15000], maxfev=20000)
+print("Si wing fit in raw-x units: x0=%.2f -> 1e7/x0 = %.3f cm^-1" % (px[0], 1e7/px[0]))
+EOF
+python3 /tmp/si_check.py
+$ cd /app && cat > /tmp/view_s.py << 'EOF'
+import sys
+sys.path.insert(0, "/tmp")
+import numpy as np
+from load import load
+
+x, y = load()
+s = 1e7 / x
+# sort ascending in s
+o = np.argsort(s)
+s, y = s[o], y[o]
+
+def show(lo, hi, step=1):
+    m = (s >= lo) & (s <= hi)
+    ss, yy = s[m], y[m]
+    ymin, ymax = yy.min(), yy.max()
+    print(f"--- s in [{lo},{hi}]  n={m.sum()}  y range {ymin:.0f}..{ymax:.0f} ---")
+    for k in range(0, len(ss), step):
+        bar = "#" * int(60 * (yy[k]-ymin) / (ymax-ymin))
+        print(f"{ss[k]:9.2f} {yy[k]:9.1f} {bar}")
+
+show(1380, 1800, 2)
+EOF
+python3 /tmp/view_s.py

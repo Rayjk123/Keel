@@ -1,0 +1,86 @@
+$ pwd && echo "---" && ls -la && echo "---" && find . -type f -not -path '*/.git/*' | head -200
+$ find / -name "TwelveDays*" -not -path '*/proc/*' 2>/dev/null; echo "exit: $?"
+> read /app/src/main/java/TwelveDays.java
+> read /app/build.gradle
+$ cd /app && which java javac gradle 2>&1; echo "---java---"; java -version 2>&1; echo "---javac---"; javac -version 2>&1; echo "---gradle props---"; cat gradle/wrapper/gradle-wrapper.properties; echo; echo "---gradle cache---"; ls -la ~/.gradle 2>&1 | head -20; echo "---m2---"; ls -la ~/.m2 2>&1 | head -5; echo "---JAVA_HOME: $JAVA_HOME"
+$ mkdir -p /tmp/twelve && cp /app/src/main/java/TwelveDays.java /tmp/twelve/TwelveDays.java.orig && ls -la /tmp/twelve && md5sum /app/src/main/java/TwelveDays.java /tmp/twelve/TwelveDays.java.orig
+> write /tmp/twelve/expected.txt
+> write /tmp/twelve/Harness.java
+$ cd /tmp/twelve && echo "--- non-ASCII chars in fixture (expect none) ---" && (grep -nP '[^\x00-\x7F]' expected.txt || echo none) && echo "--- line count ---" && wc -l expected.txt && echo "--- blank line numbers (expect 2 4 6 ... 22) ---" && grep -n '^$' expected.txt | cut -d: -f1 | tr '\n' ' ' && echo && echo "--- harness vs ORIGINAL stub (expect failure) ---" && mkdir -p stub-build && javac -d stub-build /app/src/main/java/TwelveDays.java Harness.java && java -cp stub-build Harness expected.txt 2>&1 | head -8; echo "exit=${PIPESTATUS[0]}"
+> write /app/src/main/java/TwelveDays.java
+$ cd /tmp/twelve && rm -rf impl-build && mkdir impl-build && echo "--- compile project file (javac -Xlint:all) ---" && javac -Xlint:all -d impl-build /app/src/main/java/TwelveDays.java && echo "compile OK" && echo "--- run harness against new implementation ---" && javac -d impl-build Harness.java && java -cp impl-build Harness expected.txt; echo "harness exit=$?"
+$ cd /app && echo "--- git status (if repo) ---" && (git status --short 2>&1 | head -20 || true) && echo "--- files under /app (excluding gradle wrapper jar) ---" && find /app -type f -not -name 'gradle-wrapper.jar' | sort && echo "--- diff vs original ---" && diff -u /tmp/twelve/TwelveDays.java.orig /app/src/main/java/TwelveDays.java | head -20; echo "(diff exit: $?)"
+$ cd /tmp/twelve && rm -rf impl-build && mkdir impl-build && javac -Xlint:all -d impl-build /app/src/main/java/TwelveDays.java && javac -cp impl-build -d impl-build Harness.java && java -cp impl-build Harness expected.txt; echo "harness exit=$?"
+$ cd /tmp/twelve && command -v python3 >/dev/null && echo "python3 available" || echo "python3 MISSING"; cat > mutate.py <<'PYEOF'
+import os, shutil, subprocess, sys
+
+SRC = "/app/src/main/java/TwelveDays.java"
+original = open(SRC, encoding="utf-8").read()
+
+# (description, exact text to find, replacement). Each find must occur exactly once.
+MUTATIONS = [
+    ("drop 'and ' before final gift",
+     r'sb.append("and ");', r'sb.append("");'),
+    ("no blank line between verses",
+     r"sb.append('\n'); // blank line between verses", r'sb.append("");'),
+    ("verse missing trailing newline",
+     r'.append(GIFTS[0]).append(".\n");', r'.append(GIFTS[0]).append(".");'),
+    ("typo in ordinal 'twelfth'",
+     r'"twelfth"', r'"twelveth"'),
+    ("gifts listed in wrong order",
+     r'for (int day = verseNumber; day > 1; day--) {', r'for (int day = 2; day <= verseNumber; day++) {'),
+    ("sing() drops last verse",
+     r'return verses(1, GIFTS.length);', r'return verses(1, GIFTS.length - 1);'),
+    ("verses() off-by-one at end",
+     r'for (int verseNumber = startVerse; verseNumber <= endVerse; verseNumber++) {',
+     r'for (int verseNumber = startVerse; verseNumber < endVerse; verseNumber++) {'),
+]
+
+survivors = 0
+for desc, old, new in MUTATIONS:
+    count = original.count(old)
+    if count != 1:
+        print(f"[BAD MUTATION SPEC] {desc}: pattern found {count} times")
+        survivors += 1
+        continue
+    mutated = original.replace(old, new)
+    d = f"/tmp/twelve/mut"
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d + "/src")
+    os.makedirs(d + "/out")
+    with open(d + "/src/TwelveDays.java", "w", encoding="utf-8") as f:
+        f.write(mutated)
+    c = subprocess.run(["javac", "-d", d + "/out", d + "/src/TwelveDays.java"],
+                       capture_output=True, text=True)
+    if c.returncode != 0:
+        print(f"[compile-fail] {desc}: {c.stderr.strip().splitlines()[0]}")
+        continue
+    subprocess.run(["javac", "-cp", d + "/out", "-d", d + "/out", "/tmp/twelve/Harness.java"], check=True)
+    r = subprocess.run(["java", "-cp", d + "/out", "Harness", "/tmp/twelve/expected.txt"],
+                       capture_output=True, text=True)
+    last = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "(no output)"
+    caught = r.returncode != 0
+    print(f"[{'CAUGHT' if caught else 'MISSED'}] {desc}: exit={r.returncode} -> {last}")
+    if not caught:
+        survivors += 1
+
+print(f"\nmutations missed or invalid: {survivors} of {len(MUTATIONS)}")
+PYEOF
+python3 mutate.py; echo "mutate exit=$?"
+$ echo "--- junit/assertj jars on system? ---"; find / \( -name 'junit*.jar' -o -name 'assertj*.jar' -o -name 'opentest4j*.jar' \) -not -path '*/proc/*' 2>/dev/null | head; echo "(end of jar search)"; echo "--- network to Gradle/Maven (5s timeout) ---"; (curl -sS -o /dev/null -m 5 -w '%{http_code}\n' https://services.gradle.org/distributions/ 2>&1 || echo "no network") ; echo "--- gradle wrapper jar present? ---"; ls -la /app/gradle/wrapper/
+$ cd /tmp/twelve && rm -rf final && mkdir final && echo "--- compile at --release 8 (project uses no newer APIs) ---" && javac --release 8 -Xlint:all -d final /app/src/main/java/TwelveDays.java && echo "release-8 compile OK" && javac -cp final -d final Harness.java && java -cp final Harness expected.txt; echo "harness exit=$?"; echo "--- spot-check a few outputs ---"; cat > Peek.java <<'EOF'
+public class Peek {
+    public static void main(String[] a) {
+        TwelveDays t = new TwelveDays();
+        System.out.print("[verse(1)]\n" + t.verse(1));
+        System.out.print("[verse(12)]\n" + t.verse(12));
+        System.out.println("[sing() ends with] " + t.sing().substring(t.sing().length() - 40).replace("\n", "\\n"));
+        try { t.verse(13); } catch (IllegalArgumentException e) { System.out.println("[verse(13)] IAE: " + e.getMessage()); }
+        try { t.verses(5, 4); } catch (IllegalArgumentException e) { System.out.println("[verses(5,4)] IAE: " + e.getMessage()); }
+    }
+}
+EOF
+javac -cp final -d final Peek.java && java -cp final Peek; echo "--- /app contents (no stray files) ---"; find /app -type f -newer /app/build.gradle | sort; echo "--- any .class files or build dirs left in /app? ---"; find /app \( -name '*.class' -o -name 'build' -type d \) 2>/dev/null; echo "(none if blank above)"
+The task is finished. `TwelveDays.java` now implements `verse`, `verses` and `sing` with their original signatures. It compiles cleanly with `javac -Xlint:all`. A standalone harness outside the project checks all 12 verses, every verse range, `sing()`, and the error cases, and all 99 checks pass. Seven deliberate bugs were each caught.
+
+I did not run `./gradlew test`. The repo has no test sources, and running Gradle would download Gradle, JUnit and AssertJ, which the no-new-packages rule rules out. The Gradle/JUnit path is therefore unverified. Out-of-range verse numbers throw `IllegalArgumentException`; the stub didn't specify this. No other project files were changed, and `.oracle/` was left alone.

@@ -1,0 +1,99 @@
+$ pwd; ls -la; printf '\nIdentity: '; id; printf '\nNginx: '; command -v nginx || true; printf '\nPackage manager: '; command -v apt-get || command -v dnf || command -v yum || command -v apk || true; printf '\nInit: '; ps -p 1 -o comm=; printf '\nNginx directory:\n'; ls -la /etc/nginx 2>/dev/null || true; printf '\nPort 8080:\n'; if command -v ss >/dev/null 2>&1; then ss -ltnp '( sport = :8080 )'; else netstat -ltnp 2>/dev/null | grep ':8080 ' || true; fi; printf '\nService commands: '; command -v systemctl || true; command -v service || true
+> read /etc/os-release
+$ printf 'Package state:\n'; dpkg-query -W nginx nginx-common 2>/dev/null || true; printf '\nPackage sources:\n'; ls -la /etc/apt/sources.list.d /var/lib/apt/lists 2>/dev/null; printf '\nService policy:\n'; if test -e /usr/sbin/policy-rc.d; then cat /usr/sbin/policy-rc.d; else printf 'not configured\n'; fi; printf '\nHTTP clients:\n'; command -v curl || command -v wget || command -v python3 || true; printf '\nNetwork tools:\n'; command -v ss || command -v netstat || true
+$ printf 'OS filesystem /proc/1:\n'; ls -ld /proc/1 /run /var/www/html /var/log 2>/dev/null || true; printf '\nExisting webserver processes:\n'; pgrep -a nginx 2>/dev/null || true; printf '\nDNS:\n'; cat /etc/resolv.conf
+$ export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y nginx
+> read /etc/nginx/nginx.conf
+$ printf 'Installed Nginx configuration:\n'; ls -la /etc/nginx/conf.d /etc/nginx/sites-enabled /var/www/html /var/log/nginx; printf '\nNginx build and modules:\n'; nginx -V 2>&1 | head -n 3; printf '\nPort 8080 after install:\n'; ss -ltnp '( sport = :8080 )'
+> read /etc/nginx/sites-available/default
+$ printf 'CPU availability: '; nproc; printf 'Cgroup cpu.max: '; cat /sys/fs/cgroup/cpu.max 2>/dev/null || true; printf 'Cgroup pids.max: '; cat /sys/fs/cgroup/pids.max 2>/dev/null || true; printf 'Cgroup pids.current: '; cat /sys/fs/cgroup/pids.current 2>/dev/null || true; printf 'IPv6 disabled: '; cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || true; printf '\nNginx init start implementation:\n'; grep -A 15 'start)' /etc/init.d/nginx | head -n 17; printf '\nPID 1 cmdline: '; tr '\0' ' ' < /proc/1/cmdline; printf '\n'
+> patch /etc/nginx/nginx.conf, /etc/nginx/conf.d/benchmark-site.conf, /var/www/html/index.html, /var/www/html/404.html
+$ set -eu
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+nginx
+printf '\nGET / on localhost:8080:\n'
+body=$(curl --noproxy '*' -fsS -A 'Benchmark-Verification/1.0' http://localhost:8080/)
+printf '%s\n' "$body"
+test "$body" = 'Welcome to the benchmark webserver'
+printf '\nMissing page response:\n'
+response_file=$(mktemp)
+status=$(curl --noproxy '*' -sS -A 'Benchmark-NotFound/1.0' -o "$response_file" -w '%{http_code}' http://localhost:8080/does-not-exist)
+printf 'HTTP %s\n' "$status"
+cat "$response_file"
+test "$status" = 404
+test "$(cat "$response_file")" = 'Page not found - Please check your URL'
+rm -f "$response_file"
+printf '\nListening socket:\n'
+ss -ltnp '( sport = :8080 )'
+printf '\nAccess log: /var/log/nginx/benchmark-access.log\n'
+tail -n 2 /var/log/nginx/benchmark-access.log
+$ printf 'HTTP load-test tools:\n'; command -v python3 || true; command -v xargs || true; command -v ab || true; printf '\nCPU affinity visible to nginx:\n'; grep -E '^(Cpus_allowed_list|Threads):' /proc/$(cat /run/nginx.pid)/status; printf '\nError log permissions:\n'; ls -l /var/log/nginx/benchmark-{access,error}.log
+$ printf 'Compiled benchmark configuration:\n'; nginx -T 2>/dev/null | grep -nE 'worker_processes|log_format benchmark|limit_req_zone|listen 8080|access_log /var/log/nginx/benchmark|error_log /var/log/nginx/benchmark|limit_req zone|limit_req_status|error_page 404|root /var/www/html|index index.html'
+$ set -eu
+chown www-data:adm /var/log/nginx/benchmark-access.log /var/log/nginx/benchmark-error.log
+chmod 0640 /var/log/nginx/benchmark-access.log /var/log/nginx/benchmark-error.log
+python3 - <<'PY'
+import http.client
+import re
+import time
+from collections import Counter
+
+
+def connection(source):
+    return http.client.HTTPConnection('127.0.0.1', 8080, timeout=5,
+                                      source_address=(source, 0))
+
+
+def get(conn, path, agent):
+    conn.request('GET', path, headers={'User-Agent': agent})
+    response = conn.getresponse()
+    body = response.read()
+    return response.status, body
+
+
+# A fresh IP may send one immediate request plus a burst of ten.
+limited = connection('127.0.0.2')
+start = time.monotonic()
+statuses = [get(limited, f'/?rate-test={i}', 'benchmark-rate-test')[0]
+            for i in range(30)]
+elapsed = time.monotonic() - start
+assert statuses[:11] == [200] * 11, statuses
+assert 429 in statuses[11:], statuses
+print(f'Burst test from 127.0.0.2: {dict(Counter(statuses))} in {elapsed:.3f}s')
+
+# A different source IP should not inherit the first IP's exhausted limit.
+independent = connection('127.0.0.3')
+status, body = get(independent, '/', 'benchmark-independent-ip')
+assert status == 200 and body == b'Welcome to the benchmark webserver\n'
+print('Independent IP test: HTTP 200')
+
+# Allow the rate-limit bucket to drain and confirm the first IP recovers.
+time.sleep(1.2)
+status, _ = get(limited, '/', 'benchmark-rate-recovery')
+assert status == 200, status
+print('Rate-limit recovery: HTTP 200')
+limited.close()
+independent.close()
+
+# Verify the configured log records the fields and safely escapes quotes in agents.
+logging = connection('127.0.0.4')
+status, _ = get(logging, '/?logging-check=1', 'benchmark-"quote"')
+logging.close()
+assert status == 200, status
+with open('/var/log/nginx/benchmark-access.log', encoding='utf-8') as f:
+    access_log = f.read()
+pattern = (r'127\.0\.0\.4 - \[[^]]+\] "GET /\?logging-check=1 HTTP/1\.1" '
+           r'200 \d+ "benchmark-\\x22quote\\x22"')
+assert re.search(pattern, access_log), access_log[-1000:]
+with open('/var/log/nginx/benchmark-error.log', encoding='utf-8') as f:
+    error_log = f.read()
+assert 'limiting requests' in error_log and 'benchmark_per_ip' in error_log
+print('Access log: timestamp, method, status and safely quoted user agent verified')
+print('Error log: rate-limit events recorded')
+PY
+printf '\nLog locations and permissions:\n'
+ls -l /var/log/nginx/benchmark-{access,error}.log
+printf '\nFinal local response:\n'
+curl --noproxy '*' -fsS http://localhost:8080/
+Nginx is running on port 8080 with custom pages, request logging, and per-IP rate limiting. The configuration and server responses were verified.

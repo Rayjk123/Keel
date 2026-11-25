@@ -1,0 +1,98 @@
+$ pwd; ls -la; git status --short; command -v pdflatex
+> read main.tex
+> read input.tex
+> read synonyms.txt
+$ build=$(mktemp -d /tmp/tex-layout.XXXXXX); printf '%s\n' "$build"; cp input.tex main.tex synonyms.txt "$build/"; cd "$build" && pdflatex -interaction=nonstopmode -halt-on-error main.tex && grep -in -A2 'overfull' main.log
+$ sed -n '37,110p' /tmp/tex-layout.3Nvw1z/main.log; sha256sum main.tex synonyms.txt input.tex; python3 --version; command -v pdftotext || true
+$ for bin in perl ruby node lua texlua awk cc pdftotext diff cmp; do command -v "$bin" || true; done; locale
+$ cd /tmp/tex-layout.3Nvw1z && sha256sum main.tex input.tex synonyms.txt && cat > try-synonyms.cjs <<'JS'
+'use strict';
+const {readFileSync, writeFileSync} = require('fs');
+const {execFileSync} = require('child_process');
+const paragraphs = readFileSync('input.tex','utf8').trimEnd().split('\n\n');
+const families = readFileSync('synonyms.txt','utf8').trimEnd().split('\n').map(l=>l.split(', '));
+const main = readFileSync('main.tex','utf8');
+const set = new Set();
+const arg = process.argv[2];
+const number = Number(arg);
+const count = Number(process.argv[3] || 1);
+const window = Number(process.argv[4] || Infinity);
+const text = paragraphs[(number-1)/2];
+const tokens = Array.from(text.matchAll(/\b[A-Za-z]+\b/g), m => ({orig:m[0], index:m.index, end:m.index+m[0].length, words:[...new Set(families.filter(f=>f.includes(m[0])).flat())].filter(w=>w!==m[0])}));
+let candidates = [];
+function addCases(prefix, next, edits, remaining) {
+  if (remaining === 0) {
+    const input = prefix + text.slice(edits.at(-1)?.end ?? 0);
+    candidates.push({ edits, input });
+    return;
+  }
+  for (let i = next; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if(edits.length && tok.index - edits.at(-1).index > window) break;
+    for (const word of tok.words) {
+      addCases(prefix + text.slice(edits.at(-1)?.end ?? 0, tok.index) + word, i+1, [...edits,{orig:tok.orig,index:tok.index,end:tok.end,word}], remaining-1);
+    }
+  }
+}
+addCases('', 0, [], count);
+candidates.unshift({edits:[],input:text});
+console.error(`${candidates.length} variations including baseline for input.tex:${number}`);
+const keep = [];
+for(let begin=0; begin<candidates.length; begin+=2000) {
+  const batch = candidates.slice(begin, begin+2000);
+  const latex = main.replace('\\input{input.tex}', () => batch.map(({input},i) => `\\typeout{CANDIDATE:${i}}\n${input}\n\n`).join(''));
+  const job = `trial${number}`;
+  writeFileSync(job+'.tex', latex);
+  execFileSync('pdflatex', ['-interaction=nonstopmode','-halt-on-error','-draftmode',job+'.tex'],{stdio:'ignore'});
+  const outcomes = readFileSync(job+'.log','utf8').split(/CANDIDATE:\d+\n/).slice(1);
+  if(outcomes.length !== batch.length) throw Error('Incomplete log');
+  for(let i=0;i<batch.length;i++) {
+    const o = outcomes[i];
+    const over = [...o.matchAll(/Overfull \\hbox \(([0-9.]+)pt too wide\)/g)].map(x=>Number(x[1]));
+    const under = [...o.matchAll(/Underfull \\hbox \(badness (\d+)\)/g)].map(x=>Number(x[1]));
+    const {input,edits} = batch[i];
+    if(!over.length) keep.push({edits:edits.map(x=>`${x.orig}@${x.index} -> ${x.word}`), under, input});
+    if(!begin && !i) console.error(`baseline: over ${over}, under ${under}`);
+  }
+}
+console.error(`${keep.length} variations pass`);
+writeFileSync(`passing${number}-${count}.json`, JSON.stringify(keep,null,2));
+for (const {edits,under} of keep.slice(0,75)) console.log(edits.join('; '), under.join(','));
+JS
+for line in 5 7 13 19; do node try-synonyms.cjs "$line" > "passing$line-1.txt" & done; wait; for line in 5 7 13 19; do printf '\n== Input line %s ==\n' "$line"; cat "passing$line-1.txt"; done
+$ cd /tmp/tex-layout.3Nvw1z && node try-synonyms.cjs 7 2 > passing7-2.txt && cat passing7-2.txt
+$ cd /tmp/tex-layout.3Nvw1z && cp try-synonyms.cjs try-improvements.cjs && perl -0pi -e 's/if\(!over.length\) keep.push\((.+)\);/keep.push({ ...$1, over, sum: over.reduce((a,b)=>a+b,0), overLines: [...o.matchAll(\/Overfull \\\\hbox .*\\n(.*)\/g)].map(x=>x[1]) });/; s/console.error\(`\$\{keep.length\} variations pass`\);/keep.sort((a,b)=>a.over.length-b.over.length || a.sum-b.sum);/; s/JSON.stringify\(keep,null,2\)/JSON.stringify(keep.slice(0,5000),null,2)/; s/\{edits,under\}/\{edits,over,overLines\}/; s/under.join\(\x27,\x27\)/over.join(\x27,\x27), overLines.join(\x27; \x27)/; s/`passing/`scored/' try-improvements.cjs; tail -22 try-improvements.cjs; node try-improvements.cjs 7 2 > scored7-2.txt && head -30 scored7-2.txt
+$ cd /tmp/tex-layout.3Nvw1z && sed -n '1,100p' scored7-2.txt; du -h scored7-2.json; cp try-synonyms.cjs try-triples.cjs && sed -i '/^addCases(.*count);$/c\const scored = JSON.parse(readFileSync(`scored${number}-2.json`, "utf8"));\nconst top = scored.slice(0, count);\nfor (const [{index,end,orig,words}, j] of tokens.map((t,i) => [t,i])) {\n  for (const word of words) for (const pair of top) {\n    const changes = pair.edits.map(s=>{const [,orig,index,word] = s.match(/(.+)@(\\d+) -> (.+)/); return {orig, index:Number(index), end:Number(index)+orig.length, word}; });\n    if (changes.some(e=>e.index===index)) continue;\n    changes.push({orig, index, end, word});\n    changes.sort((a,b)=>a.index-b.index);\n    const key = changes.map(x=>x.index+":"+x.word).join(";");\n    if (set.has(key)) continue;\n    set.add(key);\n    const input = changes.reduceRight((t,e)=> t.slice(0,e.index)+e.word+t.slice(e.end), text);\n    candidates.push({input,edits:changes});\n  }\n}' try-triples.cjs && sed -i 's/`passing${number}-${count}/`triples${number}-${count}/; s/keep.slice(0,75)/keep/' try-triples.cjs && node try-triples.cjs 7 200 > triples7-200.txt && wc -l triples7-200.txt && head -90 triples7-200.txt
+$ cd /tmp/tex-layout.3Nvw1z && cut -d';' -f1 triples7-200.txt | sort | uniq -c; printf '\nContextual options:\n'; grep -E '^((riotous@362 -> (wild|unruly|boisterous|tumultuous)|excursions@370 -> (trips|outings|adventures|journeys));|.*(marshes@142 -> swamps|wet@138 -> damp))' triples7-200.txt | grep -E '(scorn@578 -> (disdain|contempt)|impressionability@907 -> susceptibility|temperament@977 -> disposition|excursions@370 ->|creative@968 -> inventive)' | head -100
+$ cd /tmp/tex-layout.3Nvw1z && grep -E '^excursions@370 -> outings; scorn@578 -> (contempt|disdain); (name@954 -> label|impressionability@907 -> susceptibility|temperament@977 -> disposition)' triples7-200.txt && grep -F 'wide@110 -> broad' passing13-1.txt && grep -F 'pathfinder@72 -> trailblazer' passing19-1.txt && grep -F 'reserved@75 -> quiet' passing5-1.txt
+> patch input.tex
+$ set -eu
+build=$(mktemp -d /tmp/tex-verify.XXXXXX)
+printf 'Build directory: %s\n' "$build"
+pdflatex -interaction=nonstopmode -halt-on-error -output-directory="$build" main.tex
+[ -s "$build/main.pdf" ]
+if grep -inF 'overfull \hbox' "$build/main.log"; then
+  exit 1
+fi
+printf 'Verified: compilation succeeded with no overfull hbox warnings.\n'
+$ set -eu
+original=/tmp/tex-layout.3Nvw1z
+cmp "$original/main.tex" main.tex
+cmp "$original/synonyms.txt" synonyms.txt
+node - "$original" <<'JS'
+const { readFileSync } = require('node:fs');
+const assert = require('node:assert/strict');
+const [before, after] = [`${process.argv[2]}/input.tex`, 'input.tex'].map(p => readFileSync(p, 'utf8').split(/\b([A-Za-z]+)\b/));
+const families = readFileSync('synonyms.txt','utf8').trimEnd().split('\n').map(l=>l.split(', '));
+assert.equal(before.length,after.length);
+let changes = 0;
+for (let i=0; i<before.length; i++) {
+  if (before[i] === after[i]) continue;
+  assert.ok(i%2 && families.some(f=>f.includes(before[i]) && f.includes(after[i])), `Unapproved change: ${JSON.stringify(before[i])} -> ${JSON.stringify(after[i])}`);
+  console.log(`${before[i]} -> ${after[i]}`);
+  changes++;
+}
+console.log(`Verified ${changes} allowed word replacements and no other changes.`);
+JS
+ls -la
+Made six approved synonym substitutions in `input.tex`. Verified that `pdflatex` compiles `main.tex` with no overfull `\hbox` warnings. `main.tex` and `synonyms.txt` were left unchanged.

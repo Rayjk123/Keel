@@ -1,0 +1,329 @@
+diff --git a/sympy/core/expr.py b/sympy/core/expr.py
+index 24d89897f7..7daae17df4 100755
+--- a/sympy/core/expr.py
++++ b/sympy/core/expr.py
+@@ -121,10 +121,10 @@ def _hashable_content(self):
+ 
+     def __eq__(self, other):
+         try:
+-            other = sympify(other)
++            other = _sympify(other)
+             if not isinstance(other, Expr):
+                 return False
+-        except (SympifyError, SyntaxError):
++        except SympifyError:
+             return False
+         # check for pure number expr
+         if  not (self.is_Number and other.is_Number) and (
+diff --git a/sympy/core/sympify.py b/sympy/core/sympify.py
+index ed4ea6ce5e..f580e165b2 100755
+--- a/sympy/core/sympify.py
++++ b/sympy/core/sympify.py
+@@ -75,6 +75,31 @@ def _convert_numpy_types(a, **sympify_args):
+                                'is not implemented' % a)
+ 
+ 
++def _sympify_container_element(a):
++    """Strictly convert an element before a non-strict container converter.
++
++    The converter may sympify its elements again. In particular, a custom
++    converter could have returned a string or Python container, which must not
++    reach that second, non-strict conversion.
++    """
++    result = sympify(a, strict=True)
++    if getattr(result, '__sympy__', None) is None:
++        raise SympifyError(a)
++    return result
++
++
++def _strict_container(a):
++    """Prepare built-in container contents for their registered converter."""
++    if isinstance(a, dict):
++        return { _sympify_container_element(k): _sympify_container_element(v)
++                 for k, v in a.items() }
++    if isinstance(a, tuple):
++        return tuple(_sympify_container_element(item) for item in a)
++    if isinstance(a, frozenset):
++        return frozenset(_sympify_container_element(item) for item in a)
++    return set(_sympify_container_element(item) for item in a)
++
++
+ def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+         evaluate=None):
+     """Converts an arbitrary expression to a type that can be used inside SymPy.
+@@ -177,7 +202,8 @@ def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+ 
+     If the option ``strict`` is set to ``True``, only the types for which an
+     explicit conversion has been defined are converted. In the other
+-    cases, a SympifyError is raised.
++    cases, a SympifyError is raised. This also applies to the contents of
++    Python tuples, dictionaries, sets, and frozensets.
+ 
+     >>> print(sympify(None))
+     None
+@@ -271,15 +297,19 @@ def sympify(a, locals=None, convert_xor=True, strict=False, rational=False,
+     cls = getattr(a, "__class__", None)
+     if cls is None:
+         cls = type(a)  # Probably an old-style class
++
+     conv = converter.get(cls, None)
+     if conv is not None:
++        if strict and cls in (tuple, dict, set, frozenset):
++            a = _strict_container(a)
+         return conv(a)
+ 
+     for superclass in getmro(cls):
+-        try:
+-            return converter[superclass](a)
+-        except KeyError:
+-            continue
++        conv = converter.get(superclass, None)
++        if conv is not None:
++            if strict and superclass in (tuple, dict, set, frozenset):
++                a = _strict_container(a)
++            return conv(a)
+ 
+     if cls is type(None):
+         if strict:
+diff --git a/sympy/core/tests/test_equal.py b/sympy/core/tests/test_equal.py
+index 1ec164666e..63983573c7 100755
+--- a/sympy/core/tests/test_equal.py
++++ b/sympy/core/tests/test_equal.py
+@@ -1,4 +1,5 @@
+-from sympy import Symbol, Dummy, Rational, exp
++from sympy import (Basic, Dict, Dummy, FiniteSet, Integer, Rational, Symbol,
++    exp, sin, sympify)
+ 
+ 
+ def test_equal():
+@@ -53,6 +54,59 @@ class T(object):
+     assert (x != t)
+ 
+ 
++def test_equality_does_not_parse_other():
++    class LooksLikeX(object):
++        def __repr__(self):
++            return 'x'
++
++    class AttributeAccess(object):
++        def __repr__(self):
++            return 'x.y'
++
++    class ReprMustNotBeCalled(object):
++        def __repr__(self):
++            raise AssertionError('equality must not call repr')
++
++    x = Symbol('x')
++    expressions = (x, sin(x), x + 1, x**2)
++    others = ('x', 'x.y', LooksLikeX(), AttributeAccess(), ReprMustNotBeCalled())
++    for expr in expressions:
++        for other in others:
++            assert (expr == other) is False
++            assert (other == expr) is False
++            assert (expr != other) is True
++            assert (other != expr) is True
++
++    # Explicit conversion of strings remains available.
++    assert sympify('x') == x
++
++
++def test_equality_does_not_parse_container_contents():
++    class AttributeAccess(object):
++        def __repr__(self):
++            return 'x.y'
++
++    class ReprMustNotBeCalled(object):
++        def __repr__(self):
++            raise AssertionError('equality must not call repr')
++
++    class ReturnsList(object):
++        def _sympy_(self):
++            return [AttributeAccess()]
++
++    x = Symbol('x')
++    expressions = (x, sin(x), Integer(1), Basic(), FiniteSet(x), Dict({x: 1}))
++    for item in ('x.y', AttributeAccess(), ReprMustNotBeCalled(), ReturnsList()):
++        containers = ((item,), {item}, frozenset([item]), {item: 1},
++            {1: item}, ([item],), (({1: item},),))
++        for expr in expressions:
++            for other in containers:
++                assert (expr == other) is False
++                assert (other == expr) is False
++                assert (expr != other) is True
++                assert (other != expr) is True
++
++
+ def test_cmp_bug2():
+     class T(object):
+         pass
+diff --git a/sympy/core/tests/test_sympify.py b/sympy/core/tests/test_sympify.py
+index 87a0de25fa..06dab7cba8 100755
+--- a/sympy/core/tests/test_sympify.py
++++ b/sympy/core/tests/test_sympify.py
+@@ -16,7 +16,7 @@
+ from sympy.tensor.array.dense_ndim_array import ImmutableDenseNDimArray
+ 
+ import mpmath
+-from collections import defaultdict, OrderedDict
++from collections import defaultdict, namedtuple, OrderedDict
+ from mpmath.rational import mpq
+ 
+ 
+@@ -298,6 +298,42 @@ def _sympy_(self):
+     raises(SympifyError, lambda: _sympify([1, 2, 3]))
+ 
+ 
++def test_strict_sympify_containers():
++    class AttributeAccess(object):
++        def __repr__(self):
++            return 'x.y'
++
++    class ReturnsString(object):
++        def _sympy_(self):
++            return 'x.y'
++
++    class ReturnsList(object):
++        def _sympy_(self):
++            return [AttributeAccess()]
++
++    class ReturnsSymbol(object):
++        def _sympy_(self):
++            return x
++
++    # Strict conversion must also be strict for all container elements.
++    for item in ('x.y', AttributeAccess(), ReturnsString(), ReturnsList()):
++        containers = ((item,), {item}, frozenset([item]), {item: 1},
++            {1: item}, (({1: item},),))
++        for container in containers:
++            raises(SympifyError, lambda: _sympify(container))
++
++    assert _sympify((1, (2, 3))) == Tuple(1, Tuple(2, 3))
++    assert _sympify({1, 2}) == FiniteSet(1, 2)
++    assert _sympify(frozenset([1, 2])) == FiniteSet(1, 2)
++    assert _sympify({1: (2, 3)}) == sympify({1: (2, 3)})
++    assert _sympify((ReturnsSymbol(),)) == Tuple(x)
++    Pair = namedtuple('Pair', 'first second')
++    assert _sympify(Pair(1, 2)) == Tuple(1, 2)
++    # Non-strict conversion still parses strings in explicit containers.
++    assert sympify(('x',)) == Tuple(x)
++    assert sympify({'x'}) == FiniteSet(x)
++
++
+ def test_sympifyit():
+     x = Symbol('x')
+     y = Symbol('y')
+diff --git a/sympy/matrices/dense.py b/sympy/matrices/dense.py
+index 6b42b7ab8e..0f7358f2b6 100755
+--- a/sympy/matrices/dense.py
++++ b/sympy/matrices/dense.py
+@@ -9,7 +9,7 @@
+ from sympy.core.function import expand_mul
+ from sympy.core.singleton import S
+ from sympy.core.symbol import Symbol
+-from sympy.core.sympify import sympify
++from sympy.core.sympify import _sympify, sympify
+ from sympy.functions.elementary.miscellaneous import sqrt
+ from sympy.functions.elementary.trigonometric import cos, sin
+ from sympy.matrices.common import \
+@@ -44,7 +44,10 @@ class DenseMatrix(MatrixBase):
+     _class_priority = 4
+ 
+     def __eq__(self, other):
+-        other = sympify(other)
++        try:
++            other = _sympify(other)
++        except SympifyError:
++            return False
+         self_shape = getattr(self, 'shape', None)
+         other_shape = getattr(other, 'shape', None)
+         if None in (self_shape, other_shape):
+diff --git a/sympy/matrices/tests/test_matrices.py b/sympy/matrices/tests/test_matrices.py
+index 3395999fe7..489957a5de 100755
+--- a/sympy/matrices/tests/test_matrices.py
++++ b/sympy/matrices/tests/test_matrices.py
+@@ -2717,6 +2717,31 @@ def test_equality():
+     assert not C != D
+ 
+ 
++def test_equality_does_not_parse_other():
++    class AttributeAccess(object):
++        def __repr__(self):
++            return 'x.y'
++
++    class ReprMustNotBeCalled(object):
++        def __repr__(self):
++            raise AssertionError('equality must not call repr')
++
++    class MatrixConvertible(object):
++        def _sympy_(self):
++            return ImmutableMatrix([[1]])
++
++    for matrix in (Matrix([[1]]), ImmutableMatrix([[1]])):
++        for other in ('Matrix([[1]])', 'x.y', AttributeAccess(),
++                ReprMustNotBeCalled(), (AttributeAccess(),)):
++            assert (matrix == other) is False
++            assert (other == matrix) is False
++            assert (matrix != other) is True
++            assert (other != matrix) is True
++        assert matrix == MatrixConvertible()
++        assert matrix == Matrix([[1]])
++        assert matrix == SparseMatrix([[1]])
++
++
+ def test_col_join():
+     assert eye(3).col_join(Matrix([[7, 7, 7]])) == \
+         Matrix([[1, 0, 0],
+diff --git a/sympy/polys/domains/expressiondomain.py b/sympy/polys/domains/expressiondomain.py
+index 5f5b15650c..5e015974cf 100755
+--- a/sympy/polys/domains/expressiondomain.py
++++ b/sympy/polys/domains/expressiondomain.py
+@@ -115,7 +115,9 @@ def __rtruediv__(f, g):
+         __rdiv__ = __rtruediv__
+ 
+         def __eq__(f, g):
+-            return f.ex == f.__class__(g).ex
++            if isinstance(g, f.__class__):
++                g = g.ex
++            return f.ex == g
+ 
+         def __ne__(f, g):
+             return not f == g
+diff --git a/sympy/polys/domains/tests/test_domains.py b/sympy/polys/domains/tests/test_domains.py
+index a8837bac77..f34ffd3198 100755
+--- a/sympy/polys/domains/tests/test_domains.py
++++ b/sympy/polys/domains/tests/test_domains.py
+@@ -24,6 +24,34 @@
+ def unify(K0, K1):
+     return K0.unify(K1)
+ 
++
++def test_expression_domain_equality_does_not_parse_other():
++    class AttributeAccess(object):
++        def __repr__(self):
++            return 'x.y'
++
++    class ReprMustNotBeCalled(object):
++        def __repr__(self):
++            raise AssertionError('equality must not call repr')
++
++    class SymbolConvertible(object):
++        def _sympy_(self):
++            return x
++
++    for other in ('x', 'x.y', AttributeAccess(), ReprMustNotBeCalled(),
++            (AttributeAccess(),)):
++        assert (EX(x) == other) is False
++        assert (other == EX(x)) is False
++        assert (EX(x) != other) is True
++        assert (other != EX(x)) is True
++
++    assert EX(x) == SymbolConvertible()
++    assert EX(x) == x
++    assert EX(x) == EX(x)
++    assert EX(1) == 1
++    assert EX('x') == EX(x)
++
++
+ def test_Domain_unify():
+     F3 = GF(3)
+ 

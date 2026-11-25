@@ -29,7 +29,7 @@
 | claude-opus-5.5-native-tools | 27 | `wrong-answer` 8 · `step-limit` 4 · `unsupported` 1 |
 | gpt-6.2-astra-native-tools | 28 | `wrong-answer` 10 · `step-limit` 1 · `unsupported` 1 |
 | gpt-6.2-sol-native-tools | 27 | `wrong-answer` 7 · `step-limit` 4 · `refused` 1 · `unsupported` 1 |
-| gpt-6.1-terra-native-tools | 15 | `wrong-answer` 10 · `step-limit` 3 · `refused` 1 · `unsupported` 1 |
+| gpt-6.1-terra-native-tools | 23 | `wrong-answer` 12 · `step-limit` 3 · `refused` 1 · `unsupported` 1 |
 | gpt-oss-20b-bedrock-native-tools | 5 | `malformed-tool-call` 26 · `wrong-answer` 8 · `unsupported` 1 |
 | gpt-oss-120b-native-tools | 13 | `wrong-answer` 15 · `step-limit` 6 · `malformed-tool-call` 3 · `context-limit` 1 · `task-time-limit` 1 · `unsupported` 1 |
 | qwen3-coder-30b-bedrock-native-tools | 7 | `wrong-answer` 29 · `step-limit` 2 · `no-patch` 1 · `unsupported` 1 |
@@ -40,4 +40,18 @@
 | glm-4.7-flash-native-tools | 7 | `step-limit` 20 · `wrong-answer` 11 · `malformed-tool-call` 1 · `unsupported` 1 |
 | gpt-oss-120b-high | 7 | `no-command` 22 · `wrong-answer` 9 · `task-time-limit` 1 · `unsupported` 1 |
 | kimi-k2.5-high | 18 | `wrong-answer` 13 · `step-limit` 5 · `no-command` 3 · `unsupported` 1 |
+| grok-4.7-xhigh | 25 | `step-limit` 8 · `wrong-answer` 2 · `no-command` 2 · `request-timeout` 1 · `task-time-limit` 1 · `unsupported` 1 |
+| glm-5-high | 18 | `wrong-answer` 13 · `step-limit` 6 · `request-timeout` 2 · `unsupported` 1 |
 | glm-4.7-flash-high | 8 | `wrong-answer` 18 · `step-limit` 12 · `no-command` 1 · `unsupported` 1 |
+| claude-haiku-5.5-native-tools-max | 17 | `wrong-answer` 13 · `step-limit` 5 · `no-patch` 3 · `task-time-limit` 1 · `unsupported` 1 |
+| claude-sonnet-5.5-native-tools-max | 12 | `wrong-answer` 11 · `task-time-limit` 11 · `step-limit` 4 · `no-patch` 1 · `unsupported` 1 |
+| claude-opus-5.5-native-tools-max | 16 | `wrong-answer` 9 · `step-limit` 6 · `task-time-limit` 6 · `no-patch` 1 · `model-error` 1 · `unsupported` 1 |
+| gpt-6.2-astra-native-tools-max | 31 | `wrong-answer` 4 · `step-limit` 3 · `task-time-limit` 1 · `unsupported` 1 |
+| gpt-6.2-sol-native-tools-max | 29 | `wrong-answer` 6 · `step-limit` 3 · `task-time-limit` 1 · `unsupported` 1 |
+| gpt-6.1-terra-native-tools-max | 29 | `step-limit` 7 · `wrong-answer` 2 · `refused` 1 · `unsupported` 1 |
+| gpt-oss-20b-bedrock-native-tools-high | 4 | `malformed-tool-call` 28 · `wrong-answer` 2 · `step-limit` 2 · `task-time-limit` 2 · `context-limit` 1 · `unsupported` 1 |
+| gpt-oss-120b-native-tools-high | 13 | `step-limit` 14 · `task-time-limit` 6 · `wrong-answer` 3 · `malformed-tool-call` 3 · `unsupported` 1 |
+| kimi-k2.5-native-tools-high | 15 | `wrong-answer` 14 · `step-limit` 9 · `task-time-limit` 1 · `unsupported` 1 |
+| grok-4.7-native-tools-xhigh | 23 | `wrong-answer` 8 · `step-limit` 8 · `unsupported` 1 |
+| glm-5-native-tools-high | 18 | `wrong-answer` 13 · `step-limit` 8 · `unsupported` 1 |
+| glm-4.7-flash-native-tools-high | 7 | `step-limit` 20 · `wrong-answer` 11 · `malformed-tool-call` 1 · `unsupported` 1 |

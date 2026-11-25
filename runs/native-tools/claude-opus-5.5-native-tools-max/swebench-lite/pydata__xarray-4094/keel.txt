@@ -1,0 +1,185 @@
+$ cd . && git log --oneline -3 && git status && ls
+$ grep -n "def to_unstacked_dataset" -A 70 xarray/core/dataarray.py
+$ grep -n "def to_stacked_array" -A 120 xarray/core/dataset.py
+$ cd . && cat > /tmp/repro.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+     np.arange(3),
+     coords=[("x", [0, 1, 2])],
+ )
+data = xr.Dataset({"a": arr, "b": arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print("stacked:")
+print(stacked)
+print()
+print("stacked.indexes['y']:", stacked.indexes['y'])
+print()
+for k in ['a', 'b']:
+    sel = stacked.sel({'variable': k})
+    print(f"sel {k}:")
+    print(sel)
+    print()
+unstacked = stacked.to_unstacked_dataset('y')
+print(unstacked)
+print("identical:", data.identical(unstacked))
+EOF
+python /tmp/repro.py
+$ cd . && cat > /tmp/compare.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+arr = xr.DataArray(
+    np.arange(6).reshape(2, 3),
+    coords=[("x", ["a", "b"]), ("y", [0, 1, 2])],
+)
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", ["y"])
+print(stacked)
+print(stacked.indexes["z"])
+for k in ["a", "b"]:
+    s = stacked.sel({"variable": k})
+    print(f"--- sel {k}:")
+    print(s)
+    print(f"--- sel {k} squeeze(drop=True):")
+    print(s.squeeze(drop=True))
+EOF
+python /tmp/compare.py
+$ cd . && sed -i 's/stacked = data.to_stacked_array("z", \["y"\])/stacked = data.to_stacked_array("z", ["x"])/' /tmp/compare.py && python /tmp/compare.py
+$ cd . && grep -n "def convert_label_indexer" -A 90 xarray/core/indexing.py
+$ cd . && grep -n "    def isel" -A 75 xarray/core/dataset.py | sed -n '1,200p' | grep -n "drop" 
+$ cd . && grep -n "    def isel" -A 90 xarray/core/dataset.py | sed -n '55,95p'
+$ cd . && python -c "
+import pandas as pd
+idx1 = pd.MultiIndex.from_tuples([('a',), ('b',)], names=['variable'])
+print('1-level get_loc:', repr(idx1.get_loc(('a',))))
+idx2 = pd.MultiIndex.from_tuples([('a', 0), ('a', 1), ('b', float('nan'))], names=['variable', 'y'])
+print('2-level get_loc_level:', idx2.get_loc_level(('a',), level=('variable',)))
+print(pd.__version__)
+"
+$ cd . && grep -n "def remap_label_indexers" -A 40 xarray/core/indexing.py; grep -n "def remap_label_indexers" -A 40 xarray/core/coordinates.py
+$ cd . && grep -rn "to_unstacked_dataset\|create_test_stacked_array" xarray/tests/ | head -30
+$ cd . && sed -n 155,175p xarray/tests/test_dataset.py && echo ------- && sed -n 2975,3065p xarray/tests/test_dataset.py
+$ cd . && grep -n "    def sel" -A 12 xarray/core/dataarray.py | head -20; sed -n 2125,2140p xarray/tests/test_dataarray.py; sed -n 3475,3505p xarray/tests/test_units.py
+$ cd . && python -c "
+import numpy as np, xarray as xr
+arr = xr.DataArray(np.arange(3), coords=[('x', [0, 1, 2])])
+data = xr.Dataset({'a': arr, 'b': arr})
+stacked = data.to_stacked_array('y', sample_dims=['x'])
+print(stacked.sel({'variable': 'a'}, drop=True))
+"; sed -n 1,80p doc/whats-new.rst
+$ cd . && cat setup.cfg | sed -n '/\[tool:pytest\]/,/^\[/p'; grep -rn "doctest" azure-pipelines.yml ci/ conftest.py setup.cfg 2>/dev/null | head
+$ cd . && grep -n "def _overwrite_indexes" -A 25 xarray/core/dataset.py
+$ cd . && cat > /tmp/edge.py << 'EOF'
+import numpy as np
+import xarray as xr
+
+# Multi-level case: does sel(..., drop=True) change anything vs. current behaviour?
+arr = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr.isel(y=0)})
+stacked = data.to_stacked_array("z", ["x"])
+for k in ["a", "b"]:
+    r1 = stacked.sel({"variable": k}).squeeze(drop=True)
+    r2 = stacked.sel({"variable": k}, drop=True).squeeze(drop=True)
+    print(k, "identical with/without drop:", r1.identical(r2))
+
+# Multi-level case with a scalar (non-dim) coordinate: must be preserved
+s2 = stacked.assign_coords(t=5)
+for k in ["a", "b"]:
+    r1 = s2.sel({"variable": k}).squeeze(drop=True)
+    r2 = s2.sel({"variable": k}, drop=True).squeeze(drop=True)
+    print(k, "scalar coord kept / identical:", "t" in r2.coords, r1.identical(r2))
+EOF
+python /tmp/edge.py
+$ cd . && sed -n 1068,1075p xarray/core/dataarray.py && sed -n '/^    def sel(/,/^    def /p' xarray/core/dataarray.py | tail -15
+$ cd . && python -c "
+import pandas as pd
+from xarray.core.indexing import convert_label_indexer
+from xarray.core.utils import is_dict_like
+from xarray.core.variable import Variable
+idx1 = pd.MultiIndex.from_tuples([('a',), ('b',)], names=['variable'])
+r = convert_label_indexer(idx1, {'variable': 'a'}, 'y')
+print(repr(r), type(r[0]))
+" ; grep -n "def is_fancy_indexer" -A 14 xarray/core/utils.py xarray/core/indexing.py xarray/core/dataset.py 2>/dev/null | head -20
+> edit xarray/core/dataarray.py
+> read xarray/core/dataarray.py
+> edit xarray/core/dataarray.py
+$ cd . && python /tmp/repro.py 2>&1 | tail -12
+$ cd . && cat > /tmp/edge2.py << 'EOF'
+import numpy as np
+import xarray as xr
+from xarray.testing import assert_identical
+
+# 1. distinct values, non-default variable_dim, non-dim coord along sample dim,
+#    scalar coord already in dataset
+ds = xr.Dataset(
+    {"a": ("x", [1, 2, 3]), "b": ("x", [4.0, 5.0, 6.0]), "c": ("x", list("uvw"))},
+    coords={"x": [10, 20, 30], "x2": ("x", [7, 8, 9]), "s": 42},
+)
+st = ds.to_stacked_array("feat", sample_dims=["x"], variable_dim="vars")
+rt = st.to_unstacked_dataset("feat")
+print(rt)
+print("dtypes:", {k: v.dtype for k, v in rt.data_vars.items()})
+# note: to_stacked_array concatenates, so dtypes get promoted (pre-existing, expected)
+assert set(rt.data_vars) == {"a", "b", "c"}
+assert "feat" not in rt.coords and "vars" not in rt.coords
+assert "x2" in rt.coords and "s" in rt.coords
+
+# 2. single sample from single-level stacked array
+arr = xr.DataArray(np.arange(3), coords=[("x", [0, 1, 2])])
+data = xr.Dataset({"a": arr, "b": arr * 10})
+stacked = data.to_stacked_array("y", sample_dims=["x"])
+assert_identical(stacked.to_unstacked_dataset("y"), data)
+x0 = stacked[0].to_unstacked_dataset("y")
+assert_identical(x0, data.isel(x=0))
+print("single-sample OK")
+
+# 3. level given by name instead of int
+assert_identical(stacked.to_unstacked_dataset("y", level="variable"), data)
+print("level-by-name OK")
+
+# 4. a single variable
+d1 = xr.Dataset({"a": arr})
+assert_identical(d1.to_stacked_array("y", sample_dims=["x"]).to_unstacked_dataset("y"), d1)
+print("single var OK")
+
+# 5. multiple sample dims, single-level
+d2 = xr.Dataset({"a": (("x", "t"), np.ones((2, 3))), "b": (("x", "t"), np.zeros((2, 3)))})
+assert_identical(d2.to_stacked_array("y", sample_dims=["x", "t"]).to_unstacked_dataset("y"), d2)
+print("multi sample dims OK")
+
+# 6. existing 2-level behaviour (also via stack, as in test_units) unchanged
+a = xr.DataArray(np.arange(6).reshape(2, 3), coords=[("x", ["a", "b"]), ("y", [0, 1, 2])])
+d3 = xr.Dataset({"a": a, "b": a.isel(y=0)})
+assert_identical(d3.to_stacked_array("z", ["x"]).to_unstacked_dataset("z"), d3)
+da = xr.DataArray(np.arange(50.).reshape(5, 10), coords={"x": np.arange(5), "y": np.arange(10)}, dims=("x", "y")).stack(z=("x", "y"))
+print(da.to_unstacked_dataset("z"))
+print("ALL OK")
+EOF
+python /tmp/edge2.py
+> read xarray/tests/test_dataset.py
+> edit xarray/tests/test_dataset.py
+$ cd . && git stash push xarray/core/dataarray.py -q && python -m pytest xarray/tests/test_dataset.py -q -k "single_dim" -p no:cacheprovider 2>&1 | tail -4; git stash pop -q && git status --short && python -m pytest xarray/tests/test_dataset.py -q -k "single_dim" -p no:cacheprovider 2>&1 | tail -3
+$ cd . && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -p no:cacheprovider -x -n 4 2>&1 | tail -5 || python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -p no:cacheprovider 2>&1 | tail -5
+$ cd . && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -p no:cacheprovider -n 4 2>&1 | grep -E "^(FAILED|ERROR)|passed|failed" | sort > /tmp/after.txt; cat /tmp/after.txt | tail -30
+$ cd . && git stash -q && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py xarray/tests/test_units.py -q -p no:cacheprovider -n 4 2>&1 | grep -E "^(FAILED|ERROR)|[0-9]+ passed" | sort > /tmp/before.txt; git stash pop -q; git status --short; echo "=== BEFORE (original code) ==="; cat /tmp/before.txt | grep -v Warning
+$ cd . && python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -q -p no:cacheprovider -k "test_sel_categorical or test_from_series_multiindex or test_categorical_multiindex or test_from_dataframe_categorical" 2>&1 | grep -E "^E " | sort | uniq -c
+$ cd . && grep -n "^Bug fixes" doc/whats-new.rst | head -2
+> read doc/whats-new.rst
+> edit doc/whats-new.rst
+$ cd . && (black --check xarray/core/dataarray.py xarray/tests/test_dataset.py 2>&1; flake8 xarray/core/dataarray.py xarray/tests/test_dataset.py 2>&1 | head; echo "lint exit: $?") ; python -m pytest xarray/tests/test_dataset.py xarray/tests/test_dataarray.py -q -p no:cacheprovider -k "stacked or unstack" 2>&1 | tail -1; git diff
+$ cd . && sed -n '/\[flake8\]/,/^\[/p' setup.cfg | head -12; git diff -U0 | grep '^+' | grep -v '^+++' | awk '{ if (length($0)-1 > 88) print "TOO LONG (" length($0)-1 "): " $0 }'; echo "max added line length: $(git diff -U0 -- '*.py' | grep '^+' | grep -v '^+++' | awk '{print length($0)-1}' | sort -n | tail -1)"
+$ rm -f /tmp/repro.py /tmp/compare.py /tmp/edge.py /tmp/edge2.py /tmp/before.txt /tmp/after.txt; cd . && git status --short
+The fix is done. Your example now round-trips: `to_unstacked_dataset` returns the original dataset and `data.identical(unstacked)` is `True`.
+
+**Cause:** When every variable has only the sample dims, the stacked coordinate ends up with just one level. Picking a variable from it leaves a scalar `y` coordinate that is different for each variable (`('a',)` vs `('b',)`). Combining them into a Dataset then failed with the `MergeError`.
+
+**Changes:**
+- **`xarray/core/dataarray.py`:** `to_unstacked_dataset` now selects each variable with `drop=True`, which removes that leftover coordinate. The usual multi-level case gives exactly the same result as before.
+- **`xarray/tests/test_dataset.py`:** I added `test_to_stacked_array_to_unstacked_dataset_single_dim`. It fails on the old code and passes with the fix.
+- **`doc/whats-new.rst`:** I added a bug-fix entry.
+
+**Testing:** `test_dataset.py`, `test_dataarray.py` and `test_units.py` give the same results before and after, apart from the new passing test. 5 tests fail either way because this environment's pandas refuses the development xarray's version number, which has nothing to do with this change. `black` and `flake8` aren't installed, so I only checked line lengths by hand.
+
+**Not fixed:** The example in the `to_unstacked_dataset` docstring is already broken. It passes `["y"]` where it needs `["x"]`, so it raises an error. I left it out of this change, but it's a one-word fix.
