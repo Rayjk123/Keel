@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SUBSETS = ["terminal-bench-4.0", "terminal-bench-2.0", "aider-polyglot", "swebench-lite"]
+SUBSETS = ["terminal-bench-4.0", "terminal-bench-4.1", "terminal-bench-2.0", "aider-polyglot", "swebench-lite"]
 
 
 def out(*cmd: str) -> str:

@@ -13,7 +13,7 @@ bench/setup.sh
 bench/baseline.sh
 ```
 
-`bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. On Linux with Docker Engine, first point the containers at your model, as [How the Docker setup fits together](#how-the-docker-setup-fits-together) explains. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
+`bench/setup.sh` checks for Docker, installs Harbor and the Python packages, and pulls any Ollama models you list. It tells you what is still missing. On Linux with Docker Engine, first point the containers at your model, as [How the Docker setup fits together](#how-the-docker-setup-fits-together) explains. `bench/baseline.sh` then runs Terminal-Bench 4.0, Terminal-Bench 4.1, Terminal-Bench 2.0, Aider Polyglot and SWE-bench Lite for each model in turn.
 
 Runs use native tool calling and are labelled `native-tools`. To rerun the original text mode for comparison, set `KEEL_ADAPTER=text`, and the run is labelled `baseline`. `KEEL_MAX_STEPS` changes the 200-reply limit.
 
@@ -31,6 +31,7 @@ Pick a dataset from the table, then run it with Keel as the agent:
 |---|---|---|
 | Terminal-Bench 2.0 | `terminal-bench@2.0` | 89 |
 | Terminal-Bench 4.0 | `terminal-bench/terminal-bench@4` | 66 |
+| Terminal-Bench 4.1 | `terminal-bench/terminal-bench@5` | 66 |
 | Aider Polyglot | `aider/aider-polyglot` | 225 |
 | SWE-bench Verified | `swe-bench/swe-bench-verified` | 500 |
 
@@ -57,7 +58,7 @@ harbor view runs/terminal-bench-4.0
 | `-i <task-name>` | Run just the tasks you pick |
 | `-o <folder>` | Save the results in this folder |
 
-**Terminal-Bench 4.0** is version 4 of the `terminal-bench/terminal-bench` dataset. Version 5 is Terminal-Bench 4.1, and version 1 is 3.0, so you can run any of them by changing the number after `@`.
+**Terminal-Bench 4.0** is version 4 of the `terminal-bench/terminal-bench` dataset. Version 5 is Terminal-Bench 4.1, and version 1 is 3.0, so you can run any of them by changing the number after `@`. Terminal-Bench 4.1 keeps 4.0's 66 tasks and instructions but replaces every task's tests and container images, so a task can pass in one and fail in the other.
 
 **Aider Polyglot** is 225 coding exercises in several languages. Each one asks the agent to edit files until the exercise's tests pass, which makes it a quick, direct check of how well Keel edits code.
 

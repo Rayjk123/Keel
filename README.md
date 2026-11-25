@@ -81,6 +81,14 @@ Want a quick score for one or more models on a fresh machine? After `export MODE
 
 Use `-l 10` to run just the first 10 tasks for a quick check. The [Running the benchmarks page](https://keeljourney.dev/destinations/one-file-agent/benchmarks/running/) has every option, how the Docker setup fits together, and tips for running at scale.
 
+**TODO: [Agents' Last Exam](https://github.com/rdi-berkeley/agents-last-exam).** ALE scores whole agent systems on long, professional tasks that need both a terminal and a desktop, such as Blender, MuseScore and Ardour. It's left out for now because a score there would mostly measure tools Keel doesn't have, not the harness changes these benchmarks exist to isolate:
+
+- Keel has no desktop tools (screenshots, clicks and typing through ALE's computer-use MCP bridge), so many tasks are unsolvable by construction.
+- Only about 78 of its 122 tasks run in local Docker. Each is long and costly, so repeating runs to separate a real change from run-to-run noise isn't affordable yet.
+- Its task data is gated and its versions change tasks (v1.1 retired 30 and modified 57), so scores need a pinned version to compare.
+
+Add it when Keel can drive a desktop through MCP, and the best model passes at least 35 of the 40 tasks here, at which point these benchmarks stop telling harness changes apart. Before then, a run is only worth it on ALE's command-line-solvable tasks, reported separately.
+
 ### Go deeper
 
 The docs site has the full write-up of this destination:

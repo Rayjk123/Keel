@@ -50,6 +50,7 @@ for MODEL in $MODELS; do
   echo "=== $MODEL ($RUN)"
 
   harbor run -d terminal-bench/terminal-bench@4 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.0) -o "runs/$TRIAL/$RUN/terminal-bench-4.0" --job-name "$RUN"
+  harbor run -d terminal-bench/terminal-bench@5 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-4.1) -o "runs/$TRIAL/$RUN/terminal-bench-4.1" --job-name "$RUN"
   harbor run -d terminal-bench@2.0 -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick terminal-bench-2.0) -o "runs/$TRIAL/$RUN/terminal-bench-2.0" --job-name "$RUN"
   harbor run -d aider/aider-polyglot -a keel_agent:KeelAgent -m "$MODEL" -n "$WORKERS" $(pick aider-polyglot) -o "runs/$TRIAL/$RUN/aider-polyglot" --job-name "$RUN"
   "$BENCH_PYTHON" bench/swebench_lite.py --run-id "$RUN" --out "runs/$TRIAL/$RUN/swebench-lite" --workers "$WORKERS" --model "${MODEL#*/}" -i $(cat bench/subsets/swebench-lite.txt)

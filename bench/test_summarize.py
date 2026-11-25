@@ -232,9 +232,11 @@ class Charts(unittest.TestCase):
 class Tables(unittest.TestCase):
     def test_scoreboard_row(self) -> None:
         run = make_run("bedrock/us.openai.gpt-6.2-astra", "native-tools", "max", 4)
-        run["scores"] = {key: {**run["scores"]["x"]} for key in ("terminal-bench-4.0", "terminal-bench-2.0", "aider-polyglot", "swebench-lite")}
+        run["scores"] = {key: {**run["scores"]["x"]} for key in ("terminal-bench-4.0", "terminal-bench-4.1", "terminal-bench-2.0", "aider-polyglot", "swebench-lite")}
         run["scores"]["swebench-lite"]["finished"] = 6
-        self.assertEqual(table([run]).splitlines()[2], "| GPT-6.2 Astra | Bedrock | native | max | 4/10 | 4/10 | 4/10 | 4/10 (6 done) | 16/40 |")
+        self.assertEqual(table([run]).splitlines()[2], "| GPT-6.2 Astra | Bedrock | native | max | 4/10 | 4/10 | 4/10 | 4/10 | 4/10 (6 done) | 20/50 |")
+        run["scores"]["terminal-bench-4.1"] = {"passed": 0, "total": 0, "finished": 0, "tasks": {}, "reasons": {}}
+        self.assertEqual(table([run]).splitlines()[2], "| GPT-6.2 Astra | Bedrock | native | max | 4/10 | — | 4/10 | 4/10 | 4/10 (6 done) | 16/40 |")
 
     def test_failures_row_lists_failures_most_common_first(self) -> None:
         reasons = {"t1": "passed", "t2": "refused", "t3": "no-command", "t4": "no-command", "t5": "wrong-answer", "t6": None}

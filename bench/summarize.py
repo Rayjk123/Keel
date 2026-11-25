@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 BENCHMARKS = [
     ("terminal-bench-4.0", "Terminal-Bench 4.0"),
+    ("terminal-bench-4.1", "Terminal-Bench 4.1"),
     ("terminal-bench-2.0", "Terminal-Bench 2.0"),
     ("aider-polyglot", "Aider Polyglot"),
     ("swebench-lite", "SWE-bench Lite"),
@@ -275,7 +276,7 @@ def table(runs: list[dict]) -> str:
         cells = []
         for key, _ in BENCHMARKS:
             s = r["scores"][key]
-            cells.append(f"{s['passed']}/{s['total']}" if s["finished"] == s["total"] else f"{s['passed']}/{s['total']} ({s['finished']} done)" if s["finished"] else "pending")
+            cells.append("—" if not s["total"] else f"{s['passed']}/{s['total']}" if s["finished"] == s["total"] else f"{s['passed']}/{s['total']} ({s['finished']} done)" if s["finished"] else "pending")
         cells.append(f"{total(r)}/{sum(s['total'] for s in r['scores'].values())}")
         lines.append(columns(r) + " " + " | ".join(cells) + " |")
     return head + "\n".join(lines) + "\n"
