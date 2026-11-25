@@ -29,4 +29,4 @@ The proxy ran from this source with `MAX_TOKENS=8192` for default-effort runs an
 
 Kimi K2.5 and GLM 5 stand in for Kimi K3.1 and GLM 5.3, which had no Bedrock quota on the account used. Qwen3-Coder isn't a reasoning model, so it has no higher-effort run.
 
-The run manifests are copied to `manifests/` when the runs finish. Verify the archived files from this directory with `shasum -a 256 -c SHA256SUMS`.
+The run manifests are in `manifests/`. Verify the archived files from this directory with `shasum -a 256 -c SHA256SUMS`.
