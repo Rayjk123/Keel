@@ -99,9 +99,10 @@ The docs site has the full write-up of this destination:
 npm install
 npm run typecheck
 npm test
+python3 -m unittest discover -s bench -p "test_*.py"
 ```
 
-The tests run the real agent loop against a scripted fake model, so they finish in under a second and need no model or network.
+The TypeScript tests run the real agent loop against a scripted fake model, so they finish in under a second and need no model or network.
 
 ## What's inside
 
