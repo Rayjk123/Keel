@@ -21,7 +21,7 @@ python3 -m unittest discover -s bench -p "test_*.py"
 
 The tests run the real agent loop against a scripted fake model, so they finish in under a second and need no model or network. They cover both adapters, finishing a task, step limits, retries, every tool and its error messages, the patch format, and the Bedrock translation. The Python tests check how `bench/summarize.py` decides why each benchmark task failed.
 
-The type check and the TypeScript tests also run on every push and pull request through GitHub Actions.
+The type check and both test suites also run on every push and pull request through GitHub Actions.
 
 ## Project layout
 
