@@ -2,8 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
 
-from summarize import agent_reason, failures, harbor_outcomes, harbor_reason, lite_outcomes
+from summarize import (
+    agent_reason, best, describe, effort_chart, effort_pairs, failures, failures_chart, fold, harbor_outcomes, harbor_reason,
+    harness_pairs, labels, leaderboard, lite_outcomes, native_chart, run_key, table,
+)
 
 CRASH = "TypeError: fetch failed\n    at node:internal/deps/undici\n  [cause]: {}\n\nNode.js v22.23.5\n"
 
@@ -138,11 +142,104 @@ class LiteOutcomes(Case):
         self.assertEqual(lite_outcomes(self.root, self.TASKS), {})
 
 
-class Failures(unittest.TestCase):
-    def test_row_lists_failures_most_common_first(self) -> None:
+def make_run(model: str, harness: str = "baseline", effort: str = "default", passed: int = 0, reasons: dict | None = None) -> dict:
+    reasons = reasons or {f"t{i}": "passed" if i < passed else "wrong-answer" for i in range(10)}
+    score = {"passed": sum(r == "passed" for r in reasons.values()), "total": len(reasons), "finished": len(reasons), "reasons": reasons}
+    return {"run": f"{model}-{harness}-{effort}", "model": model, "model_name": model.split("/", 1)[-1], "harness": harness, "effort": effort, "scores": {"x": score}}
+
+
+class Models(unittest.TestCase):
+    def test_known_model(self) -> None:
+        self.assertEqual(describe(make_run("bedrock/us.openai.gpt-6.2-sol")), ("GPT-6", "GPT-6.2 Sol", "Bedrock"))
+        self.assertEqual(describe(make_run("ollama/devstral:24b")), ("Devstral", "Devstral 24B", "Ollama"))
+
+    def test_unknown_model_falls_back(self) -> None:
+        self.assertEqual(describe(make_run("openrouter/acme/coder-7b")), ("Other", "acme/coder-7b", "openrouter"))
+        self.assertEqual(describe(make_run("local-model")), ("Other", "local-model", ""))
+
+    def test_host_named_only_when_it_disambiguates(self) -> None:
+        runs = [make_run("ollama/gpt-oss:20b"), make_run("bedrock/openai.gpt-oss-20b-1:0"), make_run("bedrock/zai.glm-5")]
+        self.assertEqual(labels(runs), {
+            "ollama/gpt-oss:20b": "GPT-OSS 20B (Ollama)",
+            "bedrock/openai.gpt-oss-20b-1:0": "GPT-OSS 20B (Bedrock)",
+            "bedrock/zai.glm-5": "GLM 5",
+        })
+
+    def test_order_is_family_model_host_harness_effort(self) -> None:
+        runs = [
+            make_run("openrouter/acme/coder-7b"),
+            make_run("ollama/devstral:24b"),
+            make_run("bedrock/us.anthropic.claude-opus-5-5", "native-tools", "max"),
+            make_run("bedrock/us.anthropic.claude-opus-5-5", "native-tools"),
+            make_run("bedrock/us.anthropic.claude-opus-5-5", "baseline", "max"),
+            make_run("ollama/qwen3-coder:30b"),
+            make_run("bedrock/us.anthropic.claude-haiku-5-5"),
+            make_run("bedrock/qwen.qwen3-coder-30b-a3b-v1:0"),
+        ]
+        self.assertEqual([r["run"] for r in sorted(runs, key=run_key)], [
+            "bedrock/us.anthropic.claude-haiku-5-5-baseline-default",
+            "bedrock/us.anthropic.claude-opus-5-5-baseline-max",
+            "bedrock/us.anthropic.claude-opus-5-5-native-tools-default",
+            "bedrock/us.anthropic.claude-opus-5-5-native-tools-max",
+            "bedrock/qwen.qwen3-coder-30b-a3b-v1:0-baseline-default",
+            "ollama/qwen3-coder:30b-baseline-default",
+            "ollama/devstral:24b-baseline-default",
+            "openrouter/acme/coder-7b-baseline-default",
+        ])
+
+
+class Pairs(unittest.TestCase):
+    OPUS = "bedrock/us.anthropic.claude-opus-5-5"
+    GLM = "bedrock/zai.glm-5"
+
+    def test_best_run_prefers_the_first_on_a_tie(self) -> None:
+        runs = [make_run(self.OPUS, "native-tools", "max", 7), make_run(self.OPUS, "native-tools", passed=7), make_run(self.OPUS, passed=3)]
+        self.assertEqual(best(runs)[self.OPUS]["run"], f"{self.OPUS}-native-tools-default")
+
+    def test_harness_pairs_need_both_at_default_effort(self) -> None:
+        text, native = make_run(self.OPUS), make_run(self.OPUS, "native-tools")
+        runs = [native, text, make_run(self.OPUS, "native-tools", "max"), make_run(self.GLM), make_run(self.GLM, "native-tools", "high")]
+        self.assertEqual(harness_pairs(runs), {self.OPUS: (text, native)})
+
+    def test_effort_pairs_use_the_highest_effort(self) -> None:
+        default, xhigh = make_run(self.OPUS), make_run(self.OPUS, effort="xhigh")
+        runs = [xhigh, default, make_run(self.OPUS, effort="high"), make_run(self.OPUS, effort="low"), make_run(self.OPUS, effort="turbo"), make_run(self.OPUS, "native-tools", "max"), make_run(self.GLM, effort="high")]
+        self.assertEqual(effort_pairs(runs, "baseline"), {self.OPUS: (default, xhigh)})
+        self.assertEqual(effort_pairs(runs, "native-tools"), {})
+
+
+class Fold(unittest.TestCase):
+    def test_reasons_fold_into_groups(self) -> None:
+        reasons = ["passed", "no-patch", "wrong-answer", "no-command", "malformed-tool-call", "context-limit", "task-time-limit", "refused", "surprise", None]
+        run = make_run("m/x", reasons={f"t{i}": r for i, r in enumerate(reasons)})
+        self.assertEqual(fold(run), {"Passed": 1, "Wrong answer": 2, "Unusable reply": 2, "Out of steps, time or context": 2, "Other": 2})
+
+
+class Charts(unittest.TestCase):
+    def test_charts_are_valid_svg(self) -> None:
+        runs = [
+            make_run("bedrock/zai.glm-5", passed=4),
+            make_run("bedrock/zai.glm-5", "native-tools", passed=0),
+            make_run("bedrock/zai.glm-5", "native-tools", "high", 10),
+            make_run("acme/<coder>", "h&1", "e<2>", 3),
+        ]
+        for chart in (leaderboard, native_chart, effort_chart, failures_chart):
+            for sample in (runs, []):
+                with self.subTest(chart=chart.__name__, runs=len(sample)):
+                    self.assertEqual(ElementTree.fromstring(chart(sample)).tag, "{http://www.w3.org/2000/svg}svg")
+
+
+class Tables(unittest.TestCase):
+    def test_scoreboard_row(self) -> None:
+        run = make_run("bedrock/us.openai.gpt-6.2-astra", "native-tools", "max", 4)
+        run["scores"] = {key: {**run["scores"]["x"]} for key in ("terminal-bench-4.0", "terminal-bench-2.0", "aider-polyglot", "swebench-lite")}
+        run["scores"]["swebench-lite"]["finished"] = 6
+        self.assertEqual(table([run]).splitlines()[2], "| GPT-6.2 Astra | Bedrock | native | max | 4/10 | 4/10 | 4/10 | 4/10 (6 done) | 16/40 |")
+
+    def test_failures_row_lists_failures_most_common_first(self) -> None:
         reasons = {"t1": "passed", "t2": "refused", "t3": "no-command", "t4": "no-command", "t5": "wrong-answer", "t6": None}
-        run = {"run": "m", "scores": {"x": {"reasons": reasons}}}
-        self.assertEqual(failures([run]).splitlines()[2], "| m | 1 | `no-command` 2 · `wrong-answer` 1 · `refused` 1 |")
+        run = make_run("ollama/devstral:24b", reasons=reasons)
+        self.assertEqual(failures([run]).splitlines()[2], "| Devstral 24B | Ollama | text | default | 1 | `no-command` 2 · `wrong-answer` 1 · `refused` 1 |")
 
 
 if __name__ == "__main__":

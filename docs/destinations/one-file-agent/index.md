@@ -50,5 +50,5 @@ BASE_URL=http://localhost:11434/v1 MODEL=qwen3-coder:30b \
 - [AWS Bedrock](getting-started/bedrock.md): use Claude and other models on Bedrock.
 - [How it works](how-it-works/index.md): the loop, the command format and the limits.
 - [Adapters](how-it-works/adapters.md): the message format, and how to support a new API.
-- [Benchmarks](benchmarks/index.md): the scoreboard, with a chart of pass rates for every run.
+- [Benchmarks](benchmarks/index.md): the scoreboard, with charts of the best score per model and what changes it.
 - [Running the benchmarks](benchmarks/running.md): run Terminal-Bench, Aider Polyglot and SWE-bench.

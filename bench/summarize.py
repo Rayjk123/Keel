@@ -1,6 +1,7 @@
 import collections
 import glob
 import json
+from html import escape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,11 +12,51 @@ BENCHMARKS = [
     ("aider-polyglot", "Aider Polyglot"),
     ("swebench-lite", "SWE-bench Lite"),
 ]
-BAR = "#0d9488"
 REASONS = [
     "passed", "wrong-answer", "no-patch", "no-command", "malformed-tool-call", "step-limit",
     "request-timeout", "context-limit", "task-time-limit", "refused", "model-error", "unsupported", "environment", "not-run",
 ]
+FAMILIES = ["Claude", "GPT-6", "GPT-OSS", "Qwen", "Kimi", "Grok", "GLM", "Devstral", "Other"]
+MODELS = {
+    "bedrock/us.anthropic.claude-haiku-5-5": ("Claude", "Claude Haiku 5.5"),
+    "bedrock/us.anthropic.claude-sonnet-5-5": ("Claude", "Claude Sonnet 5.5"),
+    "bedrock/us.anthropic.claude-opus-5-5": ("Claude", "Claude Opus 5.5"),
+    "bedrock/us.openai.gpt-6.2-astra": ("GPT-6", "GPT-6.2 Astra"),
+    "bedrock/us.openai.gpt-6.2-sol": ("GPT-6", "GPT-6.2 Sol"),
+    "bedrock/us.openai.gpt-6.1-terra": ("GPT-6", "GPT-6.1 Terra"),
+    "ollama/gpt-oss:20b": ("GPT-OSS", "GPT-OSS 20B"),
+    "bedrock/openai.gpt-oss-20b-1:0": ("GPT-OSS", "GPT-OSS 20B"),
+    "bedrock/openai.gpt-oss-120b-1:0": ("GPT-OSS", "GPT-OSS 120B"),
+    "ollama/qwen3-coder:30b": ("Qwen", "Qwen3 Coder 30B"),
+    "bedrock/qwen.qwen3-coder-30b-a3b-v1:0": ("Qwen", "Qwen3 Coder 30B"),
+    "bedrock/qwen.qwen3-coder-480b-a35b-v1:0": ("Qwen", "Qwen3 Coder 480B"),
+    "bedrock/moonshotai.kimi-k2.5": ("Kimi", "Kimi K2.5"),
+    "bedrock/us.xai.grok-4.7": ("Grok", "Grok 4.7"),
+    "bedrock/zai.glm-5": ("GLM", "GLM 5"),
+    "bedrock/zai.glm-4.7-flash": ("GLM", "GLM 4.7 Flash"),
+    "ollama/devstral:24b": ("Devstral", "Devstral 24B"),
+}
+NAMES = list(dict.fromkeys(name for _, name in MODELS.values()))
+HOSTS = {"bedrock": "Bedrock", "ollama": "Ollama"}
+HARNESSES = {"baseline": "text", "native-tools": "native"}
+EFFORTS = ["minimal", "low", "medium", "default", "high", "xhigh", "max"]
+CATEGORIES = [
+    ("Passed", ["passed"]),
+    ("Wrong answer", ["wrong-answer", "no-patch"]),
+    ("Unusable reply", ["no-command", "malformed-tool-call"]),
+    ("Out of steps, time or context", ["step-limit", "request-timeout", "context-limit", "task-time-limit"]),
+    ("Other", ["refused", "model-error", "unsupported", "environment", "not-run"]),
+]
+TEAL = "#0d9488"
+COLORS = [TEAL, "var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)"]
+CSS = (
+    ":root{--fg:#1f2937;--muted:#6b7280;--grid:#e5e7eb;--bg:#ffffff;--c1:#eb6834;--c2:#6250d6;--c3:#eda100;--c4:#e87ba4}"
+    "@media (prefers-color-scheme:dark){:root{--fg:#e5e7eb;--muted:#9ca3af;--grid:#374151;--bg:#1e2129;"
+    "--c1:#d95926;--c2:#9085e9;--c3:#c98500;--c4:#d55181}}"
+    "text{font-family:system-ui,sans-serif;font-size:14px;fill:var(--fg)}"
+    ".muted{fill:var(--muted)}.bold{font-weight:600}.small{font-size:12px}.inside{fill:#ffffff;font-size:12px}"
+)
+W, ROW, GAP, LABEL_W = 880, 26, 12, 270
 
 
 def agent_reason(log: Path) -> str | None:
@@ -145,59 +186,246 @@ def summarize_run(run_dir: Path) -> dict:
     }
 
 
-def table(runs: list[dict]) -> str:
-    head = "| Harness | Model | Effort | " + " | ".join(t for _, t in BENCHMARKS) + " |\n"
-    head += "|---|---|---|" + "---|" * len(BENCHMARKS) + "\n"
-    lines = []
+def describe(run: dict) -> tuple[str, str, str]:
+    family, name = MODELS.get(run["model"], ("Other", run["model_name"]))
+    prefix, _, rest = run["model"].partition("/")
+    return family, name, HOSTS.get(prefix, prefix) if rest else ""
+
+
+def rank(values: list[str], value: str) -> int:
+    return values.index(value) if value in values else len(values)
+
+
+def run_key(run: dict) -> tuple:
+    family, name, host = describe(run)
+    harness, effort = run["harness"], run["effort"]
+    return (rank(FAMILIES, family), rank(NAMES, name), name, host, rank(list(HARNESSES), harness), harness, rank(EFFORTS, effort), effort)
+
+
+def total(run: dict) -> int:
+    return sum(s["passed"] for s in run["scores"].values())
+
+
+def size(run: dict) -> int:
+    return sum(s["total"] for s in run["scores"].values())
+
+
+def by_model(runs: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for r in sorted(runs, key=run_key):
+        groups.setdefault(r["model"], []).append(r)
+    return groups
+
+
+def labels(runs: list[dict]) -> dict[str, str]:
+    hosts = collections.defaultdict(set)
     for r in runs:
+        _, name, host = describe(r)
+        hosts[name].add(host)
+    out = {}
+    for r in runs:
+        _, name, host = describe(r)
+        out[r["model"]] = f"{name} ({host})" if len(hosts[name]) > 1 else name
+    return out
+
+
+def best(runs: list[dict]) -> dict[str, dict]:
+    return {m: max(rs, key=total) for m, rs in by_model(runs).items()}
+
+
+def harness_pairs(runs: list[dict]) -> dict[str, tuple[dict, dict]]:
+    pairs = {}
+    for m, rs in by_model(runs).items():
+        found = {r["harness"]: r for r in rs if r["effort"] == "default"}
+        if "baseline" in found and "native-tools" in found:
+            pairs[m] = (found["baseline"], found["native-tools"])
+    return pairs
+
+
+def effort_pairs(runs: list[dict], harness: str) -> dict[str, tuple[dict, dict]]:
+    pairs = {}
+    for m, rs in by_model(runs).items():
+        rs = [r for r in rs if r["harness"] == harness]
+        higher = [r for r in rs if r["effort"] in EFFORTS and rank(EFFORTS, r["effort"]) > rank(EFFORTS, "default")]
+        default = next((r for r in rs if r["effort"] == "default"), None)
+        if default and higher:
+            pairs[m] = (default, higher[-1])
+    return pairs
+
+
+def fold(run: dict) -> collections.Counter:
+    n: collections.Counter = collections.Counter()
+    for s in run["scores"].values():
+        for reason in s["reasons"].values():
+            if reason:
+                n[next((label for label, reasons in CATEGORIES if reason in reasons), CATEGORIES[-1][0])] += 1
+    return n
+
+
+def columns(run: dict) -> str:
+    _, name, host = describe(run)
+    return f"| {name} | {host} | {HARNESSES.get(run['harness'], run['harness'])} | {run['effort']} |"
+
+
+def table(runs: list[dict]) -> str:
+    head = "| Model | Host | Harness | Effort | " + " | ".join(t for _, t in BENCHMARKS) + " | Total |\n"
+    head += "|---|---|---|---|" + "---|" * (len(BENCHMARKS) + 1) + "\n"
+    lines = []
+    for r in sorted(runs, key=run_key):
         cells = []
         for key, _ in BENCHMARKS:
             s = r["scores"][key]
             cells.append(f"{s['passed']}/{s['total']}" if s["finished"] == s["total"] else f"{s['passed']}/{s['total']} ({s['finished']} done)" if s["finished"] else "pending")
-        lines.append(f"| {r['harness']} | {r['model_name']} | {r['effort']} | " + " | ".join(cells) + " |")
+        cells.append(f"{total(r)}/{sum(s['total'] for s in r['scores'].values())}")
+        lines.append(columns(r) + " " + " | ".join(cells) + " |")
     return head + "\n".join(lines) + "\n"
 
 
 def failures(runs: list[dict]) -> str:
-    lines = ["| Run | Passed | Why the rest failed |", "|---|---|---|"]
-    for r in runs:
+    lines = ["| Model | Host | Harness | Effort | Passed | Why the rest failed |", "|---|---|---|---|---|---|"]
+    for r in sorted(runs, key=run_key):
         n = collections.Counter(reason for s in r["scores"].values() for reason in s["reasons"].values() if reason)
-        rest = sorted((c for c in n if c != "passed"), key=lambda c: (-n[c], REASONS.index(c)))
-        lines.append(f"| {r['run']} | {n['passed']} | " + " · ".join(f"`{c}` {n[c]}" for c in rest) + " |")
+        rest = sorted((c for c in n if c != "passed"), key=lambda c: (-n[c], rank(REASONS, c), c))
+        lines.append(columns(r) + f" {n['passed']} | " + " · ".join(f"`{c}` {n[c]}" for c in rest) + " |")
     return "\n".join(lines) + "\n"
 
 
-def chart(runs: list[dict]) -> str:
-    rows = sorted(runs, key=lambda r: -sum(r["scores"][k]["passed"] for k, _ in BENCHMARKS))
-    label_w = max(176, 16 + 7 * max((len(r["run"]) for r in rows), default=0))
-    width, gap, top, row_h, bar_h = label_w + 584, 16, 40, 24, 12
-    panel_w = (width - label_w - gap * (len(BENCHMARKS) - 1)) / len(BENCHMARKS)
-    bar_max = panel_w - 40
-    height = top + row_h * len(rows) + 8
-    css = (
-        ":root{--fg:#1f2937;--grid:#e5e7eb;--bg:#ffffff}"
-        "@media (prefers-color-scheme:dark){:root{--fg:#e5e7eb;--grid:#374151;--bg:#111827}}"
-        "text{font-family:system-ui,sans-serif;fill:var(--fg)}"
-    )
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Pass rate by benchmark for each run"><style>{css}</style>']
-    for gi, (_, title) in enumerate(BENCHMARKS):
-        px = label_w + gi * (panel_w + gap)
-        out.append(f'<text x="{px}" y="24" font-size="12" font-weight="600">{title}</text>')
-        out.append(f'<line x1="{px}" x2="{px}" y1="{top}" y2="{top + row_h * len(rows)}" stroke="var(--grid)"/>')
-    for ri, r in enumerate(rows):
-        y = top + ri * row_h
-        out.append(f'<text x="{label_w - 12}" y="{y + 16}" font-size="12" text-anchor="end">{r["run"]}</text>')
-        for gi, (key, _) in enumerate(BENCHMARKS):
-            s = r["scores"][key]
-            px = label_w + gi * (panel_w + gap)
-            w = bar_max * s["passed"] / s["total"] if s["total"] else 0
-            if w:
-                by, end = y + (row_h - bar_h) / 2, px + w
-                out.append(f'<path d="M{px} {by}H{end - 4}a4 4 0 0 1 4 4v{bar_h - 8}a4 4 0 0 1 -4 4H{px}Z" fill="{BAR}"/>')
-            label = f"{s['passed']}/{s['total']}" if s["finished"] else "pending"
-            out.append(f'<text x="{px + w + 6}" y="{y + 16}" font-size="11">{label}</text>')
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+def svg(label: str, height: float, body: list[str]) -> str:
+    head = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {height:g}" role="img" aria-label="{label}"><style>{CSS}</style>'
+    return "\n".join([head, *body, "</svg>"]) + "\n"
+
+
+def bar(x: float, y: float, w: float, color: str, end: bool = True, h: float = 12) -> str:
+    r = min(4, w) if end else 0
+    return f'<path d="M{x:g} {y:g}H{x + w - r:g}a{r:g} 4 0 0 1 {r:g} 4v{h - 8:g}a{r:g} 4 0 0 1 -{r:g} 4H{x:g}Z" fill="{color}"/>'
+
+
+def dot(x: float, y: float, solid: bool) -> str:
+    if solid:
+        return f'<circle cx="{x:g}" cy="{y:g}" r="5" fill="{TEAL}" stroke="var(--bg)" stroke-width="2"/>'
+    return f'<circle cx="{x:g}" cy="{y:g}" r="4" fill="var(--bg)" stroke="{TEAL}" stroke-width="2"/>'
+
+
+def legend(items: list[tuple[str, str]]) -> list[str]:
+    out, x = [], 0.0
+    for kind, text in items:
+        if kind in ("hollow", "solid"):
+            out.append(dot(x + 6, 12, kind == "solid"))
+        else:
+            out.append(f'<rect x="{x:g}" y="6" width="12" height="12" rx="2" fill="{kind}"/>')
+        out.append(f'<text x="{x + 18:g}" y="17">{text}</text>')
+        x += 40 + 7.6 * len(text)
+    return out
+
+
+def plot(runs: list[dict], models: list[str], panels: list[tuple[float, float, str, str]], mark, scale: int, top: float) -> tuple[list[str], float]:
+    names = labels(runs)
+    body, y, last = [], top, None
+    for m in models:
+        family = MODELS.get(m, ("Other",))[0]
+        if family != last:
+            if last is not None:
+                y += GAP
+            body.append(f'<text x="0" y="{y + 18:g}" class="bold">{family}</text>')
+            last = family
+        body.append(f'<text x="{LABEL_W - 12}" y="{y + 18:g}" text-anchor="end">{escape(names[m])}</text>')
+        for i, (x, w, _, _) in enumerate(panels):
+            body += mark(m, i, x, w, y)
+        y += ROW
+    grid = []
+    for x, w, title, note in panels:
+        if title:
+            grid.append(f'<text x="{x:g}" y="{top - 12:g}" class="bold">{title}</text>')
+        if note:
+            grid.append(f'<text x="{x + w + 16:g}" y="{top - 12:g}" class="muted small">{note}</text>')
+        for t in range(0, scale + 1, 10):
+            gx = x + w * t / scale
+            grid.append(f'<line x1="{gx:g}" x2="{gx:g}" y1="{top - 4:g}" y2="{y + 4:g}" stroke="var(--grid)"/>')
+            grid.append(f'<text x="{gx:g}" y="{y + 20:g}" text-anchor="middle" class="muted small">{t}</text>')
+    return grid + body, y + 28
+
+
+def scale_of(runs: list[dict]) -> int:
+    return max(map(size, runs), default=0) or 1
+
+
+def leaderboard(runs: list[dict]) -> str:
+    top, scale = best(runs), scale_of(runs)
+
+    def mark(m: str, _: int, x: float, w: float, y: float) -> list[str]:
+        r = top[m]
+        bw = w * total(r) / scale
+        tail = escape(f"{HARNESSES.get(r['harness'], r['harness'])} · {r['effort']}")
+        return [bar(x, y + 7, bw, TEAL), f'<text x="{x + bw + 8:g}" y="{y + 18:g}">{total(r)}/{size(r)} <tspan class="muted">· {tail}</tspan></text>']
+
+    body, height = plot(runs, list(top), [(LABEL_W, 440, "", "")], mark, scale, 8)
+    return svg("Best score per model, out of all its runs", height, body)
+
+
+def dumbbell(x: float, w: float, y: float, a: int, b: int, scale: int, note: str) -> list[str]:
+    xa, xb = x + w * a / scale, x + w * b / scale
+    return [
+        f'<line x1="{xa:g}" x2="{xb:g}" y1="{y + 13:g}" y2="{y + 13:g}" stroke="var(--muted)" stroke-width="2"/>',
+        dot(xa, y + 13, False),
+        dot(xb, y + 13, True),
+        f'<text x="{x + w + 16:g}" y="{y + 18:g}">{a} → {b}{note}</text>',
+    ]
+
+
+def native_chart(runs: list[dict]) -> str:
+    pairs, scale = harness_pairs(runs), scale_of(runs)
+
+    def mark(m: str, _: int, x: float, w: float, y: float) -> list[str]:
+        text, native = pairs[m]
+        return dumbbell(x, w, y, total(text), total(native), scale, "")
+
+    body, height = plot(runs, list(pairs), [(LABEL_W, 480, "", "text → native")], mark, scale, 56)
+    items = [("hollow", "Text harness"), ("solid", "Native tools")]
+    return svg(f"Tasks passed out of {scale} with the text harness and with native tools, at default effort", height, legend(items) + body)
+
+
+def effort_chart(runs: list[dict]) -> str:
+    panels = [effort_pairs(runs, "baseline"), effort_pairs(runs, "native-tools")]
+    scale = scale_of(runs)
+    models = [m for m in by_model(runs) if any(m in p for p in panels)]
+
+    def mark(m: str, i: int, x: float, w: float, y: float) -> list[str]:
+        if m not in panels[i]:
+            return [f'<text x="{x + w + 16:g}" y="{y + 18:g}" class="muted">no run</text>']
+        default, higher = panels[i][m]
+        return dumbbell(x, w, y, total(default), total(higher), scale, f' <tspan class="muted">{escape(higher["effort"])}</tspan>')
+
+    frame = [(LABEL_W, 180, "Text harness", "default → higher"), (LABEL_W + 300, 180, "Native tools", "default → higher")]
+    body, height = plot(runs, models, frame, mark, scale, 56)
+    items = [("hollow", "Default effort"), ("solid", "Highest effort, with its level after the numbers")]
+    return svg(f"Tasks passed out of {scale} at default effort and at the highest effort run, per harness", height, legend(items) + body)
+
+
+def failures_chart(runs: list[dict]) -> str:
+    harnesses = list(HARNESSES)
+    found = {(r["model"], r["harness"]): r for r in runs if r["effort"] == "default" and r["harness"] in harnesses}
+    scale = scale_of(runs)
+    models = [m for m in by_model(runs) if any((m, h) in found for h in harnesses)]
+
+    def mark(m: str, i: int, x: float, w: float, y: float) -> list[str]:
+        r = found.get((m, harnesses[i]))
+        if not r:
+            return [f'<text x="{x:g}" y="{y + 18:g}" class="muted">no default-effort run</text>']
+        n, out, cx = fold(r), [], x
+        drawn = [(label, color) for (label, _), color in zip(CATEGORIES, COLORS) if n[label]]
+        for j, (label, color) in enumerate(drawn):
+            sw = w * n[label] / scale
+            last = j == len(drawn) - 1
+            out.append(bar(cx, y + 7, sw if last else max(sw - 2, 0), color, last))
+            if label == CATEGORIES[0][0] and sw >= 24:
+                out.append(f'<text x="{cx + 5:g}" y="{y + 17.5:g}" class="inside">{n[label]}</text>')
+            cx += sw
+        return out
+
+    frame = [(LABEL_W, 280, "Text harness", ""), (LABEL_W + 315, 280, "Native tools", "")]
+    body, height = plot(runs, models, frame, mark, scale, 56)
+    items = list(zip(COLORS, (label for label, _ in CATEGORIES)))
+    return svg(f"How each model's {scale} tasks ended at default effort, per harness", height, legend(items) + body)
 
 
 def main() -> None:
@@ -211,7 +439,11 @@ def main() -> None:
     (RUNS / "failures.md").write_text(failures(runs))
     charts = ROOT / "docs" / "assets" / "charts"
     charts.mkdir(parents=True, exist_ok=True)
-    (charts / "scoreboard.svg").write_text(chart(runs))
+    done = [r for r in runs if all(s["finished"] == s["total"] for s in r["scores"].values())]
+    (charts / "leaderboard.svg").write_text(leaderboard(done))
+    (charts / "native-tools.svg").write_text(native_chart(done))
+    (charts / "effort.svg").write_text(effort_chart(done))
+    (charts / "failures.svg").write_text(failures_chart(done))
     print(table(runs))
 
 

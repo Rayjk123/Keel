@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Reframed the project as a learning journey with the tagline "Learning by building, one port at a time". The one-file agent is Destination 1.
 - Docs are organized by destination: a journey home page, then a section per destination.
 - `bench/baseline.sh` needs `MODELS`, and `bench/setup.sh` pulls only the Ollama models it lists.
+- The Benchmarks page groups models by family, with charts of each model's best score, what native tools and higher effort change, and why tasks fail.
 
 ### Added
 - MIT license.
