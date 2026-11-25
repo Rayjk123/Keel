@@ -35,9 +35,10 @@ Every task gets one reason, taken from the trial's own records: Harbor's result 
 | `wrong-answer` | Keel finished, but the task's tests failed or the patch didn't fix the issue |
 | `no-patch` | SWE-bench Lite: Keel finished without changing the code |
 | `no-command` | three replies in a row without exactly one command, so Keel stopped |
-| `malformed-tool-call` | the model server couldn't parse the model's tool call |
+| `malformed-tool-call` | the model's tool call couldn't be parsed or used, such as a tool name with stray format tokens |
 | `step-limit` | Keel used all 50 steps |
 | `request-timeout` | a model reply didn't start within Node's 5-minute limit, or took longer than Keel's 10-minute one |
+| `context-limit` | the conversation outgrew the model's context window |
 | `task-time-limit` | the task's own time budget ran out |
 | `refused` | a model or Bedrock safety filter declined the request |
 | `model-error` | another failed model request |

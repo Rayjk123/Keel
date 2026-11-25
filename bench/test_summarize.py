@@ -46,6 +46,8 @@ class AgentReason(Case):
         self.assertEqual(self.reason(failed + '{"error":"error parsing tool call: raw=..."}\n'), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "XML syntax error on line 1\n"), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "TimeoutError: aborted\n"), "request-timeout")
+        self.assertEqual(self.reason(failed + "Value at 'messages.4.member.content.1.member.toolUse.name' failed\n"), "malformed-tool-call")
+        self.assertEqual(self.reason(failed + "This model's maximum context length is 131072 tokens\n"), "context-limit")
         self.assertEqual(self.reason(failed + "overloaded\n"), "model-error")
 
     def test_finished_run_ignores_error_words_in_output(self) -> None:
@@ -76,6 +78,10 @@ class HarborReason(Case):
         self.assertEqual(harbor_reason(self.result(None, "VerifierTimeoutError"), trial), "wrong-answer")
         self.assertEqual(harbor_reason(self.result(None, "RuntimeError", "Docker compose command failed"), trial), "environment")
         self.assertEqual(harbor_reason(self.result(None, "ValueError", "bad task config"), trial), "environment")
+
+    def test_context_limit_is_a_model_failure(self) -> None:
+        trial = self.trial("stopped: the model request failed: 400 prompt is too long\n")
+        self.assertEqual(harbor_reason(self.result(0.0, "AgentTimeoutError"), trial), "context-limit")
 
     def test_model_failure_beats_task_timeout(self) -> None:
         trial = self.trial("[cause]: HeadersTimeoutError\n" + CRASH)

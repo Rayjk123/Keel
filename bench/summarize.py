@@ -14,7 +14,7 @@ BENCHMARKS = [
 BAR = "#0d9488"
 REASONS = [
     "passed", "wrong-answer", "no-patch", "no-command", "malformed-tool-call", "step-limit",
-    "request-timeout", "task-time-limit", "refused", "model-error", "unsupported", "environment", "not-run",
+    "request-timeout", "context-limit", "task-time-limit", "refused", "model-error", "unsupported", "environment", "not-run",
 ]
 
 
@@ -30,8 +30,10 @@ def agent_reason(log: Path) -> str | None:
             return "refused"
         if "TimeoutError" in tail:
             return "request-timeout"
-        if "error parsing tool call" in tail or "XML syntax error" in tail:
+        if any(m in tail for m in ("error parsing tool call", "XML syntax error", "toolUse.name")):
             return "malformed-tool-call"
+        if any(m in tail for m in ("maximum context length", "prompt is too long", "context_length_exceeded")):
+            return "context-limit"
         return "model-error"
     if last.startswith("stopped: no command in"):
         return "no-command"
@@ -50,7 +52,7 @@ def harbor_reason(result: dict, trial: Path) -> str:
     if kind == "AgentSafetyRefusalError":
         return "refused"
     agent = agent_reason(trial / "agent" / "keel.txt")
-    if agent in ("refused", "request-timeout", "malformed-tool-call", "model-error"):
+    if agent in ("refused", "request-timeout", "malformed-tool-call", "context-limit", "model-error"):
         return agent
     if kind == "AgentTimeoutError":
         return "task-time-limit"
@@ -167,7 +169,8 @@ def failures(runs: list[dict]) -> str:
 
 def chart(runs: list[dict]) -> str:
     rows = sorted(runs, key=lambda r: -sum(r["scores"][k]["passed"] for k, _ in BENCHMARKS))
-    width, label_w, gap, top, row_h, bar_h = 760, 176, 16, 40, 24, 12
+    label_w = max(176, 16 + 7 * max((len(r["run"]) for r in rows), default=0))
+    width, gap, top, row_h, bar_h = label_w + 584, 16, 40, 24, 12
     panel_w = (width - label_w - gap * (len(BENCHMARKS) - 1)) / len(BENCHMARKS)
     bar_max = panel_w - 40
     height = top + row_h * len(rows) + 8
