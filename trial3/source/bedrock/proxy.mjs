@@ -13,6 +13,7 @@ export const CLIENT_CONFIG = {
   requestHandler: { requestTimeout: STALL_MS, sessionTimeout: STALL_MS, disableConcurrentStreams: true },
 };
 const OUTPUT_LIMITS = [["anthropic.", 128000], ["openai.", 128000], ["xai.", 524288]];
+const SHARED_OUTPUT_CAP = 64000;
 const CONTEXT_WINDOWS = [
   ["qwen.qwen3-coder-30b", 262144],
   ["qwen.qwen3-coder-480b", 131072],
@@ -24,7 +25,7 @@ export function outputLimit(model, request) {
   const fixed = OUTPUT_LIMITS.find(([id]) => model.includes(id));
   if (fixed) return fixed[1];
   const window = CONTEXT_WINDOWS.find(([id]) => model.includes(id));
-  return window && Math.max(1, window[1] - Math.ceil(JSON.stringify(request).length / 2));
+  return window && Math.max(1, Math.min(SHARED_OUTPUT_CAP, window[1] - Math.ceil(JSON.stringify(request).length / 2)));
 }
 
 export function effortFields(model, effort) {

@@ -44,11 +44,11 @@ describe("converseInput", () => {
     assert.deepEqual(request("us.anthropic.claude-opus-5-5", { max_tokens: 4096 }).inferenceConfig, { maxTokens: 4096 });
   });
 
-  test("leaves room for the input when the model shares its window with the output", () => {
-    const short = request("zai.glm-5").inferenceConfig!.maxTokens;
-    const long = converseInput({ model: "zai.glm-5", messages: [{ role: "user", content: "x".repeat(20000) }] }).inferenceConfig!.maxTokens;
-    assert.ok(short < 202752 && short > 202000);
-    assert.ok(202752 - long >= 10000);
+  test("reserves at most 64,000 output tokens when the model shares its window with the output", () => {
+    const glm = (chars: number) => converseInput({ model: "zai.glm-5", messages: [{ role: "user", content: "x".repeat(chars) }] });
+    assert.equal(request("zai.glm-5").inferenceConfig!.maxTokens, 64000);
+    assert.equal(glm(250000).inferenceConfig!.maxTokens, 64000);
+    assert.ok(glm(300000).inferenceConfig!.maxTokens! < 64000);
   });
 
   test("adds no model-specific fields without reasoning_effort", () => {

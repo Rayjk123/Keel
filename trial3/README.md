@@ -6,7 +6,7 @@ Its runs are in `runs/trial-3-text-and-bash/` (text harness) and `runs/trial-3-n
 
 ## Harness
 
-Every run uses `main` at commit `bd99a4e`, which its manifest records. The text-harness runs set `KEEL_ADAPTER=text`; the native runs use the default. `source/` is a snapshot of that commit's harness, Bedrock proxy, benchmark scripts and tests, and each run's `agent_ts_sha256` and `tools_ts_sha256` match `source/agent.ts` and `source/tools.ts`. The proxy runs from the same source with no `MAX_TOKENS`.
+Every run uses `main` at commit `5196cdb`, which its manifest records. The text-harness runs set `KEEL_ADAPTER=text`; the native runs use the default. `source/` is a snapshot of that commit's harness, Bedrock proxy, benchmark scripts and tests, and each run's `agent_ts_sha256` and `tools_ts_sha256` match `source/agent.ts` and `source/tools.ts`. The proxy runs from the same source with no `MAX_TOKENS`.
 
 ## What changed from Trials 1 and 2
 
@@ -14,7 +14,7 @@ Trial 3 bundles these changes, so its scores can't be split between them. The bu
 
 | Change | Trials 1 and 2 | Trial 3 |
 |---|---|---|
-| Output limit | 8192 tokens, or 32,000 at higher effort | Each model's maximum: 128,000 for Claude, GPT-6 and GPT-OSS, 524,288 for Grok, and the context window less the request for Qwen, Kimi and GLM |
+| Output limit | 8192 tokens, or 32,000 at higher effort | Each model's maximum: 128,000 for Claude, GPT-6 and GPT-OSS, 524,288 for Grok, and for Qwen, Kimi and GLM, 64,000 or what's left of the context window after the request, whichever is smaller |
 | A reply cut off at the output limit | Text: counted as a reply without a command. Native: taken as the model finishing | Not run. Keel tells the model it was cut off and to reply more briefly |
 | Model replies per task | 50 | 200 |
 | Format tokens in a tool name, such as `bash<\|channel\|>analysis` | Replayed as is, so Bedrock rejected the rest of the task | Cut at the first `<`, quote or space, and replayed with only the characters Bedrock accepts |
@@ -31,7 +31,7 @@ Trial 3 also records what each task used: model calls, input tokens, output toke
 - Keel never trims old tool output or replayed reasoning, so long tasks grow toward each model's context window. Claude's replayed thinking counts as input.
 - Bedrock sends nothing while Claude thinks with hidden reasoning. A single reply that thinks for more than 30 minutes fails as `request-timeout`.
 - The proxy adds no prompt-cache points, so Claude reports no cache tokens, while GPT-6 and Grok report most of their input as cache reads.
-- For Qwen, Kimi and GLM, whose context window is shared between the request and the reply, the proxy estimates the request at one token per 2 characters. That overstates it, so long tasks get less output room than the window allows and can end in a loop of cut-off replies. Context management is left to Trial 4.
+- For Qwen, Kimi and GLM, whose context window is shared between the request and the reply, the proxy estimates the request at one token per 2 characters. Once a task's request passes about 138,000 tokens on GLM (less on Qwen 480B), the reply gets less room than the window allows, and a long task can end in a loop of cut-off replies. Context management is left to Trial 4.
 - A Bedrock stream that sends nothing for 30 minutes is retried up to 3 more times, so one step can take about 2 hours. Bedrock client errors, such as a content-filter refusal, are also retried before the task stops.
 - Each configuration runs once, except the three in the noise study below.
 
