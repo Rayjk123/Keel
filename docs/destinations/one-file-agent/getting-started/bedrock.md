@@ -24,7 +24,7 @@ The proxy asks each model for its largest reply:
 | GLM (`zai.glm`) | 202,752 tokens, less the request |
 | Any other model | Bedrock's default |
 
-Qwen, Kimi and GLM share one context window between the request and the reply, so the proxy subtracts an estimate of the request, half its length in characters, from the window. Set `MAX_TOKENS` to use one limit for every model instead, and a request's own `max_tokens` wins over both.
+Qwen, Kimi and GLM share one context window between the request and the reply, so the proxy reserves at most 64,000 tokens for the reply, and less once the window minus an estimate of the request, half its length in characters, is smaller. Set `MAX_TOKENS` to use one limit for every model instead, and a request's own `max_tokens` wins over both.
 
 The proxy returns a reply's reasoning blocks in order as `reasoning_details`: thinking as `reasoning.text` with its `signature`, and encrypted reasoning as `reasoning.encrypted` with the bytes in base64 `data`. Any thinking text is also in `reasoning`. When Keel sends a reply back, the proxy puts its blocks first in that assistant turn, before the text and tool calls, in the order Bedrock returned them. Blocks that came between tool calls move to the front too, which Bedrock accepts. Thinking with neither text nor a signature isn't sent back. Claude returns a signature with empty text and GPT-6 models return encrypted reasoning, so you can't read their thinking, but it is still replayed. Each log line counts the reasoning blocks in the reply (`reasoning=`) and in the history sent (`replayed=`).
 
