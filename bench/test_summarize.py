@@ -5,8 +5,9 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from summarize import (
-    agent_reason, best, describe, effort_chart, effort_pairs, failures, failures_chart, fold, harbor_outcomes, harbor_reason,
-    harness_pairs, labels, leaderboard, lite_outcomes, native_chart, run_key, table,
+    agent_reason, best, describe, effort_chart, effort_pairs, failures, failures_chart, fold, harbor_metrics, harbor_outcomes,
+    harbor_reason, harness_pairs, labels, leaderboard, lite_metrics, lite_outcomes, native_chart, run_key, summarize_run, table,
+    usage_table,
 )
 
 CRASH = "TypeError: fetch failed\n    at node:internal/deps/undici\n  [cause]: {}\n\nNode.js v22.23.5\n"
@@ -53,6 +54,11 @@ class AgentReason(Case):
         self.assertEqual(self.reason(failed + "TypeError: fetch failed (HeadersTimeoutError: Headers Timeout Error)\n"), "request-timeout")
         self.assertEqual(self.reason(failed + "Value at 'messages.4.member.content.1.member.toolUse.name' failed\n"), "malformed-tool-call")
         self.assertEqual(self.reason(failed + "This model's maximum context length is 131072 tokens\n"), "context-limit")
+        self.assertEqual(self.reason(failed.replace("500 ", "") + "TimeoutError: no data from the model server for 300 seconds\n"), "request-timeout")
+        stalled = '{"error":{"message":"TimeoutError: no data from Bedrock for 1800 seconds","code":500}}'
+        self.assertEqual(self.reason(failed + stalled + "\n"), "request-timeout")
+        context = '{"error":{"message":"ContextWindowExceeded: the conversation exceeds the maximum context length of m","code":400}}'
+        self.assertEqual(self.reason("stopped: the model request failed: 400 " + context + "\n"), "context-limit")
         self.assertEqual(self.reason(failed + "overloaded\n"), "model-error")
 
     def test_finished_run_ignores_error_words_in_output(self) -> None:
@@ -242,6 +248,66 @@ class Tables(unittest.TestCase):
         reasons = {"t1": "passed", "t2": "refused", "t3": "no-command", "t4": "no-command", "t5": "wrong-answer", "t6": None}
         run = make_run("ollama/devstral:24b", reasons=reasons)
         self.assertEqual(failures([run]).splitlines()[2], "| Devstral 24B | Ollama | text | default | 1 | `no-command` 2 · `wrong-answer` 1 · `refused` 1 |")
+
+
+USAGE = {"steps": 12, "input_tokens": 50000, "output_tokens": 3000, "cache_read_tokens": 40000, "cache_write_tokens": 2000}
+TIMING = {"started_at": "2026-11-25T06:27:44.429254Z", "finished_at": "2026-11-25T06:42:45.430187Z"}
+
+
+class Metrics(Case):
+    def harbor_result(self, name: str, usage: dict | None = None) -> dict:
+        agent = {"n_input_tokens": None, "n_cache_tokens": None, "n_output_tokens": None, "metadata": None}
+        if usage:
+            agent = {
+                "n_input_tokens": usage["input_tokens"],
+                "n_cache_tokens": usage["cache_read_tokens"],
+                "n_output_tokens": usage["output_tokens"],
+                "metadata": {"steps": usage["steps"], "cache_write_tokens": usage["cache_write_tokens"]},
+            }
+        return {"task_name": f"org/{name}", "finished_at": TIMING["finished_at"], "agent_result": agent, "agent_execution": TIMING}
+
+    def test_harbor_metrics(self) -> None:
+        self.assertEqual(harbor_metrics(self.harbor_result("t", USAGE)), {**USAGE, "seconds": 901})
+
+    def test_old_harbor_result_has_time_but_no_tokens(self) -> None:
+        self.assertEqual(harbor_metrics(self.harbor_result("t")), {**dict.fromkeys(USAGE), "seconds": 901})
+        self.assertEqual(harbor_metrics({"agent_execution": {"started_at": TIMING["started_at"], "finished_at": None}})["seconds"], None)
+        self.assertEqual(harbor_metrics({}), {**dict.fromkeys(USAGE), "seconds": None})
+
+    def test_lite_metrics(self) -> None:
+        rows = [{"instance_id": "new", "seconds": 60, **USAGE}, {"instance_id": "old", "status": "ok", "seconds": 30}]
+        self.write("predictions.jsonl", "".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(lite_metrics(self.root), {"new": {**USAGE, "seconds": 60}, "old": {**dict.fromkeys(USAGE), "seconds": 30}})
+        self.assertEqual(lite_metrics(self.root / "absent"), {})
+
+    def test_run_records_per_task_metrics_and_run_totals_and_medians(self) -> None:
+        subsets = {"terminal-bench-2.0": ["org/a", "org/b", "org/c"], "swebench-lite": ["x", "y"]}
+        manifest = {"run": "r", "model": "bedrock/zai.glm-5", "started": "2026-11-25", "keel_commit": "abc", "subsets": subsets}
+        self.write("run/manifest.json", json.dumps(manifest))
+        self.write("run/terminal-bench-2.0/job/a__1/result.json", json.dumps(self.harbor_result("a", USAGE)))
+        self.write("run/terminal-bench-2.0/job/b__1/result.json", json.dumps(self.harbor_result("b")))
+        prediction = {"instance_id": "x", "seconds": 99, **USAGE, "steps": 4}
+        self.write("run/swebench-lite/predictions.jsonl", json.dumps(prediction) + "\n")
+        self.write("run/swebench-lite/report.json", json.dumps({"resolved_ids": ["x"]}))
+        run = summarize_run(self.root / "run")
+        self.assertEqual(run["scores"]["terminal-bench-2.0"]["metrics"], {
+            "a": {**USAGE, "seconds": 901},
+            "b": {**dict.fromkeys(USAGE), "seconds": 901},
+            "c": None,
+        })
+        self.assertEqual(run["scores"]["swebench-lite"]["metrics"], {"x": {**USAGE, "steps": 4, "seconds": 99}, "y": None})
+        self.assertEqual(run["metrics"]["steps"], {"total": 16, "median": 8})
+        self.assertEqual(run["metrics"]["input_tokens"], {"total": 100000, "median": 50000})
+        self.assertEqual(run["metrics"]["seconds"], {"total": 1901, "median": 901})
+        self.assertEqual(run["scores"]["terminal-bench-2.0"]["reasons"]["c"], None)
+
+    def test_usage_table(self) -> None:
+        run = make_run("bedrock/zai.glm-5", "native-tools", "high")
+        totals = {"steps": 640, "input_tokens": 81_234_567, "output_tokens": 912_345, "cache_read_tokens": 0, "cache_write_tokens": None}
+        run["metrics"] = {k: {"total": v, "median": v} for k, v in totals.items()} | {"seconds": {"total": 45000, "median": 450}}
+        self.assertEqual(usage_table([run]).splitlines()[2], "| GLM 5 | Bedrock | native | high | 640 | 81.2M | 0 | — | 912k | 12.5 | 7.5 |")
+        empty = usage_table([make_run("bedrock/zai.glm-5")]).splitlines()[2]
+        self.assertEqual(empty, "| GLM 5 | Bedrock | text | default | — | — | — | — | — | — | — |")
 
 
 if __name__ == "__main__":

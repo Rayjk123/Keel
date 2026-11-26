@@ -19,6 +19,7 @@ NODE_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-
 SOURCES = (ROOT / "agent.ts", ROOT / "tools.ts")
 DATASET = "SWE-bench/SWE-bench_Lite"
 PLATFORM = "linux/amd64"
+USAGE = ("steps", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 
 PROMPT = "Fix the following issue in the repository in the current directory.\n\n{problem}"
 
@@ -65,6 +66,7 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
     instance_id = row["instance_id"]
     trial = out_dir / instance_id
     trial.mkdir(parents=True, exist_ok=True)
+    (trial / "usage.json").unlink(missing_ok=True)
     name = f"keel-{run_id}-{instance_id}".replace("/", "_")
     started = time.time()
     status = "ok"
@@ -76,7 +78,7 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
                 "-v", f"{NODE_DIR}:/opt/node:ro",
                 *[arg for src in SOURCES for arg in ("-v", f"{src}:/opt/keel/{src.name}:ro")],
                 "-v", f"{trial}:/out",
-                "-e", f"BASE_URL={base_url}", "-e", f"MODEL={model}",
+                "-e", f"BASE_URL={base_url}", "-e", f"MODEL={model}", "-e", "USAGE_FILE=/out/usage.json",
                 "-e", f"ADAPTER={os.environ.get('KEEL_ADAPTER', 'native')}",
                 *(["-e", "API_KEY"] if os.environ.get("KEEL_API_KEY") else []),
                 *(["-e", f"EFFORT={os.environ['KEEL_EFFORT']}"] if os.environ.get("KEEL_EFFORT") else []),
@@ -99,6 +101,10 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
         subprocess.run(["docker", "kill", name], capture_output=True)
     patch_file = trial / "patch.diff"
     patch = patch_file.read_text() if patch_file.exists() else ""
+    try:
+        usage = json.loads((trial / "usage.json").read_text())
+    except (OSError, ValueError):
+        usage = {}
     return {
         "instance_id": instance_id,
         "model_name_or_path": "keel",
@@ -106,6 +112,7 @@ def solve(row: dict, out_dir: Path, run_id: str, model: str, base_url: str, time
         "status": status,
         "error": error,
         "seconds": round(time.time() - started),
+        **{key: usage.get(key) for key in USAGE},
     }
 
 

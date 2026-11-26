@@ -1,5 +1,6 @@
 // A small agent loop: no SDK, no dependencies, just fetch, a few tools and two ways to talk to the model.
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { TOOLS, runTool, type ToolDef } from "./tools.ts";
 
@@ -25,6 +26,8 @@ export interface Adapter {
 
 type ToolCallPart = Extract<Part, { type: "tool_call" }>;
 type TextPart = Extract<Part, { type: "text" }>;
+type ReasoningPart = Extract<Part, { type: "reasoning" }>;
+type Reasoning = { reasoning?: string; reasoning_details?: unknown };
 
 const textOf = (parts: Part[]) =>
   parts
@@ -34,7 +37,19 @@ const textOf = (parts: Part[]) =>
 
 const toolCallsOf = (parts: Part[]) => parts.filter((p): p is ToolCallPart => p.type === "tool_call");
 
-type ChatMessage = { role: "system" | "user" | "assistant"; content: string | null };
+function reasoningOf(parts: Part[]): Reasoning {
+  const r = parts.find((p): p is ReasoningPart => p.type === "reasoning");
+  return r ? { reasoning: r.text, reasoning_details: r.opaque } : {};
+}
+
+function reasoningParts(msg: Reasoning): Part[] {
+  const text = typeof msg.reasoning === "string" && msg.reasoning ? msg.reasoning : undefined;
+  const details = msg.reasoning_details;
+  const opaque = Array.isArray(details) && !details.length ? undefined : details ?? undefined;
+  return text || opaque ? [{ type: "reasoning", text, opaque }] : [];
+}
+
+type ChatMessage = { role: "system" | "user" | "assistant"; content: string | null } & Reasoning;
 
 const COMMAND_BLOCK = /```bash\s*\n([\s\S]*?)\n```/g;
 
@@ -52,7 +67,7 @@ export function textAdapter(model: string): Adapter {
         const blocks = toolCallsOf(m.parts).map(
           (c) => "```bash\n" + (c.args as { command: string }).command + "\n```",
         );
-        return { role: m.role, content: [textOf(m.parts), ...blocks].filter(Boolean).join("\n\n") };
+        return { role: m.role, content: [textOf(m.parts), ...blocks].filter(Boolean).join("\n\n"), ...reasoningOf(m.parts) };
       });
       return { model, messages: wire };
     },
@@ -63,7 +78,7 @@ export function textAdapter(model: string): Adapter {
       const content = msg.content ?? "";
       const commands = [...content.matchAll(COMMAND_BLOCK)].map((match) => match[1]);
       const text = content.replace(COMMAND_BLOCK, "").trim();
-      const parts: Part[] = [];
+      const parts = reasoningParts(msg);
       if (text) parts.push({ type: "text", text });
       if (commands.length === 1) {
         parts.push({ type: "tool_call", id: `text_call_${nextCallId++}`, name: "bash", args: { command: commands[0] } });
@@ -76,7 +91,7 @@ export function textAdapter(model: string): Adapter {
 type WireToolCall = { id?: string; type?: string; function: { name: string; arguments: unknown } };
 type NativeWireMessage =
   | { role: "system" | "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls?: WireToolCall[] }
+  | ({ role: "assistant"; content: string | null; tool_calls?: WireToolCall[] } & Reasoning)
   | { role: "tool"; tool_call_id: string; content: string };
 
 export class BadArguments {
@@ -120,7 +135,9 @@ export function nativeAdapter(model: string): Adapter {
             },
           }));
           const text = textOf(m.parts);
-          return [calls.length ? { role: "assistant", content: text || null, tool_calls: calls } : { role: "assistant", content: text }];
+          const reasoning = reasoningOf(m.parts);
+          if (calls.length) return [{ role: "assistant", content: text || null, tool_calls: calls, ...reasoning }];
+          return [{ role: "assistant", content: text, ...reasoning }];
         }
         return [{ role: m.role, content: textOf(m.parts) }];
       });
@@ -133,10 +150,10 @@ export function nativeAdapter(model: string): Adapter {
 
     fromWire(response) {
       const choice = (
-        response as { choices: { message: { content?: string | null; tool_calls?: WireToolCall[] }; finish_reason?: string }[] }
+        response as { choices: { message: { content?: string | null; tool_calls?: WireToolCall[] } & Reasoning; finish_reason?: string }[] }
       ).choices[0];
       const msg = choice.message;
-      const parts: Part[] = [];
+      const parts = reasoningParts(msg);
       const text = (msg.content ?? "").trim();
       if (text) parts.push({ type: "text", text });
       for (const call of msg.tool_calls ?? []) {
@@ -211,30 +228,139 @@ export class ModelError extends Error {}
 
 const RETRIES = 3;
 const RETRY_DELAY_MS = Number(process.env.RETRY_DELAY_MS ?? 2000);
+const IDLE_TIMEOUT_MS = Number(process.env.IDLE_TIMEOUT_MS ?? 300_000);
+const STALLED = `no data from the model server for ${IDLE_TIMEOUT_MS / 1000} seconds`;
 
-async function chat(adapter: Adapter, messages: Message[]): Promise<Message> {
+type Usage = { steps: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number };
+type WireUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+};
+type WireError = { message?: string; code?: unknown };
+type WireReply = { choices?: { message: object; finish_reason?: string }[]; usage?: WireUsage | null; error?: WireError };
+type Delta = {
+  content?: string | null;
+  reasoning?: string | null;
+  reasoning_details?: ({ index?: number } & Record<string, unknown>)[];
+  tool_calls?: { index?: number; id?: string; type?: string; function?: { name?: string; arguments?: string } }[];
+};
+type Chunk = { choices?: { delta?: Delta; finish_reason?: string | null }[]; usage?: WireUsage | null; error?: WireError };
+
+const JOINED = ["text", "summary", "signature", "data"];
+
+export async function readReply(res: Response, alive: () => void = () => {}): Promise<WireReply> {
+  if (!res.headers.get("content-type")?.includes("text/event-stream")) return res.json();
+  let content = "";
+  let reasoning = "";
+  let finish: string | undefined;
+  let usage: WireUsage | null | undefined;
+  const calls: { id: string; type: string; function: { name: string; arguments: string } }[] = [];
+  const details: Record<string, unknown>[] = [];
+  let error: WireError | undefined;
+  let done = false;
+  const take = (line: string) => {
+    const data = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (done || !data) return;
+    const chunk = data === "[DONE]" ? {} : (JSON.parse(data) as Chunk);
+    error = chunk.error;
+    done = data === "[DONE]" || !!error;
+    usage = chunk.usage ?? usage;
+    const choice = chunk.choices?.[0];
+    finish = choice?.finish_reason ?? finish;
+    const delta = choice?.delta ?? {};
+    content += delta.content ?? "";
+    reasoning += delta.reasoning ?? "";
+    for (const c of delta.tool_calls ?? []) {
+      const index = c.index ?? (c.id || !calls.length ? calls.length : calls.length - 1);
+      const call = (calls[index] ??= { id: "", type: "function", function: { name: "", arguments: "" } });
+      call.id = c.id || call.id;
+      call.type = c.type || call.type;
+      call.function.name += c.function?.name ?? "";
+      call.function.arguments += c.function?.arguments ?? "";
+    }
+    for (const { index = 0, ...part } of delta.reasoning_details ?? []) {
+      const into = (details[index] ??= {});
+      for (const [k, v] of Object.entries(part)) into[k] = JOINED.includes(k) && typeof into[k] === "string" ? into[k] + String(v) : v;
+    }
+  };
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const bytes of res.body ?? []) {
+    alive();
+    const lines = (buffer + decoder.decode(bytes, { stream: true })).split("\n");
+    buffer = lines.pop() ?? "";
+    lines.forEach(take);
+    if (done) break;
+  }
+  take(buffer + decoder.decode());
+  if (error) return { error };
+  if (!finish) throw new Error("the stream ended before the reply was finished");
+  const message = {
+    role: "assistant",
+    content: calls.length ? content || null : content,
+    ...(calls.length ? { tool_calls: calls.filter(Boolean) } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(details.length ? { reasoning_details: details.filter(Boolean) } : {}),
+  };
+  return { choices: [{ message, finish_reason: finish }], usage };
+}
+
+function count(usage: Usage, u: WireUsage | null | undefined) {
+  usage.steps++;
+  usage.input_tokens += u?.prompt_tokens ?? 0;
+  usage.output_tokens += u?.completion_tokens ?? 0;
+  usage.cache_read_tokens += u?.prompt_tokens_details?.cached_tokens ?? 0;
+  usage.cache_write_tokens += u?.prompt_tokens_details?.cache_write_tokens ?? 0;
+  if (process.env.USAGE_FILE) writeFileSync(process.env.USAGE_FILE, JSON.stringify(usage) + "\n");
+}
+
+async function chat(adapter: Adapter, messages: Message[], usage: Usage): Promise<Message> {
   const effort = process.env.EFFORT;
   let last = "";
   for (let attempt = 0; attempt <= RETRIES; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-    let res: Response;
+    const idle = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const alive = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => idle.abort(new DOMException(STALLED, "TimeoutError")), IDLE_TIMEOUT_MS);
+    };
+    let status = 0;
+    let reply: WireReply | undefined;
     try {
-      res = await fetch(`${BASE_URL}/chat/completions`, {
+      alive();
+      const res = await fetch(`${BASE_URL}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}`, Connection: "close" },
-        body: JSON.stringify({ ...adapter.toWire(messages, TOOLS), ...(effort ? { reasoning_effort: effort } : {}) }),
-        signal: AbortSignal.timeout(600_000),
+        body: JSON.stringify({
+          ...adapter.toWire(messages, TOOLS),
+          stream: true,
+          stream_options: { include_usage: true },
+          ...(effort ? { reasoning_effort: effort } : {}),
+        }),
+        signal: idle.signal,
       });
+      status = res.status;
+      if (res.ok) reply = await readReply(res, alive);
+      else last = `${res.status} ${(await res.text()).slice(0, 2000)}`;
     } catch (e) {
       const err = e as Error;
+      status = 0;
       last = `${err.name}: ${err.message}${err.cause instanceof Error ? ` (${err.cause.name}: ${err.cause.message})` : ""}`;
-      console.error(`model request failed (${last}), attempt ${attempt + 1} of ${RETRIES + 1}`);
-      continue;
+    } finally {
+      clearTimeout(timer);
     }
-    if (res.ok) return adapter.fromWire(await res.json());
-    last = `${res.status} ${(await res.text()).slice(0, 2000)}`;
+    if (reply && !reply.error) {
+      count(usage, reply.usage);
+      return adapter.fromWire(reply);
+    }
+    if (reply?.error) {
+      status = Number(reply.error.code) || 500;
+      last = `${status} ${JSON.stringify({ error: reply.error }).slice(0, 2000)}`;
+    }
     console.error(`model request failed (${last.slice(0, 200)}), attempt ${attempt + 1} of ${RETRIES + 1}`);
-    if (res.status < 500 && res.status !== 429) break;
+    if (status && status < 500 && status !== 429) break;
   }
   throw new ModelError(last);
 }
@@ -295,22 +421,23 @@ export function runNativeTool(call: ToolCallPart): Part {
 }
 
 export async function agent(adapter: Adapter, task: string, maxSteps = 200): Promise<string> {
+  const usage: Usage = { steps: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
   try {
-    return await (adapter.native ? nativeLoop(adapter, task, maxSteps) : textLoop(adapter, task, maxSteps));
+    return await (adapter.native ? nativeLoop(adapter, task, maxSteps, usage) : textLoop(adapter, task, maxSteps, usage));
   } catch (e) {
     if (e instanceof ModelError) return `stopped: the model request failed: ${e.message}`;
     throw e;
   }
 }
 
-async function nativeLoop(adapter: Adapter, task: string, maxSteps: number): Promise<string> {
+async function nativeLoop(adapter: Adapter, task: string, maxSteps: number, usage: Usage): Promise<string> {
   const messages: Message[] = [
     { role: "system", parts: [{ type: "text", text: NATIVE_SYSTEM }] },
     { role: "user", parts: [{ type: "text", text: task }] },
   ];
   let pending: string | undefined;
   for (let step = 0; step < maxSteps; step++) {
-    const msg = await chat(adapter, messages);
+    const msg = await chat(adapter, messages, usage);
     if (msg.finish === "length") {
       pending = undefined;
       messages.push({ role: "user", parts: [{ type: "text", text: CUT_OFF }] });
@@ -330,7 +457,7 @@ async function nativeLoop(adapter: Adapter, task: string, maxSteps: number): Pro
   return "stopped: step limit reached";
 }
 
-async function textLoop(adapter: Adapter, task: string, maxSteps: number): Promise<string> {
+async function textLoop(adapter: Adapter, task: string, maxSteps: number, usage: Usage): Promise<string> {
   const messages: Message[] = [
     { role: "system", parts: [{ type: "text", text: SYSTEM }] },
     { role: "user", parts: [{ type: "text", text: task }] },
@@ -338,7 +465,7 @@ async function textLoop(adapter: Adapter, task: string, maxSteps: number): Promi
   let noCommandStreak = 0;
   try {
     for (let step = 0; step < maxSteps; step++) {
-      const msg = await chat(adapter, messages);
+      const msg = await chat(adapter, messages, usage);
       if (msg.finish === "length") {
         messages.push({ role: "user", parts: [{ type: "text", text: CUT_OFF }] });
         continue;

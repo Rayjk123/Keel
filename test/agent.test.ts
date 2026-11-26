@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-type Wire = { model: string; messages: { role: string; content: string }[]; reasoning_effort?: string };
+type WireMessage = { role: string; content: string; reasoning?: string; reasoning_details?: unknown };
+type Wire = { model: string; messages: WireMessage[]; reasoning_effort?: string };
 
 const DONE = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT";
 
-type Reply = string | { content: string; finish_reason: string };
+type Reply = string | { content: string; finish_reason: string; reasoning?: string; reasoning_details?: unknown };
 
 let script: Reply[] = [];
 let requests: Wire[] = [];
@@ -19,9 +20,9 @@ const server = http.createServer(async (req, res) => {
   requests.push(JSON.parse(raw));
   connections.push(req.headers.connection);
   const next = script.shift() ?? "script exhausted";
-  const { content, finish_reason } = typeof next === "string" ? { content: next, finish_reason: "stop" } : next;
+  const { content, finish_reason, ...extra } = typeof next === "string" ? { content: next, finish_reason: "stop" } : next;
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason }] }));
+  res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content, ...extra }, finish_reason }] }));
 });
 
 let keel: typeof import("../agent.ts");
@@ -128,6 +129,40 @@ describe("history", () => {
     assert.equal(requests[0].messages[0].role, "system");
     assert.deepEqual(requests[0].messages[1], { role: "user", content: "the task" });
     assert.equal(requests[0].model, "fake");
+  });
+});
+
+describe("reasoning", () => {
+  const details = [{ type: "reasoning.text", text: "Think.", signature: "sig" }, { type: "reasoning.encrypted", data: "AAEC" }];
+  const thinking = (content: string, reasoning: string) => ({ content, finish_reason: "stop", reasoning, reasoning_details: details });
+
+  test("is replayed unchanged on the assistant message with the command", async () => {
+    await run([thinking(reply("echo hi"), "Think."), submit("ok")]);
+    const assistant = requests[1].messages[2];
+    assert.equal(assistant.content, reply("echo hi"));
+    assert.equal(assistant.reasoning, "Think.");
+    assert.deepEqual(assistant.reasoning_details, details);
+  });
+
+  test("a bash block in the reasoning is not run", async () => {
+    await run([thinking("No block.", reply("echo from-reasoning")), thinking(reply("echo from-reply"), reply("echo nope")), submit("ok")]);
+    assert.match(lastWire(1).content, /^No bash command found/);
+    assert.equal(lastWire(2).content, "exit=0\nfrom-reply\n");
+  });
+
+  test("is dropped with a reply that has no command", async () => {
+    await run([thinking("No block here.", "lost"), submit("ok")]);
+    assert.ok(requests[1].messages.every((m) => !("reasoning" in m) && !("reasoning_details" in m)));
+  });
+
+  test("a cut-off reply's reasoning is not replayed", async () => {
+    await run([{ ...thinking(reply("echo hi"), "lost"), finish_reason: "length" }, submit("ok")]);
+    assert.ok(requests[1].messages.every((m) => !("reasoning" in m) && !("reasoning_details" in m)));
+  });
+
+  test("a reply without reasoning sends no reasoning fields", async () => {
+    await run([reply("echo hi"), submit("ok")]);
+    assert.ok(requests[1].messages.every((m) => !("reasoning" in m) && !("reasoning_details" in m)));
   });
 });
 

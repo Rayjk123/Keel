@@ -7,9 +7,24 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 
 type WireCall = { id: string; type: string; function: { name: string; arguments: string } };
-type WireMessage = { role: string; content: string | null; tool_calls?: WireCall[]; tool_call_id?: string };
+type WireMessage = {
+  role: string;
+  content: string | null;
+  tool_calls?: WireCall[];
+  tool_call_id?: string;
+  reasoning?: string;
+  reasoning_details?: unknown;
+};
 type Wire = { model: string; messages: WireMessage[]; tools: { type: string; function: { name: string } }[] };
-type Reply = { content?: string | null; tool_calls?: unknown[]; status?: number; drop?: boolean; finish_reason?: string };
+type Reply = {
+  content?: string | null;
+  tool_calls?: unknown[];
+  status?: number;
+  drop?: boolean;
+  finish_reason?: string;
+  reasoning?: string | null;
+  reasoning_details?: unknown;
+};
 
 let script: Reply[] = [];
 let requests: Wire[] = [];
@@ -135,6 +150,45 @@ describe("finishing", () => {
     const result = await run(Array(10).fill(tools(call("bash", { command: "true" }))), 3);
     assert.equal(result, "stopped: step limit reached");
     assert.equal(requests.length, 3);
+  });
+});
+
+describe("reasoning", () => {
+  const details = [
+    { type: "reasoning.text", text: "", signature: "c2ln" },
+    { type: "reasoning.encrypted", data: "AAEC" },
+  ];
+
+  test("replays the reasoning text and details unchanged on the assistant message that carried them", async () => {
+    await run([{ ...tools(call("bash", { command: "true" }, "t")), reasoning: "Run it.", reasoning_details: details }, ...end("ok")]);
+    const assistant = requests[1].messages[2];
+    assert.equal(assistant.reasoning, "Run it.");
+    assert.deepEqual(assistant.reasoning_details, details);
+    assert.equal(assistant.tool_calls![0].id, "t");
+  });
+
+  test("replays the reasoning of a reply without tool calls", async () => {
+    await run([{ content: "Done.", reasoning: "Looks finished." }, finish("Done.")]);
+    assert.equal(requests[1].messages.at(-2)!.reasoning, "Looks finished.");
+  });
+
+  test("keeps details whose reasoning text is empty", async () => {
+    await run([{ ...tools(call("bash", { command: "true" })), reasoning: "", reasoning_details: details }, ...end("ok")]);
+    const assistant = requests[1].messages[2];
+    assert.equal("reasoning" in assistant, false);
+    assert.deepEqual(assistant.reasoning_details, details);
+  });
+
+  test("sends no reasoning fields when the reply had none, or only empty ones", async () => {
+    const empty = { ...tools(call("bash", { command: "true" })), reasoning: "", reasoning_details: null };
+    const none = { ...tools(call("bash", { command: "true" })), reasoning_details: [] };
+    await run([none, empty, ...end("ok")]);
+    for (const m of requests[2].messages) assert.ok(!("reasoning" in m) && !("reasoning_details" in m));
+  });
+
+  test("a cut-off reply's reasoning is not replayed", async () => {
+    await run([{ content: "", reasoning: "lost", reasoning_details: details, finish_reason: "length" }, ...end("ok")]);
+    for (const m of requests[1].messages) assert.ok(!("reasoning" in m) && !("reasoning_details" in m));
   });
 });
 
@@ -312,6 +366,16 @@ describe("nativeAdapter.fromWire", () => {
   test("drops format tokens that leak into a tool name", () => {
     const msg = parse({ content: null, tool_calls: [call("bash<|channel|>analysis", { command: "ls" }, "1")] });
     assert.deepEqual(msg.parts, [{ type: "tool_call", id: "1", name: "bash", args: { command: "ls" } }]);
+  });
+
+  test("stores reasoning as one part ahead of the text and tool calls", () => {
+    const details = [{ type: "reasoning.text", text: "Look.", signature: "s" }];
+    const msg = parse({ content: "Plan.", tool_calls: [call("read", { path: "a" }, "1")], reasoning: "Look.", reasoning_details: details });
+    assert.deepEqual(msg.parts, [
+      { type: "reasoning", text: "Look.", opaque: details },
+      { type: "text", text: "Plan." },
+      { type: "tool_call", id: "1", name: "read", args: { path: "a" } },
+    ]);
   });
 
   test("a plain reply is text only", () => {

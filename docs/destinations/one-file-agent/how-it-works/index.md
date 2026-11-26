@@ -80,6 +80,20 @@ Output longer than 10,000 characters keeps its first 2,000 and last 8,000 charac
 
 A tool that fails returns a message starting with `error:`, such as a missing file or an edit that didn't match. The run carries on, so the model can fix its call.
 
+## The model's reasoning
+
+When the server returns a model's reasoning with a reply, Keel keeps it and sends it back unchanged with that reply on every later turn, so the model builds on its earlier thinking instead of starting again. Keel reads the text from `message.reasoning`, the field Ollama and OpenRouter use, and keeps `message.reasoning_details` as an opaque list. It only looks inside to join a streamed entry's pieces, which share an `index`. Both modes do this, and in text mode a `bash` block inside the reasoning is never run. A reply Keel leaves out of the history, because it was cut off or, in text mode, had no command, leaves its reasoning out too.
+
+## Streaming
+
+Keel asks for a streamed reply (`stream: true`, with `stream_options.include_usage`) and joins the pieces into one message: the text, the tool calls by their `index`, the reasoning, the finish reason and the usage. A server that answers with plain JSON instead works too. A reply can take as long as it needs while it keeps arriving, but if the server sends nothing at all for 5 minutes, Keel gives up on that request and retries it. A server can keep a quiet connection open with SSE comments such as `: keepalive`.
+
+An error the server sends inside the stream, as `data: {"error": {"message": ..., "code": ...}}`, fails the request like an HTTP error with that code: a client error such as 400 stops the run, and anything else is retried. So is a stream that ends before its finish reason.
+
+## Usage
+
+Set `USAGE_FILE` to a path, and Keel writes the task's running totals there as JSON after every reply: `steps` (model replies), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_write_tokens`. They add up each reply's `usage`: input is `prompt_tokens`, which includes cached tokens, cache reads are `prompt_tokens_details.cached_tokens`, cache writes are `prompt_tokens_details.cache_write_tokens`, and output is `completion_tokens`, reasoning included. Failed attempts don't count. The benchmark scripts set it, so every task records what it used.
+
 ## Finishing a task
 
 The model finishes by replying without a tool call. Keel then asks once to confirm: if the task is done, the model replies again with a short summary, and that summary is the final answer. If it isn't, the model just carries on calling tools.
@@ -97,5 +111,6 @@ A reply cut off at the output limit doesn't count as finishing. Keel runs none o
 | Output kept per command | 10,000 characters |
 | Lines per read | 2,000 |
 | Retries when the model server fails | 3, with a growing pause |
+| Silence before a request is retried | 5 minutes, or `IDLE_TIMEOUT_MS` |
 
 If the server still fails after the retries, Keel stops the run cleanly and reports the error, so a benchmark records a result for the task.

@@ -1,6 +1,8 @@
 import collections
 import glob
 import json
+import statistics
+from datetime import datetime
 from html import escape
 from pathlib import Path
 
@@ -58,6 +60,7 @@ CSS = (
     ".muted{fill:var(--muted)}.bold{font-weight:600}.small{font-size:12px}.inside{fill:#ffffff;font-size:12px}"
 )
 W, ROW, GAP, LABEL_W = 880, 26, 12, 270
+METRICS = ["steps", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "seconds"]
 
 
 def agent_reason(log: Path) -> str | None:
@@ -105,8 +108,8 @@ def harbor_reason(result: dict, trial: Path) -> str:
     return "environment"
 
 
-def harbor_outcomes(folder: Path) -> dict[str, tuple[bool, str]]:
-    latest: dict[str, tuple[str, str]] = {}
+def harbor_latest(folder: Path) -> dict[str, tuple[dict, Path]]:
+    latest: dict[str, tuple[str, dict, Path]] = {}
     for f in glob.glob(str(folder / "*" / "result.json")) + glob.glob(str(folder / "*" / "*" / "result.json")):
         try:
             d = json.loads(Path(f).read_text())
@@ -115,8 +118,52 @@ def harbor_outcomes(folder: Path) -> dict[str, tuple[bool, str]]:
         name = str(d.get("task_name", "")).split("/")[-1]
         stamp = str(d.get("finished_at") or d.get("started_at") or "")
         if name and stamp and (name not in latest or stamp > latest[name][0]):
-            latest[name] = (stamp, harbor_reason(d, Path(f).parent))
-    return {name: (reason == "passed", reason) for name, (_, reason) in latest.items()}
+            latest[name] = (stamp, d, Path(f).parent)
+    return {name: (d, trial) for name, (_, d, trial) in latest.items()}
+
+
+def harbor_outcomes(folder: Path) -> dict[str, tuple[bool, str]]:
+    outcomes = {}
+    for name, (result, trial) in harbor_latest(folder).items():
+        reason = harbor_reason(result, trial)
+        outcomes[name] = (reason == "passed", reason)
+    return outcomes
+
+
+def elapsed(timing: dict | None) -> int | None:
+    try:
+        return round((datetime.fromisoformat(timing["finished_at"]) - datetime.fromisoformat(timing["started_at"])).total_seconds())
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
+def harbor_metrics(result: dict) -> dict:
+    agent = result.get("agent_result") or {}
+    meta = agent.get("metadata") or {}
+    return {
+        "steps": meta.get("steps"),
+        "input_tokens": agent.get("n_input_tokens"),
+        "output_tokens": agent.get("n_output_tokens"),
+        "cache_read_tokens": agent.get("n_cache_tokens"),
+        "cache_write_tokens": meta.get("cache_write_tokens"),
+        "seconds": elapsed(result.get("agent_execution")),
+    }
+
+
+def lite_metrics(folder: Path) -> dict[str, dict]:
+    try:
+        lines = (folder / "predictions.jsonl").read_text().splitlines()
+    except OSError:
+        return {}
+    return {d["instance_id"]: {k: d.get(k) for k in METRICS} for d in map(json.loads, filter(None, lines))}
+
+
+def run_metrics(scores: dict) -> dict:
+    out = {}
+    for k in METRICS:
+        values = [m[k] for s in scores.values() for m in s["metrics"].values() if m and m.get(k) is not None]
+        out[k] = {"total": sum(values) if values else None, "median": statistics.median(values) if values else None}
+    return out
 
 
 def lite_outcomes(folder: Path, tasks: list[str]) -> dict[str, tuple[bool, str]]:
@@ -162,9 +209,10 @@ def summarize_run(run_dir: Path) -> dict:
         tasks = [t.split("/")[-1] for t in manifest["subsets"].get(key, [])]
         folder = run_dir / key
         if key == "swebench-lite":
-            outcomes = lite_outcomes(folder, tasks)
+            outcomes, metrics = lite_outcomes(folder, tasks), lite_metrics(folder)
         else:
             outcomes = harbor_outcomes(folder)
+            metrics = {name: harbor_metrics(result) for name, (result, _) in harbor_latest(folder).items()}
         results = {t: outcomes[t] for t in tasks if t in outcomes}
         scores[key] = {
             "title": title,
@@ -173,6 +221,7 @@ def summarize_run(run_dir: Path) -> dict:
             "finished": len(results),
             "tasks": {t: results[t][0] if t in results else None for t in tasks},
             "reasons": {t: results[t][1] if t in results else None for t in tasks},
+            "metrics": {t: metrics.get(t) for t in tasks},
         }
     return {
         "run": manifest["run"],
@@ -184,6 +233,7 @@ def summarize_run(run_dir: Path) -> dict:
         "started": manifest["started"],
         "keel_commit": manifest["keel_commit"],
         "scores": scores,
+        "metrics": run_metrics(scores),
     }
 
 
@@ -288,6 +338,30 @@ def failures(runs: list[dict]) -> str:
         n = collections.Counter(reason for s in r["scores"].values() for reason in s["reasons"].values() if reason)
         rest = sorted((c for c in n if c != "passed"), key=lambda c: (-n[c], rank(REASONS, c), c))
         lines.append(columns(r) + f" {n['passed']} | " + " · ".join(f"`{c}` {n[c]}" for c in rest) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def tokens(n: float | None) -> str:
+    if n is None:
+        return "—"
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else f"{n:.0f}"
+
+
+def usage_table(runs: list[dict]) -> str:
+    lines = [
+        "| Model | Host | Harness | Effort | Steps | Input tokens | Cache read | Cache write | Output tokens | Hours | Median minutes |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in sorted(runs, key=run_key):
+        m = {k: (r.get("metrics") or {}).get(k) or {} for k in METRICS}
+        steps, hours, median = m["steps"].get("total"), m["seconds"].get("total"), m["seconds"].get("median")
+        cells = [
+            "—" if steps is None else str(steps),
+            *(tokens(m[k].get("total")) for k in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens")),
+            "—" if hours is None else f"{hours / 3600:.1f}",
+            "—" if median is None else f"{median / 60:.1f}",
+        ]
+        lines.append(columns(r) + " " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -438,6 +512,7 @@ def main() -> None:
     (RUNS / "results.json").write_text(json.dumps(runs, indent=2) + "\n")
     (RUNS / "scoreboard.md").write_text(table(runs))
     (RUNS / "failures.md").write_text(failures(runs))
+    (RUNS / "usage.md").write_text(usage_table(runs))
     charts = ROOT / "docs" / "assets" / "charts"
     charts.mkdir(parents=True, exist_ok=True)
     done = [r for r in runs if all(s["finished"] == s["total"] for s in r["scores"].values())]

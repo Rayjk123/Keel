@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 from pathlib import Path
@@ -14,6 +15,7 @@ REMOTE_DIR = "/tmp/keel"
 REMOTE_AGENT_PATH = f"{REMOTE_DIR}/agent.ts"
 DEFAULT_BASE_URL = "http://host.docker.internal:11434/v1"
 LOAD_NVM = '. "$HOME/.nvm/nvm.sh"'
+USAGE_FILE = "usage.json"
 
 
 class KeelAgent(BaseInstalledAgent):
@@ -39,7 +41,14 @@ class KeelAgent(BaseInstalledAgent):
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
-        pass
+        try:
+            usage = json.loads((self.logs_dir / USAGE_FILE).read_text())
+        except (OSError, ValueError):
+            return
+        context.n_input_tokens = usage.get("input_tokens")
+        context.n_cache_tokens = usage.get("cache_read_tokens")
+        context.n_output_tokens = usage.get("output_tokens")
+        context.metadata = {"steps": usage.get("steps"), "cache_write_tokens": usage.get("cache_write_tokens")}
 
     @override
     @with_prompt_template
@@ -50,6 +59,7 @@ class KeelAgent(BaseInstalledAgent):
             "BASE_URL": os.environ.get("KEEL_BASE_URL", DEFAULT_BASE_URL),
             "MODEL": self.model_name.split("/", 1)[-1],
             "ADAPTER": os.environ.get("KEEL_ADAPTER", "native"),
+            "USAGE_FILE": f"/logs/agent/{USAGE_FILE}",
         }
         if os.environ.get("KEEL_API_KEY"):
             env["API_KEY"] = os.environ["KEEL_API_KEY"]
